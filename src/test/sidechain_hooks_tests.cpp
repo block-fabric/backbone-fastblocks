@@ -9,6 +9,7 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <hash.h>
+#include <node/miner.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -19,6 +20,7 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <txmempool.h>
 #include <validation.h>
 
 #include <boost/test/unit_test.hpp>
@@ -116,6 +118,36 @@ CTxOut WithdrawalOut(CAmount amount)
     return CTxOut{amount, sidechain::WithdrawalScript(1000, keyhash, GetScriptForDestination(WitnessV0KeyHash{keyhash}))};
 }
 
+/**
+ * Hooks with peg actions of their own: a block that takes the peg actions owes 7 satoshis to the
+ * script of its coinbase's first output, and every block notes what its coinbase paid out, under a
+ * table byte of its own.
+ */
+const sidechain::Table<uint32_t, int64_t> MINTED_TABLE{0xF0};
+
+struct OwedHooks : sidechain::ChainHooks {
+    mutable std::vector<CBlock> seen;
+    bool BeforePegStep(sidechain::State&, const CBlock& block, int, const sidechain::PegStep&, const Consensus::SidechainParams&,
+                       std::vector<CTxOut>& owed_tx, std::string&) const override
+    {
+        seen.push_back(block);
+        owed_tx.emplace_back(7, block.vtx.at(0)->vout.at(0).scriptPubKey);
+        return true;
+    }
+    bool AfterBlock(sidechain::State& state, const CBlock&, int height, const std::optional<sidechain::PegStep>&, CAmount minted,
+                    const Consensus::SidechainParams&, std::string&) const override
+    {
+        MINTED_TABLE.Put(state.Writable(), static_cast<uint32_t>(height), minted);
+        return true;
+    }
+};
+
+/** A chain that is a sidechain in slot 3, with a record of its mainchain the test writes. */
+struct SidechainSetup : public TestingSetup {
+    SidechainSetup() : TestingSetup{ChainType::REGTEST, {.extra_args = {"-sidechainslot=3"}}} {}
+    sidechain::Mainchain& Record() { return *Assert(m_node.chainman->m_mainchain); }
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(sidechain_hooks_tests, TestingSetup)
@@ -192,7 +224,7 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     std::vector<CTxOut> owed_tx;
     BOOST_CHECK(hooks.BeforePegStep(side, block, 1, *step, Params().GetConsensus().sidechain, owed_tx, reason));
     BOOST_CHECK(owed_tx.empty());
-    BOOST_CHECK(hooks.AfterBlock(side, block, 1, step, Params().GetConsensus().sidechain, reason));
+    BOOST_CHECK(hooks.AfterBlock(side, block, 1, step, /*minted=*/0, Params().GetConsensus().sidechain, reason));
     BOOST_CHECK(store.Changes().empty());
 
     // Proof of work for every header.
@@ -491,6 +523,86 @@ BOOST_AUTO_TEST_CASE(template_refunds_anywhere)
     std::string reason;
     BOOST_CHECK(!state.ApplyTx(Tx({CTxOut{0, sidechain::RefundScript(request)}}), 1, params, payouts, reason, /*main_pending=*/false, /*peg_step=*/false));
     BOOST_CHECK_EQUAL(reason, "bad-sc-refund-unknown");
+}
+
+BOOST_AUTO_TEST_CASE(own_peg_actions)
+{
+    // What a sidechain's own peg actions owe is paid by the coinbase, as refunds are; the notes it
+    // takes of a block (AfterBlock) see what the coinbase paid out, and go in the state.
+    InstallHooks installed{std::make_unique<OwedHooks>()};
+    const Consensus::SidechainParams& params{Params().GetConsensus().sidechain};
+    sidechain::Mainchain mainchain;
+    AppendMain(mainchain, 100);
+    sidechain::EmptyStore empty;
+    CAmount minted{-1};
+    std::string reason;
+    CBlock block{CoinbaseBlock(false)};
+    AppendMain(mainchain, 101, block.GetHash());
+    {
+        // The coinbase does not pay it.
+        sidechain::StoreOverlay store{empty, /*journal=*/true};
+        sidechain::State state{store};
+        BOOST_CHECK(!state.ConnectBlock(block, 1, params, mainchain, minted, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-sc-payouts-missing");
+    }
+    CBlock paying{CoinbaseBlock(false, {CTxOut{7, CScript() << OP_TRUE}})};
+    AppendMain(mainchain, 102, paying.GetHash());
+    sidechain::StoreOverlay store{empty, /*journal=*/true};
+    sidechain::State state{store};
+    BOOST_CHECK_MESSAGE(state.ConnectBlock(paying, 1, params, mainchain, minted, reason), reason);
+    BOOST_CHECK_EQUAL(minted, 7);
+    BOOST_CHECK(MINTED_TABLE.Get(state.View(), 1) == std::optional<int64_t>{7});
+    // Taken back with the block's undo data.
+    store.Revert(store.TakeUndo());
+    BOOST_CHECK(!MINTED_TABLE.Get(store, 1));
+}
+
+BOOST_FIXTURE_TEST_CASE(assembly_takes_own_peg_actions, SidechainSetup)
+{
+    // Block assembly calls the sidechain's own peg actions too, with the block as far as it is known
+    // (parent, sections, a coinbase paying to the coinbase script), and its coinbase pays what they owe.
+    auto owned{std::make_unique<OwedHooks>()};
+    const OwedHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock main;
+    main.hash = uint256{0x51};
+    BOOST_REQUIRE(Record().Append(main));
+    const CScript script{CScript() << OP_2};
+    node::BlockCreateOptions options;
+    options.coinbase_output_script = script;
+    options.test_block_validity = false;
+    Chainstate& chainstate{m_node.chainman->ActiveChainstate()};
+    const uint256 tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash())};
+
+    // The template's block: the peg actions as of the next mainchain block.
+    {
+        const auto block_template{node::BlockAssembler{chainstate, m_node.mempool.get(), options}.CreateNewBlock()};
+        BOOST_REQUIRE_EQUAL(hooks.seen.size(), 1U);
+        BOOST_CHECK(hooks.seen[0].hashPrevBlock == tip);
+        BOOST_CHECK(hooks.seen[0].vtx.at(0)->vout.at(0) == CTxOut(0, script));
+        BOOST_CHECK(hooks.seen[0].vSections.empty());
+        const CTransaction& coinbase{*block_template->block.vtx.at(0)};
+        BOOST_REQUIRE_GE(coinbase.vout.size(), 2U);
+        BOOST_CHECK(coinbase.vout[1] == CTxOut(7, script));
+    }
+    // A block with the peg actions of a given step, and sections.
+    node::SidechainAssembly assembly;
+    assembly.peg = node::SidechainAssembly::Peg::STEP;
+    assembly.step = sidechain::PegStep{.main_height = 0, .nonce = tip, .max_withdrawal_height = std::nullopt};
+    assembly.sections = {1, 2, 3};
+    {
+        const auto block_template{node::BlockAssembler{chainstate, m_node.mempool.get(), options, assembly}.CreateNewBlock()};
+        BOOST_REQUIRE_EQUAL(hooks.seen.size(), 2U);
+        BOOST_CHECK(hooks.seen[1].vSections == assembly.sections);
+        BOOST_CHECK(block_template->block.vtx.at(0)->vout.at(1) == CTxOut(7, script));
+    }
+    // A block without the peg actions: none of the sidechain's own either, and nothing paid.
+    assembly.peg = node::SidechainAssembly::Peg::NONE;
+    {
+        const auto block_template{node::BlockAssembler{chainstate, m_node.mempool.get(), options, assembly}.CreateNewBlock()};
+        BOOST_CHECK_EQUAL(hooks.seen.size(), 2U);
+        for (const CTxOut& out : block_template->block.vtx.at(0)->vout) BOOST_CHECK(out != CTxOut(7, script));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -75,6 +75,8 @@ struct SidechainAssembly {
     sidechain::PegStep step;
     //! If set, only the transactions it accepts go in, without what depends on those it refuses.
     std::function<bool(const CTransaction&)> tx_filter;
+    //! The sections of the block (CBlock::vSections), which the sidechain's hooks see (BeforePegStep).
+    std::vector<unsigned char> sections;
 };
 
 /** Generate a new block, without valid proof-of-work */
