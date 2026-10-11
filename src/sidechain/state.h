@@ -118,6 +118,7 @@ struct RefundRequest {
 };
 
 class Mainchain;
+struct PegStep;
 
 /**
  * The sidechain state implied by a chain of blocks and the record of the mainchain, read from a
@@ -154,6 +155,21 @@ public:
     // The steps of ConnectBlock, in the order it takes them. Block assembly
     // takes the same steps to learn what a block has to contain.
     //
+    // In the template every block takes the peg actions (ApplyPegStep), then its transactions
+    // (ApplyTxs), then pays (TakePayouts). A sidechain may have blocks that take no peg actions
+    // (sidechain::ChainHooks::GetPegStep): they only apply their transactions, and pay nothing.
+    //
+
+    /**
+     * The peg actions of a block, as the mainchain was up to `step.main_height`: what the mainchain
+     * did (ApplyMainEvents), then the bundle the coinbase commits to, if any.
+     * @param[out] main_pending  see MainPending, for the transactions of the block
+     */
+    [[nodiscard]] bool ApplyPegStep(const CBlock& block, int height, const PegStep& step, const Consensus::SidechainParams& params, const Mainchain& mainchain,
+                                    std::vector<CTxOut>& payouts, bool& main_pending, std::string& reject_reason);
+    /** The transactions of a block, but the coinbase (ApplyTx). @param[in] peg_step  whether the block takes the peg actions */
+    [[nodiscard]] bool ApplyTxs(const CBlock& block, int height, const Consensus::SidechainParams& params, bool main_pending, bool peg_step,
+                                std::vector<CTxOut>& tx_payouts, std::string& reject_reason);
 
     /**
      * Follow the mainchain up to `main_height`: note the outcome of the
@@ -166,9 +182,14 @@ public:
      * The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can
      * be made now. A bundle of another branch pending on the mainchain does not hold it back.
      */
-    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr) const;
-    /** Make the bundle with the hash `hash` the pending one. */
-    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason);
+    std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr,
+                                                  std::optional<int32_t> max_withdrawal_height = std::nullopt) const;
+    /**
+     * Make the bundle with the hash `hash` the pending one.
+     * @param[in] max_withdrawal_height  if set, the bundle takes only withdrawals made at this height or below (PegStep)
+     */
+    [[nodiscard]] bool StartBundle(const uint256& hash, int height, const uint256& prev, const Consensus::SidechainParams& params, std::string& reject_reason,
+                                   std::optional<int32_t> max_withdrawal_height = std::nullopt);
     /**
      * Whether a bundle of this sidechain other than its own, pending on the mainchain with support
      * (see SidechainParams::pending_min_score), holds refunds back for a block with this state: as
@@ -188,9 +209,9 @@ public:
      * rules pay out), so that transactions, however many, cannot hold deposits
      * back. Each queue has half of the block, and what one does not use goes to
      * the other, so that neither holds the other back. The rest is queued for
-     * the next blocks.
+     * the next blocks. A block that takes no peg actions pays none (`max_payouts` 0): what it owes is queued.
      */
-    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx);
+    std::vector<CTxOut> TakePayouts(std::vector<CTxOut> owed, std::vector<CTxOut> owed_tx, uint64_t max_payouts = MAX_PAYOUTS_PER_BLOCK);
     /** Payouts owed and not paid yet, oldest first: from the mainchain, and from transactions. */
     std::vector<CTxOut> Queue() const;
     std::vector<CTxOut> TxQueue() const;
@@ -199,7 +220,7 @@ public:
      * All or nothing: a transaction that breaks a rule changes nothing.
      */
     [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                               std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending = false);
+                               std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending = false, bool peg_step = true);
 
     /** Whether a refund request could be mined now. @param[in] main_pending  see MainPending */
     [[nodiscard]] bool CheckRefund(const RefundRequest& request, std::string& reject_reason, bool main_pending = false) const;
@@ -229,7 +250,7 @@ protected:
     StoreOverlay& Writable() const;
     /** ApplyTx, on an overlay of its own. */
     [[nodiscard]] bool ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending);
+                                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending, bool peg_step = true);
 
 private:
     void AddWithdrawal(const Withdrawal& withdrawal);

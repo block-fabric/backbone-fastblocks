@@ -42,6 +42,7 @@
 #include <random.h>
 #include <script/script.h>
 #include <script/sigcache.h>
+#include <sidechain/hooks.h>
 #include <signet.h>
 #include <tinyformat.h>
 #include <txdb.h>
@@ -2910,7 +2911,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
             // What is not on record yet is no fault of the peer that sent the block. Nor, to VerifyDB,
             // is a block of the chain the record does not agree with any more a sign of a corrupt database.
-            const bool not_yet{reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
+            const bool not_yet{sidechain::Hooks().IsWaitReason(reject_reason) || reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
             state.Invalid(not_yet ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
@@ -4251,8 +4252,8 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
 
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
-    // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+    // Check proof of work matches claimed amount (none for a block of a kind of a sidechain's own)
+    if (fCheckPOW && !sidechain::CheckHeaderWork(block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
 
     return true;
@@ -4360,6 +4361,10 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if (fCheckMerkleRoot && !CheckMerkleRoot(block, state)) {
         return false;
     }
+    // And, in an extended block, the sections: like the transactions, data the header commits to.
+    if (fCheckMerkleRoot && !sidechain::CheckSections(block)) {
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-sections-hash", "the sections are not those the header commits to");
+    }
 
     // All potential-corruption validation must be done before we do any
     // transaction validation, as otherwise we may mark the header as invalid
@@ -4415,6 +4420,9 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     if (nSigOps * WITNESS_SCALE_FACTOR > consensusParams.MaxBlockSigOpsCost())
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "out-of-bounds SigOpCount");
 
+    // The context free rules of a sidechain's own (none in the template).
+    if (!sidechain::Hooks().CheckBlock(block, state)) return false;
+
     if (fCheckPOW && fCheckMerkleRoot)
         block.fChecked = true;
 
@@ -4460,7 +4468,7 @@ void ChainstateManager::GenerateCoinbaseCommitment(CBlock& block, const CBlockIn
 bool HasValidProofOfWork(std::span<const CBlockHeader> headers, const Consensus::Params& consensusParams)
 {
     return std::ranges::all_of(headers,
-                               [&](const auto& header) { return CheckProofOfWork(header.GetHash(), header.nBits, consensusParams); });
+                               [&](const auto& header) { return sidechain::CheckHeaderWork(header, consensusParams); });
 }
 
 bool IsBlockMutated(const CBlock& block, bool check_witness_root)
@@ -4468,6 +4476,10 @@ bool IsBlockMutated(const CBlock& block, bool check_witness_root)
     BlockValidationState state;
     if (!CheckMerkleRoot(block, state)) {
         LogDebug(BCLog::VALIDATION, "Block mutated: %s\n", state.ToString());
+        return true;
+    }
+    if (!sidechain::CheckSections(block)) {
+        LogDebug(BCLog::VALIDATION, "Block mutated: its sections are not those its header commits to\n");
         return true;
     }
 
@@ -4522,18 +4534,28 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     assert(pindexPrev != nullptr);
     const int nHeight = pindexPrev->nHeight + 1;
 
-    // Check proof of work
+    // A block of a kind of a sidechain's own has no proof of work; the sidechain checks its header.
     const Consensus::Params& consensusParams = chainman.GetConsensus();
-    if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
+    const sidechain::BlockKind kind{sidechain::Hooks().Kind(block)};
+
+    // Check proof of work
+    if (kind == sidechain::BlockKind::BMM && block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
     // Check timestamp against prev
     if (block.GetBlockTime() <= pindexPrev->GetMedianTimePast())
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-too-old", "block's timestamp is too early");
 
-    // Blind merged mining: a block of a sidechain is one that a mainchain block
-    // committed to, and the mainchain commits to the blocks of a chain in order.
-    if (consensusParams.sidechain.enabled) {
+    if (kind != sidechain::BlockKind::BMM) {
+        if (!sidechain::Hooks().CheckHeader(block, *pindexPrev, chainman, state)) {
+            if (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE && sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
+                chainman.AddBmmWaiting(block, /*peer=*/-1);
+            }
+            return false;
+        }
+    } else if (consensusParams.sidechain.enabled) {
+        // Blind merged mining: a block of a sidechain is one that a mainchain block
+        // committed to, and the mainchain commits to the blocks of a chain in order.
         const sidechain::Mainchain& mainchain{*Assert(chainman.m_mainchain)};
         const uint256 hash{block.GetHash()};
         auto bmm_height{mainchain.BmmHeight(hash)};
@@ -4548,8 +4570,15 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
             chainman.AddBmmWaiting(block, /*peer=*/-1);
             return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-unknown", "no mainchain block is known to commit to this block");
         }
-        if (pindexPrev->pprev) {
-            const auto prev_bmm_height{mainchain.BmmHeight(pindexPrev->GetBlockHash())};
+        // In order after the last block below that needs a commitment: the parent, in the template.
+        const CBlockIndex* committed_prev{pindexPrev};
+        std::optional<uint256> prev_commitment{sidechain::Hooks().CommitmentOf(*committed_prev)};
+        while (!prev_commitment && committed_prev->pprev) {
+            committed_prev = committed_prev->pprev;
+            prev_commitment = sidechain::Hooks().CommitmentOf(*committed_prev);
+        }
+        if (committed_prev->pprev && prev_commitment) {
+            const auto prev_bmm_height{mainchain.BmmHeight(*prev_commitment)};
             if (!prev_bmm_height) return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "bmm-prev-unknown", "no mainchain block is known to commit to the previous block");
             if (*bmm_height <= *prev_bmm_height) return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bmm-order", "the mainchain committed to this block before it committed to the previous block");
         }

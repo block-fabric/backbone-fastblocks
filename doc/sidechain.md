@@ -212,13 +212,42 @@ chains-cli -regtest listwithdrawalbundles 3
    go next to the sidechain rules in `sidechain::State::ConnectBlock`, with
    their state in `sidechain::State` if they have any; it is stored and
    reverted with the rest.
-6. Have the sidechain proposed and activated on the mainchain
+6. For blocks that are not all merged mined (a block producer of your own, a
+   chain order of your own, blocks that take the peg actions only now and
+   then), derive from `sidechain::ChainHooks` and install it with
+   `sidechain::SetHooks` at startup; see "Hooks" below.
+7. Have the sidechain proposed and activated on the mainchain
    (`createsidechainproposal` there), with the hash of your release as its
    identifier.
 
 Run `ctest --test-dir build` and `build/test/functional/test_runner.py`; the
 sidechain test needs a built mainchain tree next to this one (`../chains`),
 or `MAINCHAIN_BIN_DIR` set to the directory of its programs.
+
+## Hooks
+
+`src/sidechain/hooks.h` has the extension points for sidechains whose blocks
+are not all merged mined. Nothing changes unless a sidechain installs hooks of
+its own (`sidechain::SetHooks`, at startup, before any block is read): the
+defaults are the template's behaviour, which `src/test/sidechain_hooks_tests.cpp`
+checks.
+
+| Hook | Where it is called | Default |
+|---|---|---|
+| `BlockExtensions` | once, at `SetHooks`: switches extended blocks on (`BLOCK_EXTENSION_BIT` in `nVersion`: a 32-byte `hashSections` and a 64-byte signature after the 80-byte header, and `vSections` after the transactions, in blocks, the block index, `headers` and compact blocks) | off: the bit means nothing |
+| `Kind`, `CheckHeader` | `ContextualCheckBlockHeader`: a `PLUGIN` block has no proof of work and no BMM rule; the sidechain checks its header | every block is `BMM` |
+| `CheckBlock`, `SectionsHash` | `CheckBlock`; sections other than those the header commits to make the block mutated (`bad-sections-hash`) | no rules; tagged hash `sidechain/sections` |
+| `CustomChainOrder`, `ChainWork` | `nChainWork` when a header is added or the index loaded; with a chain order of its own, headers presync (a minimum of work) is skipped | most work |
+| `IsWaitReason`, `WaitingReady` | headers that may become valid later wait in the bounded set of `ChainstateManager::AddBmmWaiting`, and are tried again in this order | `bmm-unknown`, by commitment height |
+| `CommitmentOf`, `BlocksCommittedBy` | the BMM order rule, the Follower (blocks that lost their commitment, catching up) | a block needs a commitment to its own hash |
+| `GetPegStep`, `BeforePegStep`, `AfterBlock`, `RefundsOnlyInPegSteps` | `State::ConnectBlock`, split into `ApplyPegStep` (mainchain events, bundle), `ApplyTxs` and `TakePayouts`. A block without a peg step pays nothing (what it owes is queued), cannot start a bundle (`bad-sc-bundle-not-peg`) and, with the switch, takes no refund request (`bad-sc-refund-not-peg`). `PegStep::max_withdrawal_height` limits the withdrawals a bundle takes | every block takes the peg actions as committed, with its parent as the bundle nonce |
+| `node::SidechainAssembly` | `BlockAssembler`: a block with the template's peg actions, none, or those of a given `PegStep`, and a transaction filter | the template's block |
+| `FollowerRound`, `StartServices`, `StopServices` | the Follower's loop (in place of its merged mining), and node start and shutdown | the Follower mines; no services |
+| `ProcessMessage`; `PeerManager::SendSidechainMessage`, `BroadcastSidechainMessage` | message types Bitcoin does not know, after the handshake | ignored |
+
+`Follower::RequestCommitment` also takes any hash to commit to, and
+`Mainchain` has `HashAt(height)` and `TimeHeight(time)` (the highest block
+with a median time at or below `time`).
 
 ## Limits to know
 
