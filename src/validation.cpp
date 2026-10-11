@@ -5374,12 +5374,16 @@ void Chainstate::ReaddRolledBackTransactions()
     LOCK(m_mempool->cs);
     // In the order of DisconnectedBlockTransactions (AddTransactionsFromBlock takes a block's
     // transactions last first): MaybeUpdateMempoolForReorg adds the earliest confirmed first.
+    // Those already there (a wallet loaded meanwhile resubmits its own) are left alone: offered
+    // again they would fail, and MaybeUpdateMempoolForReorg removes what fails, with what spends it.
+    std::vector<CTransactionRef> missing;
+    std::copy_if(txs.rbegin(), txs.rend(), std::back_inserter(missing), [&](const CTransactionRef& tx) { return !m_mempool->exists(tx->GetHash()); });
     DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_BYTES};
-    (void)disconnectpool.AddTransactionsFromBlock({txs.rbegin(), txs.rend()});
-    const size_t before{m_mempool->size()};
+    (void)disconnectpool.AddTransactionsFromBlock(missing);
     // Those in a block connected since (another branch), or that no longer pass, are left out.
     MaybeUpdateMempoolForReorg(disconnectpool, /*fAddToMempool=*/true);
-    LogInfo("%u of the %u transactions of the blocks taken back at startup returned to the mempool", m_mempool->size() - before, txs.size());
+    const size_t in_mempool{size_t(std::count_if(txs.begin(), txs.end(), [&](const CTransactionRef& tx) { return m_mempool->exists(tx->GetHash()); }))};
+    LogInfo("%u of the %u transactions of the blocks taken back at startup returned to the mempool", in_mempool, txs.size());
 }
 
 bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_str& error)
