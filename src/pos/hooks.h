@@ -132,6 +132,8 @@ public:
     /** Whether a BMM block built now would be in stall mode (and may take transactions). */
     bool Stalled(const FastState& fast, int64_t main_time) const;
     const Producer* GetProducer() const { return m_producer.get(); }
+    /** Why the block producer the options ask for could not start; empty if it did, or none was asked for. */
+    std::string ProducerError() const { return m_producer_error; }
 
 private:
     /** The acknowledgement in a PoS block, read from its sections, noted by commitment. */
@@ -154,6 +156,7 @@ private:
 
     mutable node::NodeContext* m_node{nullptr};
     mutable std::unique_ptr<Producer> m_producer;
+    mutable std::string m_producer_error;
     //! The mainchain block for which a ticket was last asked for.
     mutable Mutex m_anchor_mutex;
     mutable uint256 m_ticket_requested_for GUARDED_BY(m_anchor_mutex);

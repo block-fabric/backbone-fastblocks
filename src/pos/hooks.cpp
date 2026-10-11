@@ -512,6 +512,7 @@ void FastBlocksHooks::StartServices(node::NodeContext& node) const
     m_node = &node;
     std::string error;
     m_producer = Producer::FromArgs(node, *this, error);
+    m_producer_error = error;
     if (!error.empty()) {
         LogError("FastBlocks: no block producer: %s", error);
         return;

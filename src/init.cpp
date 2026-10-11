@@ -2258,6 +2258,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         node.follower->Start();
         // And the services of a sidechain's own, such as a block producer (none in the template).
         sidechain::Hooks().StartServices(node);
+        // FastBlocks: a validator node that cannot make blocks (keys that do not read, or a key file another
+        // node holds) does not start.
+        if (const auto* fastblocks{pos::InstalledHooks()}; fastblocks && !fastblocks->ProducerError().empty()) {
+            return InitError(Untranslated(strprintf("FastBlocks block producer: %s", fastblocks->ProducerError())));
+        }
     }
 
     // ********************************************************* Step 12: start node
