@@ -5554,17 +5554,26 @@ util::Result<void> Chainstate::LoadDrivechainState()
         LogWarning("Block %s at height %d does not fit the record of the mainchain as it is; the chain goes back to height %d, to be checked again",
                    stopped->GetBlockHash().ToString(), stopped->nHeight, parent->nHeight);
         CCoinsViewCache view{&CoinsTip()};
+        // Their transactions are offered to the mempool again (ReaddRolledBackTransactions), as after
+        // RollBackFromInvalidBlock: the blocks may never connect again.
+        DisconnectedBlockTransactions disconnected{MAX_DISCONNECTED_TX_POOL_BYTES};
         for (const CBlockIndex* block_index{tip}; block_index != parent; block_index = block_index->pprev) {
             CBlock block;
             if (!m_blockman.ReadBlock(block, *block_index)) {
+                disconnected.clear();
                 return util::Error{strprintf(_("Failed to read block %s. Restart with -reindex."), block_index->GetBlockHash().ToString())};
             }
             // The coins only: the sidechain database never got to this block.
             if (DisconnectBlock(block, block_index, view) != DISCONNECT_OK) {
+                disconnected.clear();
                 return util::Error{strprintf(_("Failed to take block %s back. Restart with -reindex-chainstate."), block_index->GetBlockHash().ToString())};
             }
+            (void)disconnected.AddTransactionsFromBlock(block.vtx);
         }
         view.Flush(/*reallocate_cache=*/false);
+        for (CTransactionRef& tx : disconnected.take()) {
+            if (!tx->IsCoinBase()) m_rolled_back_txs.push_back(std::move(tx));
+        }
         m_chain.SetTip(*const_cast<CBlockIndex*>(parent));
         m_scdb = std::move(scdb);
         WriteDrivechainState();
