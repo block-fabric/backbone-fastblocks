@@ -153,6 +153,10 @@ value reaches the mainchain's miners.
   acknowledgement), relays it, and bids for its commitment (what the pot will
   pay, less 1 %); after `stall_seconds` without PoS blocks, it merged mines
   BMM blocks as the template does.
+- A node keeps at most 1000 tickets; a flood from a peer pushes out the oldest,
+  but not the node's own nor those the mainchain committed to. Until its
+  committed ticket is acknowledged, the merged miner relays it again once per
+  mainchain block.
 
 `getposinfo` shows the validators, the slot and its leader, anchors, the pot
 and the producer.

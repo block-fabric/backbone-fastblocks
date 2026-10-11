@@ -33,6 +33,8 @@ class Producer;
 inline constexpr const char* MSG_TICKET{"fbticket"};
 //! Tickets a node keeps, at most: the oldest go first.
 inline constexpr size_t MAX_TICKETS{1000};
+//! Acknowledging blocks whose commitment a node keeps in memory, at most (others are read from disk).
+inline constexpr size_t MAX_NOTED_ACKS{20000};
 
 /**
  * What the state of the chain says about anchors, the fee pot and PoS blocks, after a block: one
@@ -116,8 +118,8 @@ public:
 
     /** The slot of the last PoS block at or below `index`, if any. */
     static std::optional<int64_t> LastPosSlot(const CBlockIndex* index, const Consensus::PosParams& params);
-    /** Note a ticket (from this node or a peer). @return whether it was new */
-    bool AddTicket(const AnchorTicket& ticket) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
+    /** Note a ticket (`own`: this node's merged miner made it). @return whether it was new */
+    bool AddTicket(const AnchorTicket& ticket, bool own = false) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     std::optional<AnchorTicket> GetTicket(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     std::vector<AnchorTicket> Tickets() const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     /** Relay a ticket to the peers (but `except`). */
@@ -149,10 +151,12 @@ private:
     //! Commitment (h*) of each acknowledging block seen, and the blocks of each commitment.
     mutable std::map<uint256, uint256> m_ack_of GUARDED_BY(m_acks_mutex);
     mutable std::map<uint256, std::set<uint256>> m_acks_by_commitment GUARDED_BY(m_acks_mutex);
+    mutable std::deque<std::pair<uint256, uint256>> m_ack_order GUARDED_BY(m_acks_mutex);
 
     mutable Mutex m_tickets_mutex;
     mutable std::map<uint256, AnchorTicket> m_tickets GUARDED_BY(m_tickets_mutex);
     mutable std::deque<uint256> m_ticket_order GUARDED_BY(m_tickets_mutex);
+    mutable std::set<uint256> m_own_tickets GUARDED_BY(m_tickets_mutex);
 
     mutable node::NodeContext* m_node{nullptr};
     mutable std::unique_ptr<Producer> m_producer;
@@ -160,6 +164,8 @@ private:
     //! The mainchain block for which a ticket was last asked for.
     mutable Mutex m_anchor_mutex;
     mutable uint256 m_ticket_requested_for GUARDED_BY(m_anchor_mutex);
+    //! The mainchain block for which this node's committed ticket was last relayed again.
+    mutable uint256 m_ticket_relayed_for GUARDED_BY(m_anchor_mutex);
 };
 
 /** The FastBlocks hooks installed, if they are. */

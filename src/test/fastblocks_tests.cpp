@@ -881,6 +881,27 @@ BOOST_FIXTURE_TEST_CASE(fork_choice, FastBlocksSetup)
     BOOST_CHECK(Tip()->pprev->GetBlockHash() == b.GetHash());
 }
 
+BOOST_FIXTURE_TEST_CASE(ticket_pool, FastBlocksSetup)
+{
+    // A peer that sends tickets by the thousand pushes out the oldest, but not this node's own nor
+    // those the mainchain committed to.
+    const pos::AnchorTicket own{Ticket(Tip()->GetBlockHash(), script)};
+    BOOST_CHECK(Hooks().AddTicket(own, /*own=*/true));
+    BOOST_CHECK(!Hooks().AddTicket(own));
+    const pos::AnchorTicket committed{Ticket(Tip()->GetBlockHash(), GetScriptForDestination(WitnessV0KeyHash{*uint160::FromHex("0606060606060606060606060606060606060606")}))};
+    Commit(committed.Hash());
+    BOOST_CHECK(Hooks().AddTicket(committed));
+    const pos::AnchorTicket first_junk{Ticket(uint256{1}, script)};
+    for (uint32_t i{1}; i <= pos::MAX_TICKETS + 100; ++i) {
+        pos::AnchorTicket junk{Ticket(ArithToUint256(arith_uint256{i}), script)};
+        BOOST_CHECK(Hooks().AddTicket(junk));
+    }
+    BOOST_CHECK(Hooks().GetTicket(own.Hash()));
+    BOOST_CHECK(Hooks().GetTicket(committed.Hash()));
+    BOOST_CHECK(!Hooks().GetTicket(first_junk.Hash()));
+    BOOST_CHECK_EQUAL(Hooks().Tickets().size(), pos::MAX_TICKETS);
+}
+
 BOOST_AUTO_TEST_CASE(hooks_without_context)
 {
     // Hooks not attached to a chainstate refuse what they cannot check.

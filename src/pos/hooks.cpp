@@ -100,15 +100,16 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
         return invalid("bad-pos-time", "a block of stake has the time its slot starts");
     }
     const int64_t slot{SlotOf(time, m_params)};
-    if (const auto last{LastPosSlot(&prev, m_params)}; last && slot <= *last) {
-        return invalid("bad-pos-slot", "a block of stake comes in a later slot than the one before it");
-    }
     if (header.Time() > NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}) {
         return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-time-future", "the slot of the block of stake has not started");
     }
+    // The signature before anything that reads the chain: only a leader makes the node look further.
     const auto leader{m_validators.Leader(slot, m_params, m_chain_params.GetConsensus().hashGenesisBlock)};
     if (!leader || !CheckBlockSig(header, m_validators.Validators()[*leader].pubkey)) {
         return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
+    }
+    if (const auto last{LastPosSlot(&prev, m_params)}; last && slot <= *last) {
+        return invalid("bad-pos-slot", "a block of stake comes in a later slot than the one before it");
     }
     // An acknowledgement names a mainchain block with a commitment: not known yet, the block may be
     // tried again later (it is checked in full with the block).
@@ -172,8 +173,20 @@ void FastBlocksHooks::NoteAck(const uint256& block_hash, const AnchorAck& ack) c
 {
     const uint256 commitment{ack.ticket.Hash()};
     LOCK(m_acks_mutex);
-    m_ack_of[block_hash] = commitment;
+    if (!m_ack_of.emplace(block_hash, commitment).second) return;
     m_acks_by_commitment[commitment].insert(block_hash);
+    m_ack_order.emplace_back(block_hash, commitment);
+    // Bounded: the oldest go first (a commitment so old is not dropped by the mainchain any more; and
+    // CommitmentOf reads a block from disk when it has to).
+    while (m_ack_order.size() > MAX_NOTED_ACKS) {
+        const auto& [old_block, old_commitment] = m_ack_order.front();
+        m_ack_of.erase(old_block);
+        if (auto found{m_acks_by_commitment.find(old_commitment)}; found != m_acks_by_commitment.end()) {
+            found->second.erase(old_block);
+            if (found->second.empty()) m_acks_by_commitment.erase(found);
+        }
+        m_ack_order.pop_front();
+    }
 }
 
 std::optional<uint256> FastBlocksHooks::CommitmentOf(const CBlockIndex& index) const
@@ -397,15 +410,28 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
     return best;
 }
 
-bool FastBlocksHooks::AddTicket(const AnchorTicket& ticket) const
+bool FastBlocksHooks::AddTicket(const AnchorTicket& ticket, bool own) const
 {
     const uint256 hash{ticket.Hash()};
+    const ChainstateManager* chainman{Chainman()};
+    const sidechain::Mainchain* record{chainman ? chainman->m_mainchain.get() : nullptr};
     LOCK(m_tickets_mutex);
+    if (own) m_own_tickets.insert(hash);
     if (!m_tickets.emplace(hash, ticket).second) return false;
     m_ticket_order.push_back(hash);
-    while (m_ticket_order.size() > MAX_TICKETS) {
-        m_tickets.erase(m_ticket_order.front());
-        m_ticket_order.pop_front();
+    // Bounded: the oldest go first, but not this node's own nor those the mainchain committed to, so
+    // that a peer sending tickets by the thousand cannot push out the ones that count. (Tickets
+    // committed to long ago go too, with the oldest, once there are enough of them.)
+    for (size_t i{0}; m_ticket_order.size() > MAX_TICKETS && i < m_ticket_order.size();) {
+        const uint256 candidate{m_ticket_order[i]};
+        const bool keep{m_ticket_order.size() <= 2 * MAX_TICKETS && (m_own_tickets.contains(candidate) || (record && record->CommittedHeight(candidate)))};
+        if (keep) {
+            ++i;
+            continue;
+        }
+        m_tickets.erase(candidate);
+        m_own_tickets.erase(candidate);
+        m_ticket_order.erase(m_ticket_order.begin() + i);
     }
     return true;
 }
@@ -479,8 +505,18 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
         if (m_ticket_requested_for == main_tip) return true;
     }
     // A ticket of the last mainchain block is acknowledged first: the next one must anchor that
-    // acknowledgement or a block after it.
-    if (const auto last{record.BmmAt(main_height)}; last && fast.last_main_height < main_height && GetTicket(*last)) return true;
+    // acknowledgement or a block after it. Until then this node's ticket goes to its peers again, once
+    // per mainchain block, in case the leaders lost it.
+    if (const auto last{record.BmmAt(main_height)}; last && fast.last_main_height < main_height) {
+        if (const auto ticket{GetTicket(*last)}) {
+            LOCK(m_anchor_mutex);
+            if (m_ticket_relayed_for != main_tip && WITH_LOCK(m_tickets_mutex, return m_own_tickets.contains(*last))) {
+                m_ticket_relayed_for = main_tip;
+                RelayTicket(*ticket);
+            }
+            return true;
+        }
+    }
 
     AnchorTicket ticket;
     ticket.anchored = WITH_LOCK(::cs_main, return TicketTarget(*tip, fast)->GetBlockHash());
@@ -501,7 +537,7 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
         LogDebug(BCLog::NET, "FastBlocks: no anchor ticket for mainchain block %s: %s\n", main_tip.ToString(), error);
         return true;
     }
-    AddTicket(ticket);
+    AddTicket(ticket, /*own=*/true);
     RelayTicket(ticket);
     LogInfo("FastBlocks: anchor ticket %s for block %s, %d offered", ticket.Hash().ToString(), ticket.anchored.ToString(), offer);
     return true;
