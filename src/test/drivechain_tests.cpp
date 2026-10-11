@@ -2831,7 +2831,7 @@ BOOST_AUTO_TEST_CASE(sidechain_rules_in_the_drivechain_database)
         SidechainDB scdb;
         scdb.SetBlockHash(block.hashPrevBlock);
         CAmount minted{-1};
-        const drivechain::SideContext side{c.params, c.mainchain, minted, c.side.store, /*spent=*/{}};
+        const drivechain::SideContext side{c.params, c.mainchain, minted, c.side.store};
         const bool ok{scdb.ConnectBlock(block, 2, dc_params, undo, nullptr, reason, &side)};
         failed = side.failed;
         return ok;

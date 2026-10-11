@@ -7,7 +7,6 @@
 
 #include <chain.h>
 #include <chainparams.h>
-#include <coins.h>
 #include <common/args.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
@@ -293,14 +292,9 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         // rather than making no block at all -- the mempool is only cleaned when the tip changes.
         // One pass: a transaction that breaks a rule leaves the state as it was (ApplyTx is all or
         // nothing), and what depends on it comes after it in the block, so it goes before it is applied.
-        // The sidechain rules may read what a transaction spends: the coins of the chain, or the outputs
-        // of a transaction before it in the block, which `spendable` takes in as they are applied.
         side_tx_outputs.clear();
-        CCoinsViewCache spendable{&m_chainstate.CoinsTip()};
         for (size_t i{1}; i < pblock->vtx.size();) {
-            const CTransaction& tx{*pblock->vtx[i]};
-            if (side.ApplyTx(tx, nHeight, side_params, side_tx_outputs, reject_reason, main_pending, sidechain::SpentOutputs(tx, spendable))) {
-                AddCoins(spendable, tx, nHeight);
+            if (side.ApplyTx(*pblock->vtx[i], nHeight, side_params, side_tx_outputs, reject_reason, main_pending)) {
                 ++i;
                 continue;
             }

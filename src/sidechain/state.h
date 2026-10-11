@@ -18,12 +18,8 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <span>
 #include <string>
 #include <vector>
-
-class CBlockUndo;
-class CCoinsViewCache;
 
 /**
  * The rules that make this chain a sidechain.
@@ -149,12 +145,10 @@ public:
      *
      * @param[out] minted         the coins the coinbase has to create on top of the fees: deposits and refunds
      * @param[out] reject_reason  set when the block is invalid
-     * @param[in]  spent          the outputs the block's transactions spend, one list per transaction after the
-     *                            coinbase (SpentOutputs); empty if not known. See ApplyTx.
      * @return false if the block is invalid, in which case the overlay holds a partial update and must be dropped.
      */
     [[nodiscard]] bool ConnectBlock(const CBlock& block, int height, const Consensus::SidechainParams& params, const Mainchain& mainchain,
-                                    CAmount& minted, std::string& reject_reason, std::span<const std::vector<CTxOut>> spent = {});
+                                    CAmount& minted, std::string& reject_reason);
 
     //
     // The steps of ConnectBlock, in the order it takes them. Block assembly
@@ -203,18 +197,9 @@ public:
     /**
      * Take in the withdrawals and the refund requests of a transaction that is not a coinbase.
      * All or nothing: a transaction that breaks a rule changes nothing.
-     *
-     * @param[in] spent  the outputs the transaction spends, one per input, in the order of its inputs;
-     *                   empty if the caller does not know them. The template's own rules do not read
-     *                   them. They are there for a sidechain's rules that do: a value or a script that
-     *                   only the spent output has (a sidechain proving what it holds by spending it, say).
-     *                   Such a rule refuses a transaction whose spent outputs are not known. Validation,
-     *                   block assembly and the replay of blocks always give them (from the block's undo
-     *                   data, or the coins it spends).
      */
     [[nodiscard]] bool ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                               std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending = false,
-                               std::span<const CTxOut> spent = {});
+                               std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending = false);
 
     /** Whether a refund request could be mined now. @param[in] main_pending  see MainPending */
     [[nodiscard]] bool CheckRefund(const RefundRequest& request, std::string& reject_reason, bool main_pending = false) const;
@@ -244,8 +229,7 @@ protected:
     StoreOverlay& Writable() const;
     /** ApplyTx, on an overlay of its own. */
     [[nodiscard]] bool ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending,
-                                    std::span<const CTxOut> spent);
+                                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending);
 
 private:
     void AddWithdrawal(const Withdrawal& withdrawal);
@@ -281,17 +265,6 @@ std::string RefundMessage(const COutPoint& withdrawal);
 /** Coinbase output committing to a withdrawal bundle: BUNDLE_COMMIT_TAG | bundle hash */
 CScript BundleCommitScript(const uint256& hash);
 std::optional<uint256> ParseBundleCommitScript(const CScript& script);
-
-/**
- * The outputs a block's transactions spend, from its undo data: one list per transaction after the
- * coinbase, one output per input, in order (the `spent` of State::ConnectBlock).
- */
-std::vector<std::vector<CTxOut>> SpentOutputs(const CBlockUndo& undo);
-/**
- * The outputs a transaction spends, as `view` has them: one per input, in order (the `spent` of
- * State::ApplyTx). An input the view does not have gets an empty output (null value).
- */
-std::vector<CTxOut> SpentOutputs(const CTransaction& tx, const CCoinsViewCache& view);
 
 /**
  * Whether a block that failed for `reject_reason` (from State::ConnectBlock) fails whatever the

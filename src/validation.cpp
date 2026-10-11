@@ -2002,10 +2002,10 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
     return result;
 }
 
-std::optional<drivechain::SideContext> ChainstateManager::SideContext(CAmount& minted, sidechain::StoreOverlay& store, std::span<const std::vector<CTxOut>> spent) const
+std::optional<drivechain::SideContext> ChainstateManager::SideContext(CAmount& minted, sidechain::StoreOverlay& store) const
 {
     if (!GetConsensus().sidechain.enabled) return std::nullopt;
-    return drivechain::SideContext{GetConsensus().sidechain, *Assert(m_mainchain), minted, store, spent};
+    return drivechain::SideContext{GetConsensus().sidechain, *Assert(m_mainchain), minted, store};
 }
 
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams)
@@ -2881,9 +2881,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     sidechain::StoreOverlay block_store{side_base, /*journal=*/true};
     if (state.IsValid()) {
         std::string reject_reason;
-        // What the block's transactions spend, for the sidechain rules that read it: the block's undo data has it.
-        const std::vector<std::vector<CTxOut>> spent{sidechain::SpentOutputs(blockundo)};
-        const auto side{m_chainman.SideContext(minted, block_store, spent)};
+        const auto side{m_chainman.SideContext(minted, block_store)};
         const uint256 scdb_hash{scdb->GetBlockHash()};
         // A sidechain database that has not seen a block yet is empty and fits any block.
         if (scdb->GetBlockHash().IsNull()) scdb->SetBlockHash(hashPrevBlock);
@@ -2917,7 +2915,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         } else if (scdb_check) {
             CAmount check_minted{0};
             sidechain::StoreOverlay check_store{side_base, /*journal=*/true};
-            const auto check_side{m_chainman.SideContext(check_minted, check_store, spent)};
+            const auto check_side{m_chainman.SideContext(check_minted, check_store)};
             drivechain::BlockUndo check_undo;
             std::vector<drivechain::Deposit> check_deposits;
             std::string check_reason;
@@ -5596,22 +5594,12 @@ util::Result<void> Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& s
         if (!m_blockman.ReadBlock(block, *next)) {
             return util::Error{strprintf(_("Failed to read block %s. Restart with -reindex."), next->GetBlockHash().ToString())};
         }
-        // What the block's transactions spend, for the sidechain rules that read it: from the block's
-        // undo data, which a block of the chain has with its data.
-        std::vector<std::vector<CTxOut>> spent;
-        if (side_store && block.vtx.size() > 1) {
-            CBlockUndo block_undo;
-            if (!(next->nStatus & BLOCK_HAVE_UNDO) || !m_blockman.ReadBlockUndo(block_undo, *next)) {
-                return util::Error{strprintf(_("Failed to read the undo data of block %s. Restart with -reindex."), next->GetBlockHash().ToString())};
-            }
-            spent = sidechain::SpentOutputs(block_undo);
-        }
         drivechain::BlockUndo undo;
         std::vector<drivechain::Deposit> deposits;
         std::string reject_reason;
         CAmount minted{0};
         std::optional<sidechain::StoreOverlay> block_store;
-        const std::optional<drivechain::SideContext> side{side_store ? m_chainman.SideContext(minted, block_store.emplace(*side_store, /*journal=*/true), spent) : std::nullopt};
+        const std::optional<drivechain::SideContext> side{side_store ? m_chainman.SideContext(minted, block_store.emplace(*side_store, /*journal=*/true)) : std::nullopt};
         if (!scdb.ConnectBlock(block, height, params, undo, &deposits, reject_reason, side ? &*side : nullptr)) {
             LogError("%s: block %s breaks the drivechain rules (%s)", __func__, next->GetBlockHash().ToString(), reject_reason);
             // Back to the block before it (the undo data is complete at any point of failure); the
