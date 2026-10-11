@@ -235,9 +235,8 @@ public:
         };
 
         // This chain is a sidechain of the Chains mainchain.
-        // TODO for a new sidechain: its slot, its own message, magic bytes, port and address prefix.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, main network", .genesis_time = 1790900000,
-                       .message_start = {0x5c, 0x1d, 0xec, 0x01}, .default_port = 9655, .bech32_hrp = "sc"});
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks: a block every 30 seconds, anchored by the mainchain", .genesis_time = 1791763200,
+                       .message_start = {0x66, 0x62, 0x6c, 0x01}, .default_port = 9155, .bech32_hrp = "fbl"});
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
         // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
@@ -341,11 +340,12 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, test network", .genesis_time = 1790900000,
-                       .message_start = {0x5c, 0x1d, 0xec, 0x02}, .default_port = 19655, .bech32_hrp = "tsc"});
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet", .genesis_time = 1791763200,
+                       .message_start = {0x66, 0x62, 0x6c, 0x02}, .default_port = 19155, .bech32_hrp = "tfbl"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
+        // TODO: set it to the block that activates slot 5 on the test network, once it does.
         consensus.sidechain.main_activation_height = 0;
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
@@ -456,8 +456,8 @@ public:
         };
 
         // This chain is a sidechain of the Chains signet. Its own blocks are not signed.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, signet", .genesis_time = 1790900000,
-                       .message_start = {0x5c, 0x1d, 0xec, 0x03}, .default_port = 39655, .bech32_hrp = "tsc"});
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks signet", .genesis_time = 1791763200,
+                       .message_start = {0x66, 0x62, 0x6c, 0x03}, .default_port = 39155, .bech32_hrp = "tfbl"});
         consensus.sidechain.main_activation_height = 0;
         // The Chains signet has the rules of its main network.
         consensus.sidechain.pending_min_score = 6480;
@@ -537,11 +537,11 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
-        pchMessageStart[0] = 0x5c;
-        pchMessageStart[1] = 0x1d;
-        pchMessageStart[2] = 0xec;
+        pchMessageStart[0] = 0x66;
+        pchMessageStart[1] = 0x62;
+        pchMessageStart[2] = 0x6c;
         pchMessageStart[3] = 0x04;
-        nDefaultPort = 29655;
+        nDefaultPort = 29155;
         nPruneAfterHeight = opts.fastprune ? 100 : 1000;
 
         // On request this chain is a sidechain, with what tests need to be quick.
