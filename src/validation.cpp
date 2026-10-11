@@ -1593,11 +1593,14 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactionsInternal(con
     if (!IsWellFormedPackage(txns, package_state)) return PackageMempoolAcceptResult(package_state, {});
 
     // The drivechain checks of the mempool (one BMM request per sidechain, deposits that chain on the
-    // treasury output) look at the mempool as it is: a package member would not see the others. Such
-    // transactions come one at a time, each paying its own way.
+    // treasury output) and those of the sidechain rules (one refund per withdrawal, and what a
+    // sidechain built on this one adds: sidechain::CheckedAgainstMempool) look at the mempool as it
+    // is: a package member would not see the others. Such transactions come one at a time, each
+    // paying its own way.
     if (txns.size() > 1) {
+        const bool on_sidechain{m_active_chainstate.m_chainman.GetConsensus().sidechain.enabled};
         for (const CTransactionRef& tx : txns) {
-            const bool drivechain_tx{drivechain::GetBmmRequest(*tx).has_value() ||
+            const bool drivechain_tx{drivechain::GetBmmRequest(*tx).has_value() || (on_sidechain && sidechain::CheckedAgainstMempool(*tx)) ||
                                      std::any_of(tx->vout.begin(), tx->vout.end(), [](const CTxOut& out) { return drivechain::ParseEscrowScript(out.scriptPubKey).has_value(); })};
             if (drivechain_tx) {
                 package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package-drivechain-tx");
