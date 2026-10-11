@@ -66,6 +66,7 @@
 #include <node/cpuminer.h>
 #include <sidechain/follower.h>
 #include <sidechain/hooks.h>
+#include <pos/hooks.h>
 #include <sidechain/mainclient.h>
 #include <node/mining_args.h>
 #include <node/mining_types.h>
@@ -435,6 +436,7 @@ void Shutdown(NodeContext& node)
     }
     node.fee_estimator_man.reset();
     node.mempool.reset();
+    if (auto* fastblocks{pos::InstalledHooks()}) fastblocks->Attach(nullptr);
     node.chainman.reset();
     node.validation_signals.reset();
     node.scheduler.reset();
@@ -750,6 +752,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-rpccookieperms=<readable-by>", strprintf("Set permissions on the RPC auth cookie file so that it is readable by [owner|group|all] (default: owner [via umask 0077])"), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpcmaxconnections=<n>", strprintf("The maximum number of connected HTTP clients (default: %d)", DEFAULT_MAX_HTTP_CONNECTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-rpcpassword=<pw>", "Password for JSON-RPC connections", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::RPC);
+    argsman.AddArg("-validatorkeyfile=<file>", "FastBlocks: make blocks of stake with the validator keys in <file> (one 32-byte secret key in hex per line). The node keeps the slots it signed for in validator_protection.dat and refuses to start if another node uses the same file", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-validatorpayout=<address>", "FastBlocks: where the producer's share of the fees of its blocks of stake goes (default: the first validator key, P2WPKH)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcconnect=<ip>", "Address of the mainchain node that this sidechain node follows (default: 127.0.0.1)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcport=<port>", "JSON-RPC port of the mainchain node (default: 9554, testnet: 19554, signet: 39554, regtest: 29554)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcuser=<user>", "Username for the JSON-RPC connection to the mainchain node. Without it the cookie file of the mainchain node is used.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
@@ -1421,6 +1425,7 @@ static ChainstateLoadResult InitAndLoadChainstate(
     // This function may be called twice, so any dirty state must be reset.
     node.notifications->setChainstateLoaded(false); // Drop state, such as a cached tip block
     node.mempool.reset();
+    if (auto* fastblocks{pos::InstalledHooks()}) fastblocks->Attach(nullptr);
     node.chainman.reset(); // Drop state, such as an initialized m_block_tree_db
 
     const CChainParams& chainparams = Params();
@@ -1468,6 +1473,8 @@ static ChainstateLoadResult InitAndLoadChainstate(
     Assert(!node.chainman); // Was reset above
     try {
         node.chainman = std::make_unique<ChainstateManager>(*Assert(node.shutdown_signal), chainman_opts, blockman_opts);
+        // FastBlocks reads the block index and the mainchain record through it, from the first block it loads.
+        if (auto* fastblocks{pos::InstalledHooks()}) fastblocks->Attach(node.chainman.get());
         if (!node.chainman->m_drivechain_miner.Load(args.GetDataDirNet() / "drivechain_miner.dat")) {
             InitWarning(_("The saved drivechain settings of this node (proposals, acks, votes and withdrawal bundles) could not be read and were reset."));
         }
@@ -1950,6 +1957,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     bool do_reindex{args.GetBoolArg("-reindex", false)};
     const bool do_reindex_chainstate{args.GetBoolArg("-reindex-chainstate", false)};
 
+    // FastBlocks: its blocks of stake, anchors and order of chains, on the template's hooks, for a chain
+    // that is a sidechain (before any block is read).
+    pos::InstallHooks(chainparams);
     // Chainstate initialization and loading may be retried once with reindexing by GUI users
     auto [status, error] = InitAndLoadChainstate(
         node,

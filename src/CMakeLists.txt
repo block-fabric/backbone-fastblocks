@@ -222,6 +222,12 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   drivechain/scdb.cpp
   sidechain/follower.cpp
   sidechain/hooks.cpp
+  pos/forkchoice.cpp
+  pos/header.cpp
+  pos/hooks.cpp
+  pos/producer.cpp
+  pos/protection.cpp
+  pos/schedule.cpp
   sidechain/mainchain.cpp
   sidechain/mainclient.cpp
   sidechain/state.cpp
@@ -272,6 +278,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   rpc/blockchain.cpp
   rpc/drivechain.cpp
   rpc/sidechain.cpp
+  rpc/pos.cpp
   rpc/external_signer.cpp
   rpc/fees.cpp
   rpc/mempool.cpp

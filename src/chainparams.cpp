@@ -7,6 +7,7 @@
 
 #include <chainparamsbase.h>
 #include <common/args.h>
+#include <consensus/amount.h>
 #include <consensus/params.h>
 #include <deploymentinfo.h>
 #include <tinyformat.h>
@@ -122,6 +123,19 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (const auto slot{args.GetIntArg("-sidechainslot")}) {
         if (*slot < 0 || *slot > 0xFFFF) throw std::runtime_error("Invalid -sidechainslot");
         options.sidechain_slot = static_cast<uint32_t>(*slot);
+    }
+    for (const std::string& list : args.GetArgs("-posvalidators")) {
+        for (const std::string& item : SplitString(list, ',')) {
+            if (item.empty()) continue;
+            const auto colon{item.find(':')};
+            const std::string key{item.substr(0, colon)};
+            const auto bytes{TryParseHex<uint8_t>(key)};
+            const auto stake{colon == std::string::npos ? std::optional<int64_t>{1} : ToIntegral<int64_t>(item.substr(colon + 1))};
+            if (!bytes || bytes->size() != 32 || !stake || *stake <= 0 || *stake > MAX_MONEY) {
+                throw std::runtime_error(strprintf("Invalid -posvalidators entry (%s): a 32-byte x-only public key in hex, optionally followed by :<stake>", item));
+            }
+            options.pos_validators.push_back({.pubkey = uint256{std::span<const unsigned char>{*bytes}}, .stake = *stake});
+        }
     }
     for (const std::string& arg : args.GetArgs("-testdrivechainparam")) {
         const auto found{arg.find('@')};

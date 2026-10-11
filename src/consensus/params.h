@@ -7,6 +7,7 @@
 #define BITCOIN_CONSENSUS_PARAMS_H
 
 #include <consensus/consensus.h>
+#include <pos/params.h>
 #include <script/verify_flags.h>
 #include <uint256.h>
 
@@ -222,6 +223,8 @@ struct Params {
     int asert_anchor_height{0};
     DrivechainParams drivechain;
     SidechainParams sidechain;
+    /** FastBlocks: blocks of stake between merged mined ones. */
+    PosParams pos;
     /** Maximum weight of a block. */
     uint32_t max_block_weight{MAX_BLOCK_WEIGHT};
     /**

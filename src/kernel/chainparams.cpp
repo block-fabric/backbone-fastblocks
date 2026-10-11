@@ -97,6 +97,8 @@ void CChainParams::MakeSidechain(const SidechainIdentity& identity)
 
     pchMessageStart = identity.message_start;
     nDefaultPort = identity.default_port;
+    // Slot 0 of the blocks of stake starts with the first block.
+    consensus.pos.genesis_time = identity.genesis_time;
     bech32_hrp = identity.bech32_hrp;
 
     // The first block. It creates no coins: all coins come from the mainchain.
@@ -243,6 +245,13 @@ public:
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
+        // Blocks of stake: a slot every 30 seconds, an epoch an hour (see doc/fastblocks.md). No
+        // validators yet: until the chain has them, it is the sidechain template's, merged mined only.
+        consensus.pos.slots_per_epoch = 120;
+        consensus.pos.min_active_validators = 4;
+        consensus.pos.max_validators = 100;
+        consensus.pos.max_unanchored_slots = 1200;
+        consensus.pos.stall_seconds = 1800;
     }
 };
 
@@ -351,6 +360,12 @@ public:
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
+        // Blocks of stake: a slot every 30 seconds, an epoch 10 minutes. No validators yet.
+        consensus.pos.slots_per_epoch = 20;
+        consensus.pos.min_active_validators = 3;
+        consensus.pos.max_validators = 32;
+        consensus.pos.max_unanchored_slots = 600;
+        consensus.pos.stall_seconds = 600;
     }
 };
 
@@ -463,6 +478,12 @@ public:
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
+        // Blocks of stake: a slot every 30 seconds, an epoch 10 minutes. No validators yet.
+        consensus.pos.slots_per_epoch = 20;
+        consensus.pos.min_active_validators = 3;
+        consensus.pos.max_validators = 32;
+        consensus.pos.max_unanchored_slots = 600;
+        consensus.pos.stall_seconds = 600;
     }
 };
 
@@ -555,6 +576,15 @@ public:
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
             consensus.coinbase_maturity = 0;
+            // Blocks of stake with the validators given (-posvalidators): a slot every second, so that
+            // tests are quick. Without validators, the chain is merged mined only, as the template's.
+            consensus.pos.slot_seconds = 1;
+            consensus.pos.slots_per_epoch = 20;
+            consensus.pos.min_active_validators = 1;
+            consensus.pos.max_validators = 8;
+            consensus.pos.max_unanchored_slots = 100;
+            consensus.pos.stall_seconds = 30;
+            consensus.pos.genesis_validators = opts.pos_validators;
         }
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;
@@ -562,6 +592,7 @@ public:
         ApplyDeploymentOptions(opts.dep_opts);
 
         genesis = CreateGenesisBlock(1296688602, 2, 0x207fffff, 1, 50 * COIN);
+        consensus.pos.genesis_time = genesis.nTime;
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"});
         assert(genesis.hashMerkleRoot == uint256{"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"});

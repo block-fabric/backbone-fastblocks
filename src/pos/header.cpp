@@ -1,0 +1,107 @@
+// Copyright (c) 2026 The Chains developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <pos/header.h>
+
+#include <arith_uint256.h>
+#include <hash.h>
+#include <pubkey.h>
+#include <script/solver.h>
+#include <streams.h>
+
+#include <ios>
+
+namespace pos {
+
+bool IsPosHeader(const CBlockHeader& header) { return header.IsExtended(); }
+
+int64_t SlotOf(int64_t time, const Consensus::PosParams& params)
+{
+    if (time <= params.genesis_time) return 0;
+    return (time - params.genesis_time) / params.slot_seconds;
+}
+
+int64_t SlotTime(int64_t slot, const Consensus::PosParams& params) { return params.genesis_time + slot * params.slot_seconds; }
+
+int64_t EpochOf(int64_t slot, const Consensus::PosParams& params) { return slot / params.slots_per_epoch; }
+
+uint256 AnchorTicket::Hash() const
+{
+    HashWriter hasher{TaggedHash("hpos/ticket")};
+    hasher << *this;
+    return hasher.GetSHA256();
+}
+
+namespace {
+//! First byte of non-empty sections: an acknowledgement follows.
+constexpr uint8_t SECTION_ACK{1};
+} // namespace
+
+std::vector<unsigned char> PosSections::Encode() const
+{
+    if (!ack) return {};
+    DataStream s{};
+    // The acknowledgement, then the evidence (none yet: its count).
+    s << SECTION_ACK << *ack;
+    WriteCompactSize(s, 0);
+    return {UCharCast(s.data()), UCharCast(s.data()) + s.size()};
+}
+
+bool PosSections::Decode(std::span<const unsigned char> bytes, PosSections& sections)
+{
+    sections = {};
+    if (bytes.empty()) return true;
+    try {
+        SpanReader s{bytes};
+        uint8_t kind;
+        s >> kind;
+        // Sections with nothing in them are no bytes at all, so that the header commits to null.
+        if (kind != SECTION_ACK) return false;
+        AnchorAck ack;
+        s >> ack;
+        // Evidence comes with slashing (a later phase of the design): none is valid yet.
+        if (ReadCompactSize(s) != 0) return false;
+        if (!s.empty()) return false;
+        sections.ack = std::move(ack);
+        return true;
+    } catch (const std::ios_base::failure&) {
+        return false;
+    }
+}
+
+uint256 SectionsHash(std::span<const unsigned char> sections)
+{
+    return (TaggedHash("hpos/sections") << sections).GetSHA256();
+}
+
+uint256 BlockSigHash(const CBlockHeader& header)
+{
+    return (TaggedHash("hpos/block") << header.GetHash()).GetSHA256();
+}
+
+bool CheckBlockSig(const CBlockHeader& header, const uint256& xonly_pubkey)
+{
+    const XOnlyPubKey key{std::span<const unsigned char>{xonly_pubkey.begin(), xonly_pubkey.end()}};
+    if (!key.IsFullyValid()) return false;
+    return key.VerifySchnorr(BlockSigHash(header), header.ext.sig);
+}
+
+CScript PotScript()
+{
+    return CScript() << OP_RETURN << std::vector<unsigned char>(std::begin(POT_TAG), std::end(POT_TAG));
+}
+
+bool IsPotScript(const CScript& script) { return script == PotScript(); }
+
+bool IsValidPayee(const CScript& payee)
+{
+    if (payee.size() > MAX_PAYEE_SIZE) return false;
+    std::vector<std::vector<unsigned char>> solutions;
+    const TxoutType type{Solver(payee, solutions)};
+    return type != TxoutType::NONSTANDARD && type != TxoutType::NULL_DATA;
+}
+
+uint32_t PosBits(const uint256& pow_limit) { return UintToArith256(pow_limit).GetCompact(); }
+
+} // namespace pos
