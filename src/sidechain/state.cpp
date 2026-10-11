@@ -5,12 +5,14 @@
 #include <sidechain/state.h>
 
 #include <addresstype.h>
+#include <coins.h>
 #include <common/signmessage.h>
 #include <crypto/common.h>
 #include <drivechain/sidechain.h>
 #include <key_io.h>
 #include <pubkey.h>
 #include <sidechain/mainchain.h>
+#include <undo.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -410,14 +412,16 @@ bool State::CheckRefund(const RefundRequest& request, std::string& reject_reason
 }
 
 bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
+                    std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending, std::span<const CTxOut> spent)
 {
+    // Known, the spent outputs are those of every input.
+    Assume(spent.empty() || spent.size() == tx.vin.size());
     // All or nothing: on an overlay of its own, kept only if the transaction keeps the rules, so that
     // block assembly can leave a transaction out and go on, rather than start over.
     StoreOverlay tx_overlay{Writable(), /*journal=*/false};
     const size_t paid{payouts.size()};
     State tx_state{tx_overlay};
-    if (!tx_state.ApplyTxSteps(tx, height, params, payouts, reject_reason, main_pending)) {
+    if (!tx_state.ApplyTxSteps(tx, height, params, payouts, reject_reason, main_pending, spent)) {
         payouts.resize(paid);
         return false;
     }
@@ -426,8 +430,10 @@ bool State::ApplyTx(const CTransaction& tx, int height, const Consensus::Sidecha
 }
 
 bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
-                         std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending)
+                         std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending,
+                         [[maybe_unused]] std::span<const CTxOut> spent)
 {
+    // `spent` is for the rules of a sidechain built on the template; the template's own rules below do not read it.
     for (uint32_t n{0}; n < tx.vout.size(); ++n) {
         const CTxOut& out{tx.vout[n]};
         if (IsWithdrawalScript(out.scriptPubKey)) {
@@ -454,8 +460,10 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
 }
 
 bool State::ConnectBlock(const CBlock& block, int height, const Consensus::SidechainParams& params, const Mainchain& mainchain,
-                         CAmount& minted, std::string& reject_reason)
+                         CAmount& minted, std::string& reject_reason, std::span<const std::vector<CTxOut>> spent)
 {
+    // Known, the spent outputs are those of every transaction after the coinbase.
+    Assume(spent.empty() || spent.size() + 1 == block.vtx.size());
     // The block follows the mainchain up to the block before the one that committed to it.
     const auto bmm_height{mainchain.BmmHeight(block.GetHash())};
     if (!bmm_height) {
@@ -489,7 +497,8 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
     }
 
     for (size_t i{1}; i < block.vtx.size(); ++i) {
-        if (!ApplyTx(*block.vtx[i], height, params, tx_payouts, reject_reason, main_pending)) return false;
+        const std::span<const CTxOut> tx_spent{spent.size() + 1 == block.vtx.size() ? std::span<const CTxOut>{spent[i - 1]} : std::span<const CTxOut>{}};
+        if (!ApplyTx(*block.vtx[i], height, params, tx_payouts, reject_reason, main_pending, tx_spent)) return false;
     }
 
     // The coinbase pays the deposits and the refunds, right after its first output, as many as a block can.
@@ -515,6 +524,26 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
 }
 
 int32_t State::BundleMainHeight() const { return BUNDLE_MAIN_HEIGHT.Get(*m_view); }
+
+std::vector<std::vector<CTxOut>> SpentOutputs(const CBlockUndo& undo)
+{
+    std::vector<std::vector<CTxOut>> spent;
+    spent.reserve(undo.vtxundo.size());
+    for (const CTxUndo& tx_undo : undo.vtxundo) {
+        std::vector<CTxOut>& outputs{spent.emplace_back()};
+        outputs.reserve(tx_undo.vprevout.size());
+        for (const Coin& coin : tx_undo.vprevout) outputs.push_back(coin.out);
+    }
+    return spent;
+}
+
+std::vector<CTxOut> SpentOutputs(const CTransaction& tx, const CCoinsViewCache& view)
+{
+    std::vector<CTxOut> spent;
+    spent.reserve(tx.vin.size());
+    for (const CTxIn& in : tx.vin) spent.push_back(view.AccessCoin(in.prevout).out);
+    return spent;
+}
 
 bool RecordIndependent(const std::string& reject_reason)
 {

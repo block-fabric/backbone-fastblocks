@@ -16,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <ios>
 #include <string>
 #include <tuple>
@@ -178,6 +179,9 @@ struct SideContext {
     //! Where the sidechain state is read and written: an overlay that journals, whose journal
     //! becomes BlockUndo::side.
     sidechain::StoreOverlay& store;
+    //! The outputs the block's transactions spend (sidechain::SpentOutputs), for the sidechain rules
+    //! that read them (sidechain::State::ApplyTx).
+    std::span<const std::vector<CTxOut>> spent;
     //! Set when the block broke a rule of the sidechain: a verdict that depends on the record of the
     //! mainchain, which may change.
     mutable bool failed{false};

@@ -36,6 +36,7 @@
 #include <test/util/setup_common.h>
 #include <txmempool.h>
 #include <uint256.h>
+#include <undo.h>
 #include <util/check.h>
 #include <util/translation.h>
 #include <validation.h>
@@ -547,6 +548,69 @@ BOOST_AUTO_TEST_CASE(mempool_withdrawal_rules)
     BOOST_REQUIRE(Accept(funding).m_result_type == MempoolAcceptResult::ResultType::VALID);
     const auto unknown{Accept(Refund(COutPoint{funding.GetHash(), 0}, funding), /*test_accept=*/true)};
     BOOST_CHECK_EQUAL(unknown.m_state.GetRejectReason(), "bad-sc-refund-unknown");
+}
+
+BOOST_AUTO_TEST_CASE(spent_outputs_for_the_sidechain_rules)
+{
+    // The sidechain rules may read the outputs a transaction spends (State::ApplyTx): validation takes
+    // them from the block's undo data, block assembly from the coins and the transactions before it in
+    // the block, the replay of blocks from the undo data on disk.
+    COutPoint coin;
+    const CTxOut spent{Fund(10 * COIN, coin)};
+    const CMutableTransaction parent{Spend(coin, spent, {CTxOut{0, CScript() << OP_RETURN}, CTxOut{spent.nValue - TX_FEE, script}})};
+    const CMutableTransaction child{Child(parent)};
+    BOOST_REQUIRE(Accept(parent).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(Accept(child).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    const CBlock block{Mine()};
+    BOOST_REQUIRE(InBlock(block, parent) && InBlock(block, child));
+
+    LOCK(::cs_main);
+    // From the undo data: one list per transaction after the coinbase, one output per input, in order.
+    CBlockUndo block_undo;
+    BOOST_REQUIRE(Chainman().m_blockman.ReadBlockUndo(block_undo, *Tip()));
+    const std::vector<std::vector<CTxOut>> from_undo{sidechain::SpentOutputs(block_undo)};
+    BOOST_REQUIRE_EQUAL(from_undo.size(), block.vtx.size() - 1);
+    for (size_t i{1}; i < block.vtx.size(); ++i) {
+        BOOST_REQUIRE_EQUAL(from_undo[i - 1].size(), block.vtx[i]->vin.size());
+        const bool is_parent{block.vtx[i]->GetHash() == parent.GetHash()};
+        BOOST_CHECK(from_undo[i - 1][0] == (is_parent ? spent : parent.vout[1]));
+    }
+
+    // From the coins, as block assembly has them: the child spends what the parent made in the same
+    // block. An input the view does not have gets a null output.
+    CCoinsViewCache view{&Chain().CoinsTip()};
+    AddCoins(view, CTransaction{parent}, Tip()->nHeight);
+    const std::vector<CTxOut> from_view{sidechain::SpentOutputs(CTransaction{child}, view)};
+    BOOST_REQUIRE_EQUAL(from_view.size(), 1U);
+    BOOST_CHECK(from_view[0] == parent.vout[1]);
+    CMutableTransaction unknown{child};
+    unknown.vin[0].prevout = COutPoint{Txid::FromUint256(uint256{0x77}), 0};
+    BOOST_CHECK(sidechain::SpentOutputs(CTransaction{unknown}, view)[0].IsNull());
+
+    // Derived again from the blocks, with the outputs read back from the undo data: the same state.
+    // Without the undo data of a block with transactions, it cannot be.
+    const auto derive{[&]() {
+        drivechain::SidechainDB scdb;
+        scdb.SetBlockHash(Chain().m_chain.Genesis()->GetBlockHash());
+        sidechain::EmptyStore empty;
+        sidechain::StoreOverlay store{empty, /*journal=*/false};
+        // Undo data kept for every block (above height 0), as the node has it.
+        auto result{Chain().RollForwardSidechainDB(scdb, Chain().m_chain.Genesis(), Tip(), /*keep_undo_above=*/0, &store)};
+        return std::make_pair(std::move(result), sidechain::StoreHash(store));
+    }};
+    {
+        const auto [result, hash] = derive();
+        BOOST_REQUIRE_MESSAGE(result, util::ErrorString(result).original);
+        BOOST_CHECK(hash == Chain().SideState().Hash());
+    }
+    CBlockIndex* tip{Chainman().m_blockman.LookupBlockIndex(block.GetHash())};
+    tip->nStatus &= ~BLOCK_HAVE_UNDO;
+    {
+        const auto [result, hash] = derive();
+        BOOST_CHECK(!result);
+        BOOST_CHECK_EQUAL(util::ErrorString(result).original, "Failed to read the undo data of block " + block.GetHash().ToString() + ". Restart with -reindex.");
+    }
+    tip->nStatus |= BLOCK_HAVE_UNDO;
 }
 
 BOOST_AUTO_TEST_CASE(disconnect_without_undo_data)

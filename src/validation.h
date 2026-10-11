@@ -1208,7 +1208,7 @@ public:
      */
     void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** What the sidechain rules need to check a block; empty if this chain is not a sidechain. */
-    std::optional<drivechain::SideContext> SideContext(CAmount& minted, sidechain::StoreOverlay& store) const;
+    std::optional<drivechain::SideContext> SideContext(CAmount& minted, sidechain::StoreOverlay& store, std::span<const std::vector<CTxOut>> spent) const;
 
     using Options = kernel::ChainstateManagerOpts;
 
