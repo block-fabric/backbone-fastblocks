@@ -504,7 +504,7 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
             return false;
         }
     }
-    return Hooks().AfterBlock(*this, block, height, step, params, reject_reason);
+    return Hooks().AfterBlock(*this, block, height, step, minted, params, reject_reason);
 }
 
 bool State::ApplyPegStep(const CBlock& block, int height, const PegStep& step, const Consensus::SidechainParams& params, const Mainchain& mainchain,

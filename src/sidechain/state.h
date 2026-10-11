@@ -244,10 +244,13 @@ public:
     uint256 Hash() const { return StoreHash(*m_view); }
 
     const StoreView& View() const { return *m_view; }
+    /**
+     * The overlay to write to; a State made read only has none. For the rules of a sidechain's own
+     * (sidechain::ChainHooks), which keep their state in tables of their own.
+     */
+    StoreOverlay& Writable() const;
 
 protected:
-    /** The overlay to write to; a State made read only has none. */
-    StoreOverlay& Writable() const;
     /** ApplyTx, on an overlay of its own. */
     [[nodiscard]] bool ApplyTxSteps(const CTransaction& tx, int height, const Consensus::SidechainParams& params,
                                     std::vector<CTxOut>& payouts, std::string& reject_reason, bool main_pending, bool peg_step = true);

@@ -154,13 +154,19 @@ public:
     virtual bool RefundsOnlyInPegSteps() const { return false; }
     /**
      * Peg actions of the sidechain's own, first in a block that takes them: what it adds to
-     * `owed_tx` is paid by the coinbase as refunds are.
+     * `owed_tx` is paid by the coinbase as refunds are. Block assembly calls it too, with the block
+     * as far as it is known then: its parent, version, time and sections (SidechainAssembly), and a
+     * coinbase whose only output pays the coinbase script, with no value; no other transactions.
      */
     virtual bool BeforePegStep(State& state, const CBlock& block, int height, const PegStep& step, const Consensus::SidechainParams& params,
                                std::vector<CTxOut>& owed_tx, std::string& reject_reason) const;
-    /** Last in every block, after the payouts: what the sidechain's own rules note of the block. */
-    virtual bool AfterBlock(State& state, const CBlock& block, int height, const std::optional<PegStep>& step, const Consensus::SidechainParams& params,
-                            std::string& reject_reason) const;
+    /**
+     * Last in every block, after the payouts: what the sidechain's own rules note of the block.
+     * `minted` is what the coinbase pays out (its outputs 1 to n: deposits, refunds and the like).
+     * Not called by block assembly.
+     */
+    virtual bool AfterBlock(State& state, const CBlock& block, int height, const std::optional<PegStep>& step, CAmount minted,
+                            const Consensus::SidechainParams& params, std::string& reject_reason) const;
 
     //
     // Block production and services

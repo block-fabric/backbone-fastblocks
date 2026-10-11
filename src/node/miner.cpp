@@ -229,6 +229,24 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         const int main_height{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.main_height : mainchain.Height()};
         const uint256 bundle_nonce{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.nonce : pindexPrev->GetBlockHash()};
         const std::optional<int32_t> max_withdrawal_height{m_sidechain.peg == SidechainAssembly::Peg::STEP ? m_sidechain.step.max_withdrawal_height : std::nullopt};
+        // The peg actions of the sidechain's own come first, as in State::ConnectBlock (none in the
+        // template). They see the block as far as it is known now; what they owe is paid as refunds are.
+        std::vector<CTxOut> side_hook_outputs;
+        if (peg_step) {
+            CBlock known;
+            known.nVersion = pblock->nVersion;
+            known.hashPrevBlock = pindexPrev->GetBlockHash();
+            known.nTime = pblock->nTime;
+            known.vSections = m_sidechain.sections;
+            CMutableTransaction coinbase;
+            coinbase.vin.resize(1);
+            coinbase.vout.emplace_back(0, m_options.coinbase_output_script);
+            known.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+            const sidechain::PegStep step{.main_height = main_height, .nonce = bundle_nonce, .max_withdrawal_height = max_withdrawal_height};
+            if (!sidechain::Hooks().BeforePegStep(side, known, nHeight, step, side_params, side_hook_outputs, reject_reason)) {
+                throw std::runtime_error(strprintf("%s: the sidechain's own peg actions refuse the block (%s)", __func__, reject_reason));
+            }
+        }
         if (peg_step && !side.ApplyMainEvents(main_height, mainchain, nHeight, side_params, side_outputs, reject_reason)) {
             throw std::runtime_error(strprintf("%s: the block does not fit the mainchain on record (%s)", __func__, reject_reason));
         }
@@ -299,7 +317,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         // rather than making no block at all -- the mempool is only cleaned when the tip changes.
         // One pass: a transaction that breaks a rule leaves the state as it was (ApplyTx is all or
         // nothing), and what depends on it comes after it in the block, so it goes before it is applied.
-        side_tx_outputs.clear();
+        side_tx_outputs = std::move(side_hook_outputs);
         for (size_t i{1}; i < pblock->vtx.size();) {
             if (m_sidechain.tx_filter && !m_sidechain.tx_filter(*pblock->vtx[i])) {
                 LogDebug(BCLog::MINING, "%s: leaving out transaction %s, which this kind of block does not take\n", __func__, pblock->vtx[i]->GetHash().ToString());

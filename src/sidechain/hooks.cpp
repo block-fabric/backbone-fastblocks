@@ -63,7 +63,7 @@ bool ChainHooks::GetPegStep(const CBlock& block, const Mainchain& mainchain, std
 
 bool ChainHooks::BeforePegStep(State&, const CBlock&, int, const PegStep&, const Consensus::SidechainParams&, std::vector<CTxOut>&, std::string&) const { return true; }
 
-bool ChainHooks::AfterBlock(State&, const CBlock&, int, const std::optional<PegStep>&, const Consensus::SidechainParams&, std::string&) const { return true; }
+bool ChainHooks::AfterBlock(State&, const CBlock&, int, const std::optional<PegStep>&, CAmount, const Consensus::SidechainParams&, std::string&) const { return true; }
 
 bool ChainHooks::FollowerRound(Follower&) const { return false; }
 
