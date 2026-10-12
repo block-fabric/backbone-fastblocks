@@ -314,6 +314,15 @@ public:
     //! Check if in IBD.
     virtual bool isInitialBlockDownload() = 0;
 
+    //! FastBlocks: the heights of the blocks the newest anchors of the active chain anchor (newest
+    //! first, at most final_anchors of them), and how many anchors make a block final. Nothing on
+    //! a chain without anchors.
+    struct Anchors {
+        int final_anchors{0};
+        std::vector<int> anchored_heights;
+    };
+    virtual std::optional<Anchors> getAnchors() { return std::nullopt; }
+
     //! Check if shutdown requested.
     virtual bool shutdownRequested() = 0;
 

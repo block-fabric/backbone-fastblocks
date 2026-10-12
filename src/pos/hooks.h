@@ -5,6 +5,7 @@
 #ifndef BITCOIN_POS_HOOKS_H
 #define BITCOIN_POS_HOOKS_H
 
+#include <pos/evidence.h>
 #include <pos/header.h>
 #include <pos/schedule.h>
 #include <sidechain/hooks.h>
@@ -31,6 +32,10 @@ class Producer;
 
 //! The P2P message that relays anchor tickets.
 inline constexpr const char* MSG_TICKET{"fbticket"};
+//! The P2P message that asks peers for the tickets of commitments: a list of h*.
+inline constexpr const char* MSG_GETTICKETS{"fbgettickets"};
+//! Tickets asked for in one message, at most; and the newest mainchain blocks a node asks for the tickets of.
+inline constexpr size_t MAX_TICKETS_ASKED{16};
 //! Tickets a node keeps, at most: the oldest go first.
 inline constexpr size_t MAX_TICKETS{1000};
 //! Acknowledging blocks whose commitment a node keeps in memory, at most (others are read from disk).
@@ -92,6 +97,8 @@ public:
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
     bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override;
     bool CheckBlock(const CBlock& block, BlockValidationState& state) const override;
+    bool IsWaitReason(const std::string& reject_reason) const override;
+    std::optional<int64_t> WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const override;
     uint256 SectionsHash(std::span<const unsigned char> sections) const override;
 
     bool CustomChainOrder() const override { return true; }
@@ -125,6 +132,22 @@ public:
     /** Relay a ticket to the peers (but `except`). */
     void RelayTicket(const AnchorTicket& ticket, std::optional<int64_t> except = std::nullopt) const;
     /**
+     * Ask the peers for the tickets of the commitments on record after the last acknowledged one
+     * that this node has no ticket nor block of (the newest anchors, for a node that just started or
+     * synced): once per mainchain block. @return the commitments asked for
+     */
+    std::vector<uint256> AskMissingTickets() const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex, !m_anchor_mutex);
+
+    /** The proofs of leaders that signed twice this node knows, and the headers it saw signed. */
+    EvidencePool& Evidence() const { return m_evidence; }
+    /**
+     * Check a proof that a leader signed two blocks for one slot, keep it and relay it (but to `except`).
+     * @return the offence; nothing, with `reason` set, if the proof is not one
+     */
+    std::optional<Offence> AddEvidence(const DoubleProposal& proof, std::string& reason, std::optional<int64_t> except = std::nullopt) const;
+    /** Relay the proofs found since the last call (by watching headers). */
+    void RelayNewEvidence() const;
+    /**
      * The acknowledgement a PoS block on top of `tip` can carry: of the anchor committed first among
      * those it may acknowledge, if any. Called with cs_main held.
      */
@@ -134,12 +157,20 @@ public:
     /** Whether a BMM block built now would be in stall mode (and may take transactions). */
     bool Stalled(const FastState& fast, int64_t main_time) const;
     const Producer* GetProducer() const { return m_producer.get(); }
+    Producer* GetProducer() { return m_producer.get(); }
+    /**
+     * The block an anchor on the chain anchors (P): for an acknowledgement, the block its ticket
+     * names; for a BMM block, its parent. Nothing for a block that is no anchor. Called with cs_main held.
+     */
+    const CBlockIndex* AnchoredBy(const CBlockIndex& index) const;
     /** Why the block producer the options ask for could not start; empty if it did, or none was asked for. */
     std::string ProducerError() const { return m_producer_error; }
 
 private:
     /** The acknowledgement in a PoS block, read from its sections, noted by commitment. */
     void NoteAck(const uint256& block_hash, const AnchorAck& ack) const EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
+    /** The acknowledgement a PoS block carries, from memory or else from disk. */
+    std::optional<AnchorAck> ReadAck(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
 
     const CChainParams& m_chain_params;
     const Consensus::PosParams& m_params;
@@ -150,8 +181,12 @@ private:
     mutable Mutex m_acks_mutex;
     //! Commitment (h*) of each acknowledging block seen, and the blocks of each commitment.
     mutable std::map<uint256, uint256> m_ack_of GUARDED_BY(m_acks_mutex);
+    //! The block each acknowledging block seen anchors (P).
+    mutable std::map<uint256, uint256> m_anchored_by GUARDED_BY(m_acks_mutex);
     mutable std::map<uint256, std::set<uint256>> m_acks_by_commitment GUARDED_BY(m_acks_mutex);
     mutable std::deque<std::pair<uint256, uint256>> m_ack_order GUARDED_BY(m_acks_mutex);
+
+    mutable EvidencePool m_evidence;
 
     mutable Mutex m_tickets_mutex;
     mutable std::map<uint256, AnchorTicket> m_tickets GUARDED_BY(m_tickets_mutex);
@@ -166,6 +201,8 @@ private:
     mutable uint256 m_ticket_requested_for GUARDED_BY(m_anchor_mutex);
     //! The mainchain block for which this node's committed ticket was last relayed again.
     mutable uint256 m_ticket_relayed_for GUARDED_BY(m_anchor_mutex);
+    //! The mainchain block for which missing tickets were last asked for.
+    mutable uint256 m_tickets_asked_for GUARDED_BY(m_anchor_mutex);
 };
 
 /** The FastBlocks hooks installed, if they are. */

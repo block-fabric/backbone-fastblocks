@@ -5,6 +5,7 @@
 #include <core_io.h>
 #include <hash.h>
 #include <key_io.h>
+#include <pos/finality.h>
 #include <rpc/util.h>
 #include <script/script.h>
 #include <util/moneystr.h>
@@ -16,6 +17,7 @@
 
 #include <univalue.h>
 
+#include <array>
 
 namespace wallet {
 static CAmount GetReceived(const CWallet& wallet, const UniValue& params, bool by_label) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
@@ -415,6 +417,12 @@ RPCMethod getbalances()
                     {RPCResult::Type::STR_AMOUNT, "immature", "balance from immature coinbase outputs"},
                     {RPCResult::Type::STR_AMOUNT, "nonmempool", "sum of coins that are spent by transactions not in the mempool (usually an over-estimate due to not accounting for change or spends that conflict with each other)"},
                     {RPCResult::Type::STR_AMOUNT, "used", /*optional=*/true, "(only present if avoid_reuse is set) balance from coins sent to addresses that were previously spent from (potentially privacy violating)"},
+                    {RPCResult::Type::OBJ, "finality", /*optional=*/true, "FastBlocks: the confirmed coins, by how final their blocks are",
+                    {
+                        {RPCResult::Type::STR_AMOUNT, "soft", "in blocks no anchor covers yet (blocks of stake only)"},
+                        {RPCResult::Type::STR_AMOUNT, "anchored", "in blocks an anchor covers, but not yet enough to be final"},
+                        {RPCResult::Type::STR_AMOUNT, "final", "in final blocks"},
+                    }},
                 }},
                 RESULT_LAST_PROCESSED_BLOCK,
             }
@@ -445,6 +453,27 @@ RPCMethod getbalances()
         balances_mine.pushKV("nonmempool", ValueFromAmount(bal.m_mine_nonmempool));
         if (wallet.IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE)) {
             balances_mine.pushKV("used", ValueFromAmount(bal.m_mine_used));
+        }
+        // FastBlocks: the coins of the wallet in blocks, by how final the blocks are.
+        if (const auto anchors{wallet.chain().getAnchors()}) {
+            std::array<CAmount, 3> amounts{};
+            for (const auto& [txid, wtx] : wallet.mapWallet) {
+                const auto* confirmed{wtx.state<TxStateConfirmed>()};
+                const int depth{wallet.GetTxDepthInMainChain(wtx)};
+                if (!confirmed || depth <= 0) continue;
+                const pos::Finality finality{pos::FinalityAt(confirmed->confirmed_block_height, depth, anchors->anchored_heights, anchors->final_anchors)};
+                const CTransactionRef tx{wtx.GetTx()};
+                for (uint32_t i{0}; i < tx->vout.size(); ++i) {
+                    const CTxOut& txout{tx->vout[i]};
+                    if (!wallet.IsMine(txout) || wallet.IsSpent(COutPoint{wtx.GetHash(), i})) continue;
+                    amounts[static_cast<size_t>(finality.status)] += txout.nValue;
+                }
+            }
+            UniValue finality{UniValue::VOBJ};
+            finality.pushKV("soft", ValueFromAmount(amounts[static_cast<size_t>(pos::FinalityStatus::SOFT)]));
+            finality.pushKV("anchored", ValueFromAmount(amounts[static_cast<size_t>(pos::FinalityStatus::ANCHORED)]));
+            finality.pushKV("final", ValueFromAmount(amounts[static_cast<size_t>(pos::FinalityStatus::FINAL)]));
+            balances_mine.pushKV("finality", std::move(finality));
         }
         balances.pushKV("mine", std::move(balances_mine));
     }

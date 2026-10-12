@@ -170,6 +170,7 @@ BASE_SCRIPTS = [
     'feature_reindex.py',
     'feature_sidechain.py',
     'feature_fastblocks.py',
+    'feature_fastblocks_rpc.py',
     'feature_sidechain_network.py',
     'feature_sidechain_follower.py',
     'feature_sidechain_rules.py',

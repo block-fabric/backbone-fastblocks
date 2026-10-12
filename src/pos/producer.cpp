@@ -127,6 +127,15 @@ Producer::Status Producer::GetStatus() const
     return m_status;
 }
 
+int64_t Producer::LastSignedSlot() const
+{
+    int64_t last{-1};
+    for (const CKey& key : m_keys) {
+        if (const auto signed_slot{m_protection->LastSigned(XOnly(key))}) last = std::max(last, *signed_slot);
+    }
+    return last;
+}
+
 std::vector<uint256> Producer::Keys() const
 {
     std::vector<uint256> keys;
@@ -141,7 +150,7 @@ void Producer::Run()
     while (!m_stop) {
         const int64_t now{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
         const int64_t slot{SlotOf(now, params)};
-        if (slot > last_tried && now >= SlotTime(slot, params) && now > params.genesis_time) {
+        if (m_enabled && slot > last_tried && now >= SlotTime(slot, params) && now > params.genesis_time) {
             last_tried = slot;
             std::string error;
             const auto made{Produce(slot, error)};

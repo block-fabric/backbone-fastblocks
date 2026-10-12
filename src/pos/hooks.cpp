@@ -18,6 +18,7 @@
 #include <sidechain/state.h>
 #include <sidechain/store.h>
 #include <streams.h>
+#include <util/strencodings.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -108,8 +109,33 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
     if (!leader || !CheckBlockSig(header, m_validators.Validators()[*leader].pubkey)) {
         return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
     }
+    // A second header the leader signed for this slot is the proof that it signed twice, whatever
+    // else is wrong with it.
+    if (const auto proof{m_evidence.NoteSigned(header, slot)}) {
+        std::string reason;
+        if (const auto offence{CheckEvidence(*proof, m_validators, m_params, m_chain_params.GetConsensus().hashGenesisBlock, reason)}) {
+            if (m_evidence.Add(*offence, *proof)) LogWarning("FastBlocks: validator %s signed two blocks for slot %d", HexStr(offence->pubkey), offence->slot);
+        }
+    }
     if (const auto last{LastPosSlot(&prev, m_params)}; last && slot <= *last) {
         return invalid("bad-pos-slot", "a block of stake comes in a later slot than the one before it");
+    }
+    // No more than max_unanchored_slots after the first block of stake no anchor covers, as the
+    // state checks (AfterBlock), as far as the headers tell: this bounds the headers a node takes
+    // in without anchors. Without an acknowledgement, that block is the first block of stake after
+    // the last BMM block, or at or before the last acknowledgement (which covers at most up to its
+    // parent). (An acknowledgement may cover much: the state checks it.)
+    if (header.nNonce == 0) {
+        int64_t first{slot};
+        int64_t walked{0};
+        for (const CBlockIndex* index{&prev}; index && index->nHeight > 0 && index->m_ext; index = index->pprev) {
+            first = SlotOf(index->nTime, m_params);
+            // (Slots grow block by block: so many blocks back, the bound is passed.)
+            if (index->nNonce != 0 || ++walked > m_params.max_unanchored_slots) break;
+        }
+        if (slot - first >= m_params.max_unanchored_slots) {
+            return invalid("bad-pos-unanchored", "a block of stake comes within max_unanchored_slots of the first one no anchor covers");
+        }
     }
     // An acknowledgement names a mainchain block with a commitment: not known yet, the block may be
     // tried again later (it is checked in full with the block).
@@ -147,6 +173,36 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
 
 uint256 FastBlocksHooks::SectionsHash(std::span<const unsigned char> sections) const { return pos::SectionsHash(sections); }
 
+bool FastBlocksHooks::IsWaitReason(const std::string& reject_reason) const
+{
+    // A BMM block the mainchain has not committed to yet; a block of stake whose slot has not started
+    // by this node's clock, or that acknowledges a commitment not on this node's record yet.
+    return reject_reason == "bmm-unknown" || reject_reason == "pos-time-future" || reject_reason == "pos-ack-unknown";
+}
+
+std::optional<int64_t> FastBlocksHooks::WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const
+{
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman) return ChainHooks::WaitingReady(header, record);
+    AssertLockHeld(::cs_main);
+    // Ready when it is, and so is every waiting header between it and a block the node knows: then
+    // its height orders it after its parent (blocks of both kinds wait, so commitment heights would not).
+    const auto ready{[&](const CBlockHeader& waiting) {
+        if (!IsPosHeader(waiting)) return record.CommittedHeight(waiting.GetHash()).has_value();
+        if (waiting.Time() > NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}) return false;
+        return waiting.nNonce == 0 || record.BmmAt(static_cast<int>(waiting.nNonce)).has_value();
+    }};
+    const CBlockHeader* current{&header};
+    for (int64_t depth{1}; depth <= static_cast<int64_t>(chainman->m_bmm_waiting.size()) + 1; ++depth) {
+        if (!ready(*current)) return std::nullopt;
+        if (const CBlockIndex* prev{chainman->m_blockman.LookupBlockIndex(current->hashPrevBlock)}) return prev->nHeight + depth;
+        const auto parent{chainman->m_bmm_waiting.find(current->hashPrevBlock)};
+        if (parent == chainman->m_bmm_waiting.end()) return std::nullopt;
+        current = &parent->second.header;
+    }
+    return std::nullopt;
+}
+
 arith_uint256 FastBlocksHooks::ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const
 {
     if (!prev) return ChainKey{}.Work();
@@ -174,6 +230,7 @@ void FastBlocksHooks::NoteAck(const uint256& block_hash, const AnchorAck& ack) c
     const uint256 commitment{ack.ticket.Hash()};
     LOCK(m_acks_mutex);
     if (!m_ack_of.emplace(block_hash, commitment).second) return;
+    m_anchored_by.emplace(block_hash, ack.ticket.anchored);
     m_acks_by_commitment[commitment].insert(block_hash);
     m_ack_order.emplace_back(block_hash, commitment);
     // Bounded: the oldest go first (a commitment so old is not dropped by the mainchain any more; and
@@ -181,12 +238,48 @@ void FastBlocksHooks::NoteAck(const uint256& block_hash, const AnchorAck& ack) c
     while (m_ack_order.size() > MAX_NOTED_ACKS) {
         const auto& [old_block, old_commitment] = m_ack_order.front();
         m_ack_of.erase(old_block);
+        m_anchored_by.erase(old_block);
         if (auto found{m_acks_by_commitment.find(old_commitment)}; found != m_acks_by_commitment.end()) {
             found->second.erase(old_block);
             if (found->second.empty()) m_acks_by_commitment.erase(found);
         }
         m_ack_order.pop_front();
     }
+}
+
+std::optional<AnchorAck> FastBlocksHooks::ReadAck(const CBlockIndex& index) const
+{
+    ChainstateManager* chainman{Chainman()};
+    if (!index.m_ext || index.nNonce == 0 || !chainman) return std::nullopt;
+    CBlock block;
+    const bool have{WITH_LOCK(::cs_main, return (index.nStatus & BLOCK_HAVE_DATA) && chainman->m_blockman.ReadBlock(block, index))};
+    PosSections sections;
+    if (!have || !PosSections::Decode(block.vSections, sections) || !sections.ack) return std::nullopt;
+    NoteAck(index.GetBlockHash(), *sections.ack);
+    return sections.ack;
+}
+
+const CBlockIndex* FastBlocksHooks::AnchoredBy(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    if (!index.m_ext) return index.nHeight > 0 ? index.pprev : nullptr;
+    if (index.nNonce == 0) return nullptr;
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman) return nullptr;
+    std::optional<uint256> anchored;
+    {
+        LOCK(m_acks_mutex);
+        if (const auto found{m_anchored_by.find(index.GetBlockHash())}; found != m_anchored_by.end()) anchored = found->second;
+    }
+    if (!anchored) {
+        const auto ack{ReadAck(index)};
+        if (!ack) return nullptr;
+        anchored = ack->ticket.anchored;
+    }
+    // On the chain of the acknowledgement, below it (a valid one names such a block).
+    const CBlockIndex* target{chainman->m_blockman.LookupBlockIndex(*anchored)};
+    if (!target || target->nHeight >= index.nHeight || index.GetAncestor(target->nHeight) != target) return nullptr;
+    return target;
 }
 
 std::optional<uint256> FastBlocksHooks::CommitmentOf(const CBlockIndex& index) const
@@ -200,13 +293,7 @@ std::optional<uint256> FastBlocksHooks::CommitmentOf(const CBlockIndex& index) c
     }
     ChainstateManager* chainman{Chainman()};
     if (chainman) {
-        CBlock block;
-        const bool have{WITH_LOCK(::cs_main, return (index.nStatus & BLOCK_HAVE_DATA) && chainman->m_blockman.ReadBlock(block, index))};
-        PosSections sections;
-        if (have && PosSections::Decode(block.vSections, sections) && sections.ack) {
-            NoteAck(index.GetBlockHash(), *sections.ack);
-            return sections.ack->ticket.Hash();
-        }
+        if (const auto ack{ReadAck(index)}) return ack->ticket.Hash();
         // A header without its block: what the record has at the height it names.
         if (chainman->m_mainchain) {
             if (const auto bmm{chainman->m_mainchain->BmmAt(static_cast<int>(index.nNonce))}) return *bmm;
@@ -462,26 +549,138 @@ void FastBlocksHooks::RelayTicket(const AnchorTicket& ticket, std::optional<int6
 
 bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, DataStream& recv, std::string& misbehaving) const
 {
-    if (msg_type != MSG_TICKET) return false;
-    AnchorTicket ticket;
-    try {
-        recv >> ticket;
-    } catch (const std::ios_base::failure&) {
-        misbehaving = "malformed anchor ticket";
+    ChainstateManager* chainman{Chainman()};
+    if (msg_type == MSG_TICKET) {
+        AnchorTicket ticket;
+        try {
+            recv >> ticket;
+        } catch (const std::ios_base::failure&) {
+            misbehaving = "malformed anchor ticket";
+            return true;
+        }
+        if (ticket.version != 1 || !IsValidPayee(ticket.payee)) return true;
+        // Only tickets for a block this node knows, or that the mainchain committed to (a node that is
+        // still taking in the chain needs those of the newest anchors): others cannot be acknowledged
+        // here anyway, and anyone can make them.
+        if (!chainman) return true;
+        const bool known{WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ticket.anchored) != nullptr)};
+        if (!known && !(chainman->m_mainchain && chainman->m_mainchain->CommittedHeight(ticket.Hash()))) return true;
+        if (AddTicket(ticket)) RelayTicket(ticket, peer);
         return true;
     }
-    if (ticket.version != 1 || !IsValidPayee(ticket.payee)) return true;
-    // Only tickets for a block this node knows: others cannot be acknowledged here anyway.
+    if (msg_type == MSG_GETTICKETS) {
+        std::vector<uint256> wanted;
+        try {
+            // (Not more than asked for at most: a longer list is not read.)
+            const uint64_t count{ReadCompactSize(recv, /*range_check=*/false)};
+            if (count > MAX_TICKETS_ASKED) {
+                misbehaving = "too many anchor tickets asked for";
+                return true;
+            }
+            wanted.resize(count);
+            for (uint256& hash : wanted) recv >> hash;
+        } catch (const std::ios_base::failure&) {
+            misbehaving = "malformed request for anchor tickets";
+            return true;
+        }
+        if (!m_node || !m_node->peerman) return true;
+        for (const uint256& hash : wanted) {
+            const auto ticket{GetTicket(hash)};
+            if (!ticket) continue;
+            DataStream s{};
+            s << *ticket;
+            m_node->peerman->SendSidechainMessage(peer, MSG_TICKET, {UCharCast(s.data()), UCharCast(s.data()) + s.size()});
+        }
+        return true;
+    }
+    if (msg_type == MSG_EVIDENCE) {
+        DoubleProposal proof;
+        try {
+            recv >> proof;
+        } catch (const std::ios_base::failure&) {
+            misbehaving = "malformed evidence";
+            return true;
+        }
+        // Relayed only if it is a proof (one this node does not know yet).
+        std::string reason;
+        AddEvidence(proof, reason, peer);
+        return true;
+    }
+    return false;
+}
+
+std::optional<Offence> FastBlocksHooks::AddEvidence(const DoubleProposal& proof, std::string& reason, std::optional<int64_t> except) const
+{
+    const auto offence{CheckEvidence(proof, m_validators, m_params, m_chain_params.GetConsensus().hashGenesisBlock, reason)};
+    if (!offence) return std::nullopt;
+    if (!m_evidence.Add(*offence, proof)) return offence;
+    LogWarning("FastBlocks: validator %s signed two blocks for slot %d", HexStr(offence->pubkey), offence->slot);
+    m_evidence.MarkRelayed(*offence);
+    if (m_node && m_node->peerman) {
+        DoubleProposal normal{proof};
+        normal.Normalize();
+        DataStream s{};
+        s << normal;
+        m_node->peerman->BroadcastSidechainMessage(MSG_EVIDENCE, {UCharCast(s.data()), UCharCast(s.data()) + s.size()}, except);
+    }
+    return offence;
+}
+
+void FastBlocksHooks::RelayNewEvidence() const
+{
+    const auto proofs{m_evidence.TakeUnrelayed()};
+    if (proofs.empty() || !m_node || !m_node->peerman) return;
+    for (const DoubleProposal& proof : proofs) {
+        DataStream s{};
+        s << proof;
+        m_node->peerman->BroadcastSidechainMessage(MSG_EVIDENCE, {UCharCast(s.data()), UCharCast(s.data()) + s.size()});
+    }
+}
+
+std::vector<uint256> FastBlocksHooks::AskMissingTickets() const
+{
     ChainstateManager* chainman{Chainman()};
-    if (!chainman || !WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ticket.anchored) != nullptr)) return true;
-    if (AddTicket(ticket)) RelayTicket(ticket, peer);
-    return true;
+    if (!chainman || !chainman->m_mainchain) return {};
+    const sidechain::Mainchain& record{*chainman->m_mainchain};
+    const int height{record.Height()};
+    const uint256 main_tip{record.TipHash()};
+    {
+        LOCK(m_anchor_mutex);
+        if (m_tickets_asked_for == main_tip) return {};
+    }
+    std::vector<uint256> missing;
+    {
+        LOCK(::cs_main);
+        const FastState fast{FAST_STATE.Get(chainman->ActiveChainstate().SideState().View())};
+        const int from{std::max(fast.last_main_height + 1, height - static_cast<int>(MAX_TICKETS_ASKED) + 1)};
+        for (int h{std::max(from, 1)}; h <= height; ++h) {
+            const auto bmm{record.BmmAt(h)};
+            // A commitment to a block (one known, or waiting for it), or of a ticket known, is no ticket to ask for.
+            if (!bmm || chainman->m_blockman.LookupBlockIndex(*bmm) || chainman->m_bmm_waiting.contains(*bmm)) continue;
+            if (GetTicket(*bmm)) continue;
+            missing.push_back(*bmm);
+        }
+    }
+    {
+        LOCK(m_anchor_mutex);
+        m_tickets_asked_for = main_tip;
+    }
+    if (missing.empty() || !m_node || !m_node->peerman) return missing;
+    DataStream s{};
+    s << missing;
+    m_node->peerman->BroadcastSidechainMessage(MSG_GETTICKETS, {UCharCast(s.data()), UCharCast(s.data()) + s.size()});
+    LogDebug(BCLog::NET, "FastBlocks: asked the peers for %u anchor ticket(s)\n", missing.size());
+    return missing;
 }
 
 bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
 {
     ChainstateManager* chainman{Chainman()};
     if (!chainman || !chainman->m_mainchain) return false;
+    // Proofs of leaders that signed twice, found by watching headers; and the tickets of the newest
+    // commitments, for a node that does not have them.
+    RelayNewEvidence();
+    AskMissingTickets();
     const sidechain::Mainchain& record{*chainman->m_mainchain};
     const sidechain::Follower::Mining mining{follower.GetMining()};
     const int main_height{record.Height()};

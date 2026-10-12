@@ -19,6 +19,8 @@
 #include <key.h>
 #include <key_io.h>
 #include <node/miner.h>
+#include <pos/evidence.h>
+#include <pos/finality.h>
 #include <pos/forkchoice.h>
 #include <pos/header.h>
 #include <pos/hooks.h>
@@ -28,6 +30,7 @@
 #include <pow.h>
 #include <primitives/block.h>
 #include <script/sign.h>
+#include <streams.h>
 #include <script/signingprovider.h>
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
@@ -926,6 +929,303 @@ BOOST_AUTO_TEST_CASE(hooks_without_context)
     BOOST_CHECK_EQUAL(reason, "bad-pos-context");
     // Without validators, no block of stake.
     BOOST_CHECK(!hooks.Validators().Active());
+}
+
+BOOST_FIXTURE_TEST_CASE(finality, FastBlocksSetup)
+{
+    // From the heights the newest anchors anchor: soft, anchored (k), final.
+    BOOST_CHECK(pos::FinalityAt(10, 1, {}, 3).status == pos::FinalityStatus::SOFT);
+    BOOST_CHECK(pos::FinalityAt(10, 1, {9, 5}, 3).status == pos::FinalityStatus::SOFT);
+    const pos::Finality anchored{pos::FinalityAt(10, 4, {12, 10, 5}, 3)};
+    BOOST_CHECK(anchored.status == pos::FinalityStatus::ANCHORED);
+    BOOST_CHECK_EQUAL(anchored.anchors, 2);
+    BOOST_CHECK_EQUAL(anchored.depth, 4);
+    BOOST_CHECK(pos::FinalityAt(10, 9, {14, 12, 10}, 3).status == pos::FinalityStatus::FINAL);
+    BOOST_CHECK(pos::FinalityAt(10, 9, {14}, 1).status == pos::FinalityStatus::FINAL);
+    BOOST_CHECK_EQUAL(pos::FinalityName(pos::FinalityStatus::ANCHORED), "anchored");
+
+    // On a chain: a BMM block anchors its parent; an acknowledgement the block its ticket names.
+    StartPos();
+    const CBlockIndex* bmm{Tip()};
+    Take(PosBlock(1));
+    const CBlockIndex* p1{Tip()};
+    Take(PosBlock(2));
+    const CBlockIndex* p2{Tip()};
+    Take(PosBlock(3));
+    const CBlockIndex* p3{Tip()};
+    const auto finality{[&](const CBlockIndex* block, int final_anchors) { return WITH_LOCK(::cs_main, return pos::FinalityOf(Hooks(), *block, *Tip(), final_anchors)); }};
+    BOOST_CHECK(finality(p1, 3).status == pos::FinalityStatus::SOFT);
+    BOOST_CHECK_EQUAL(finality(p1, 3).depth, 3);
+    BOOST_CHECK(finality(bmm->pprev, 3).status == pos::FinalityStatus::ANCHORED);
+
+    const pos::AnchorAck first{Anchor(Ticket(p2->GetBlockHash(), script))};
+    Take(PosBlock(4, first));
+    const CBlockIndex* q1{Tip()};
+    BOOST_CHECK(finality(p1, 3).status == pos::FinalityStatus::ANCHORED);
+    BOOST_CHECK_EQUAL(finality(p2, 3).anchors, 1);
+    BOOST_CHECK(finality(p3, 3).status == pos::FinalityStatus::SOFT);
+    // With one anchor to be final (regtest's final_anchors), anchored is final.
+    BOOST_CHECK(finality(p2, 1).status == pos::FinalityStatus::FINAL);
+    BOOST_CHECK_EQUAL(Pos().final_anchors, 1);
+
+    const pos::AnchorAck second{Anchor(Ticket(q1->GetBlockHash(), script))};
+    Take(PosBlock(5, second));
+    BOOST_CHECK_EQUAL(finality(p1, 3).anchors, 2);
+    BOOST_CHECK(finality(p3, 3).status == pos::FinalityStatus::ANCHORED);
+    MineBmm(BmmBlock(/*use_mempool=*/false));
+    BOOST_CHECK(finality(p1, 3).status == pos::FinalityStatus::FINAL);
+    BOOST_CHECK(finality(Tip(), 3).status == pos::FinalityStatus::SOFT);
+
+    // The newest anchors, newest first, with what they anchor and the height of their commitment.
+    const auto anchors{WITH_LOCK(::cs_main, return pos::RecentAnchors(Hooks(), *Tip(), 10))};
+    BOOST_REQUIRE_EQUAL(anchors.size(), 4U);
+    BOOST_CHECK(anchors[0].block == Tip() && anchors[0].anchored == Tip()->pprev);
+    BOOST_CHECK_EQUAL(anchors[0].main_height, static_cast<uint32_t>(Record().Height()));
+    BOOST_CHECK(anchors[1].anchored == q1);
+    BOOST_CHECK_EQUAL(anchors[1].main_height, static_cast<uint32_t>(second.main_height));
+    BOOST_CHECK(anchors[2].block == q1 && anchors[2].anchored == p2);
+    BOOST_CHECK(anchors[3].block == bmm);
+    // At most as many as asked for; none at or below the floor.
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return pos::RecentAnchors(Hooks(), *Tip(), 2)).size(), 2U);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return pos::RecentAnchors(Hooks(), *Tip(), 10, q1->nHeight)).size(), 2U);
+    // A block that is no anchor anchors nothing; the acknowledgement is read from disk once forgotten.
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Hooks().AnchoredBy(*p3)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().AnchoredBy(*q1)) == p2);
+}
+
+BOOST_FIXTURE_TEST_CASE(unanchored_headers, FastBlocksSetup)
+{
+    StartPos();
+    const CBlockIndex* start{Tip()};
+    Take(PosBlock(1));
+    const int last{static_cast<int>(Pos().max_unanchored_slots)};
+    const auto header_reason{[&](const CBlock& block) {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        const CBlockIndex* prev{Chainman().m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+        if (Hooks().CheckHeader(block, *prev, Chainman(), state)) return std::string{};
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_INVALID_HEADER);
+        return state.GetRejectReason();
+    }};
+    // Without an acknowledgement, the header alone tells: max_unanchored_slots after the first block of
+    // stake after the last BMM block, no more.
+    BOOST_CHECK_EQUAL(header_reason(PosBlock(last + 1)), "bad-pos-unanchored");
+    BOOST_CHECK_EQUAL(header_reason(PosBlock(last)), "");
+    // An acknowledgement's header passes: what it covers is in its block. One that covers too little
+    // (the block of stake after the BMM block stays uncovered) fails in the state.
+    const CBlock too_little{PosBlock(last + 1, Anchor(Ticket(start->GetBlockHash(), script)))};
+    BOOST_CHECK_EQUAL(header_reason(too_little), "");
+    BOOST_CHECK_EQUAL(Check(too_little), "bad-pos-unanchored");
+    const CBlock covering{PosBlock(last + 1, Anchor(Ticket(Tip()->GetBlockHash(), script)))};
+    Take(covering);
+    // After an acknowledgement, the count starts at most at it.
+    BOOST_CHECK_EQUAL(header_reason(PosBlock(last + 1 + last)), "bad-pos-unanchored");
+    BOOST_CHECK_EQUAL(header_reason(PosBlock(last + last)), "");
+}
+
+BOOST_FIXTURE_TEST_CASE(evidence, FastBlocksSetup)
+{
+    StartPos();
+    const CBlock first{PosBlock(1)};
+    CBlock second{first};
+    SetCoinbase(second, [](CMutableTransaction& tx) { tx.vout.emplace_back(0, CScript() << OP_RETURN); });
+    Resign(second);
+    BOOST_REQUIRE(first.GetHash() != second.GetHash());
+    const uint256 genesis{Chainman().GetConsensus().hashGenesisBlock};
+    const int64_t slot{pos::SlotOf(first.nTime, Pos())};
+    std::string reason;
+
+    // Two headers of one slot, both signed by its leader: the offence.
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const auto offence{pos::CheckEvidence(proof, Hooks().Validators(), Pos(), genesis, reason)};
+    BOOST_REQUIRE_MESSAGE(offence, reason);
+    BOOST_CHECK(offence->pubkey == XOnly(Leader(slot)));
+    BOOST_CHECK_EQUAL(offence->slot, slot);
+    // Headers of blocks of stake.
+    BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = BmmBlock(/*use_mempool=*/false)}, Hooks().Validators(), Pos(), genesis, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-kind");
+    // Of one slot, which starts at their time.
+    {
+        CBlock later{PosBlock(2)};
+        BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = later}, Hooks().Validators(), Pos(), genesis, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-slot");
+        CBlockHeader a{first}, b{second};
+        a.nTime = b.nTime = static_cast<uint32_t>(Pos().genesis_time);
+        BOOST_CHECK(!pos::CheckEvidence({.a = a, .b = b}, Hooks().Validators(), Pos(), genesis, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-slot");
+    }
+    // Two headers, not one twice.
+    BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = first}, Hooks().Validators(), Pos(), genesis, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-same");
+    // Both signed by the leader of the slot.
+    for (const CKey& other : keys) {
+        if (XOnly(other) == XOnly(Leader(slot))) continue;
+        CBlock forged{second};
+        Resign(forged, &other);
+        BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = forged}, Hooks().Validators(), Pos(), genesis, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-sig");
+    }
+    // Without validators, no leader: no offence.
+    {
+        Consensus::PosParams none{Pos()};
+        none.genesis_validators.clear();
+        BOOST_CHECK(!pos::CheckEvidence(proof, pos::ValidatorSet{none}, none, genesis, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-sig");
+    }
+
+    // One proof per offence, whichever header comes first; it reads back as written.
+    pos::DoubleProposal swapped{.a = second, .b = first};
+    BOOST_CHECK(Hooks().AddEvidence(swapped, reason));
+    BOOST_CHECK(Hooks().AddEvidence(proof, reason));
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
+    DataStream stream{};
+    stream << *Hooks().Evidence().Get(*offence);
+    pos::DoubleProposal read;
+    stream >> read;
+    BOOST_CHECK(read.a.GetHash() == std::min(first.GetHash(), second.GetHash()));
+    BOOST_CHECK(read.b.ext.sig == (read.b.GetHash() == first.GetHash() ? first.ext.sig : second.ext.sig));
+    // Relayed when added (none to relay later); not if it is no proof.
+    BOOST_CHECK(Hooks().Evidence().TakeUnrelayed().empty());
+    BOOST_CHECK(!Hooks().AddEvidence({.a = first, .b = first}, reason));
+
+    // A node finds proofs itself, in the headers it is given: two of slot 2 on the first.
+    Take(first);
+    const CBlock child{PosBlock(2)};
+    CBlock rival{child};
+    SetCoinbase(rival, [](CMutableTransaction& tx) { tx.vout.emplace_back(0, CScript() << OP_RETURN); });
+    Resign(rival);
+    {
+        BlockValidationState state;
+        const std::vector<CBlockHeader> headers{child, rival};
+        BOOST_CHECK(Chainman().ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state));
+    }
+    const pos::Offence found{.pubkey = XOnly(Leader(slot + 1)), .slot = slot + 1};
+    BOOST_CHECK(Hooks().Evidence().Get(found));
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 2U);
+    // ... and relays them (in the follower's round).
+    const auto unrelayed{Hooks().Evidence().TakeUnrelayed()};
+    BOOST_REQUIRE_EQUAL(unrelayed.size(), 1U);
+    BOOST_CHECK(std::min(child.GetHash(), rival.GetHash()) == unrelayed[0].a.GetHash());
+
+    // Bounded: the proofs of the oldest slots go first, and so do the headers noted.
+    for (int64_t i{0}; i < static_cast<int64_t>(pos::MAX_EVIDENCE) + 5; ++i) Hooks().Evidence().Add({.pubkey = uint256{2}, .slot = slot + 1000 + i}, proof);
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), pos::MAX_EVIDENCE);
+    BOOST_CHECK(!Hooks().Evidence().Get(*offence));
+    BOOST_CHECK(!Hooks().Evidence().Get(found));
+    BOOST_CHECK(!Hooks().Evidence().Get({.pubkey = uint256{2}, .slot = slot + 1000 + 4}));
+    BOOST_CHECK(Hooks().Evidence().Get({.pubkey = uint256{2}, .slot = slot + 1000 + 5}));
+    pos::EvidencePool pool;
+    CBlockHeader header{first};
+    for (int64_t i{0}; i <= static_cast<int64_t>(pos::MAX_SIGNED_HEADERS); ++i) BOOST_CHECK(!pool.NoteSigned(header, i));
+    BOOST_CHECK(!pool.NoteSigned(second, 0));
+    BOOST_CHECK(pool.NoteSigned(second, static_cast<int64_t>(pos::MAX_SIGNED_HEADERS)));
+    BOOST_CHECK(!pool.NoteSigned(header, 5));
+}
+
+BOOST_FIXTURE_TEST_CASE(waiting_headers, FastBlocksSetup)
+{
+    // Headers that wait: for a commitment, for their slot, for an acknowledged commitment.
+    BOOST_CHECK(Hooks().IsWaitReason("bmm-unknown"));
+    BOOST_CHECK(Hooks().IsWaitReason("pos-time-future"));
+    BOOST_CHECK(Hooks().IsWaitReason("pos-ack-unknown"));
+    BOOST_CHECK(!Hooks().IsWaitReason("bad-pos-sig"));
+    StartPos();
+    const int height{Tip()->nHeight};
+    const auto ready{[&](const CBlockHeader& header) { return WITH_LOCK(::cs_main, return Hooks().WaitingReady(header, Record())); }};
+    const auto wait{[&](const CBlockHeader& header) { WITH_LOCK(::cs_main, Chainman().AddBmmWaiting(header, /*peer=*/-1)); }};
+
+    // A BMM block: once committed to, ordered by its height (as blocks of stake are).
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    BOOST_CHECK(!ready(bmm));
+
+    // A block of stake that acknowledges a commitment not on record yet, and one on top of it.
+    const pos::AnchorTicket ticket{Ticket(Tip()->GetBlockHash(), script)};
+    const CBlock acking{WithAck(PosBlock(1), pos::AnchorAck{.ticket = ticket, .main_height = Record().Height() + 1})};
+    BOOST_CHECK_EQUAL(Check(acking), "pos-ack-unknown");
+    CBlock child{PosBlock(2)};
+    child.hashPrevBlock = acking.GetHash();
+    Resign(child);
+    BOOST_CHECK(!ready(acking));
+    // (Validation keeps the header that waits; the one on it, the peer that sends both does.)
+    wait(acking);
+    wait(child);
+    BOOST_CHECK(!ready(child)); // its parent waits
+    Commit(ticket.Hash());
+    BOOST_CHECK(ready(acking) == std::optional<int64_t>{height + 1});
+    BOOST_CHECK(ready(child) == std::optional<int64_t>{height + 2});
+    Commit(bmm.GetHash());
+    BOOST_CHECK(ready(bmm) == std::optional<int64_t>{height + 1});
+
+    // A block of stake whose slot has not started: not before it does.
+    const CBlock future{PosBlock(5)};
+    Mock(future.nTime - Pos().max_future_seconds - 1);
+    BOOST_CHECK(!ready(future));
+    Mock(future.nTime);
+    BOOST_CHECK(ready(future) == std::optional<int64_t>{height + 1});
+
+    // Taken in, in that order, by the follower's round: the chain moves to the acknowledgement.
+    {
+        BlockValidationState state;
+        const std::vector<CBlockHeader> headers{acking, child};
+        BOOST_CHECK(Chainman().ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state));
+    }
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(child.GetHash())) != nullptr);
+}
+
+BOOST_FIXTURE_TEST_CASE(ticket_requests, FastBlocksSetup)
+{
+    StartPos();
+    Take(PosBlock(1));
+    // A commitment on record of a ticket this node does not have: asked for, once per mainchain block.
+    const pos::AnchorTicket ticket{Ticket(Tip()->GetBlockHash(), script)};
+    Commit(ticket.Hash());
+    BOOST_CHECK(Hooks().AskMissingTickets() == std::vector<uint256>{ticket.Hash()});
+    BOOST_CHECK(Hooks().AskMissingTickets().empty());
+    // Known now: not asked for again. (Nor are commitments to blocks.)
+    BOOST_CHECK(Hooks().AddTicket(ticket));
+    Main();
+    BOOST_CHECK(Hooks().AskMissingTickets().empty());
+
+    // From a peer: a ticket of a block this node does not know only if the mainchain committed to it.
+    const auto message{[&](const std::string& type, const auto& payload) {
+        DataStream stream{};
+        stream << payload;
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(/*peer=*/7, type, stream, misbehaving));
+        return misbehaving;
+    }};
+    const pos::AnchorTicket unknown_block{Ticket(uint256{0x77}, script)};
+    BOOST_CHECK_EQUAL(message(pos::MSG_TICKET, unknown_block), "");
+    BOOST_CHECK(!Hooks().GetTicket(unknown_block.Hash()));
+    const pos::AnchorTicket committed{Ticket(uint256{0x78}, script)};
+    Commit(committed.Hash());
+    BOOST_CHECK_EQUAL(message(pos::MSG_TICKET, committed), "");
+    BOOST_CHECK(Hooks().GetTicket(committed.Hash()));
+    // Requests: a bounded list.
+    BOOST_CHECK_EQUAL(message(pos::MSG_GETTICKETS, std::vector<uint256>(pos::MAX_TICKETS_ASKED, uint256{1})), "");
+    BOOST_CHECK_EQUAL(message(pos::MSG_GETTICKETS, std::vector<uint256>(pos::MAX_TICKETS_ASKED + 1, uint256{1})), "too many anchor tickets asked for");
+    BOOST_CHECK_EQUAL(message(pos::MSG_GETTICKETS, std::vector<unsigned char>{5}), "malformed request for anchor tickets");
+    BOOST_CHECK_EQUAL(message(pos::MSG_EVIDENCE, std::vector<unsigned char>{1, 2}), "malformed evidence");
+    // Other messages are not FastBlocks'.
+    DataStream empty{};
+    std::string misbehaving;
+    BOOST_CHECK(!Hooks().ProcessMessage(7, "other", empty, misbehaving));
+}
+
+BOOST_FIXTURE_TEST_CASE(staking_switch, FastBlocksSetup)
+{
+    StartPos();
+    BOOST_CHECK(producer->Enabled());
+    BOOST_CHECK_EQUAL(producer->LastSignedSlot(), -1);
+    producer->SetEnabled(false);
+    BOOST_CHECK(!producer->Enabled());
+    // (The switch stops the producer's thread; a block asked for directly is still made.)
+    std::string error;
+    const int64_t slot{Slot(1)};
+    BOOST_CHECK(producer->Produce(slot, error));
+    BOOST_CHECK_EQUAL(producer->LastSignedSlot(), slot);
+    producer->SetEnabled(true);
+    BOOST_CHECK(producer->Enabled());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

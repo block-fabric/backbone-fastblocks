@@ -48,6 +48,8 @@ struct PosParams {
     int64_t producer_share_bps{5000};
     //! A PoS block may be this far ahead of the node's clock, at most.
     int64_t max_future_seconds{2};
+    //! Not consensus: wallets call a block final once this many anchors cover it.
+    int final_anchors{6};
     //! The fixed validator set the chain starts with (phase 2 of the design: no bonding yet).
     std::vector<PosValidator> genesis_validators;
 

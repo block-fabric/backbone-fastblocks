@@ -50,6 +50,8 @@
 #include <policy/fees/estimator_man.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
+#include <pos/finality.h>
+#include <pos/hooks.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <rpc/blockchain.h>
@@ -839,6 +841,18 @@ public:
     bool isInitialBlockDownload() override
     {
         return chainman().IsInitialBlockDownload();
+    }
+    std::optional<Anchors> getAnchors() override
+    {
+        const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
+        if (!hooks) return std::nullopt;
+        Anchors anchors;
+        anchors.final_anchors = hooks->Params().final_anchors;
+        LOCK(::cs_main);
+        for (const pos::ChainAnchor& anchor : pos::RecentAnchors(*hooks, *chainman().ActiveChain().Tip(), static_cast<size_t>(std::max(anchors.final_anchors, 0)))) {
+            anchors.anchored_heights.push_back(anchor.anchored->nHeight);
+        }
+        return anchors;
     }
     bool shutdownRequested() override { return ShutdownRequested(m_node); }
     void initMessage(const std::string& message) override { ::uiInterface.InitMessage(message); }

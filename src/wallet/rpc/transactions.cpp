@@ -5,6 +5,7 @@
 #include <core_io.h>
 #include <key_io.h>
 #include <policy/rbf.h>
+#include <pos/finality.h>
 #include <primitives/transaction_identifier.h>
 #include <rpc/util.h>
 #include <rpc/rawtransaction_util.h>
@@ -33,6 +34,13 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
         int64_t block_time;
         CHECK_NONFATAL(chain.findBlock(conf->confirmed_block_hash, FoundBlock().time(block_time)));
         entry.pushKV("blocktime", block_time);
+        // FastBlocks: how final the block is.
+        if (confirms > 0) {
+            if (const auto anchors{chain.getAnchors()}) {
+                const pos::Finality finality{pos::FinalityAt(conf->confirmed_block_height, confirms, anchors->anchored_heights, anchors->final_anchors)};
+                entry.pushKV("finality", pos::FinalityName(finality.status));
+            }
+        }
     } else {
         entry.pushKV("trusted", CachedTxIsTrusted(wallet, wtx));
     }
@@ -404,6 +412,7 @@ static std::vector<RPCResult> TransactionDescriptionString()
            {RPCResult::Type::NUM, "blockheight", /*optional=*/true, "The block height containing the transaction."},
            {RPCResult::Type::NUM, "blockindex", /*optional=*/true, "The index of the transaction in the block that includes it."},
            {RPCResult::Type::NUM_TIME, "blocktime", /*optional=*/true, "The block time expressed in " + UNIX_EPOCH_TIME + "."},
+           {RPCResult::Type::STR, "finality", /*optional=*/true, "FastBlocks: how final the block that has it is: \"soft\" (blocks of stake only), \"anchored\" (an anchor covers it), \"final\" (enough anchors do)."},
            {RPCResult::Type::STR_HEX, "txid", "The transaction id."},
            {RPCResult::Type::STR_HEX, "wtxid", "The hash of serialized transaction, including witness data."},
            {RPCResult::Type::ARR, "alternate_wtxids", "The wtxids of transactions with different witness data but the same txid.",

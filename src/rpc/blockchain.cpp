@@ -43,6 +43,7 @@
 #include <rpc/protocol.h>
 #include <rpc/rawtransaction_util.h>
 #include <rpc/request.h>
+#include <rpc/pos.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
@@ -806,6 +807,7 @@ static std::vector<RPCResult> GetBlockFields(RPCResult tx_result, std::optional<
     fields.emplace_back(RPCResult::Type::NUM, "nTx", "The number of transactions in the block");
     fields.emplace_back(RPCResult::Type::STR_HEX, "previousblockhash", /*optional=*/true, "The hash of the previous block (if available)");
     fields.emplace_back(RPCResult::Type::STR_HEX, "nextblockhash", /*optional=*/true, "The hash of the next block (if available)");
+    for (RPCResult& field : PosBlockFields()) fields.push_back(std::move(field));
     if (elision_msg) {
         // Elide all block-level fields except the tx array (which differs per verbosity)
         std::vector<RPCResult> new_fields;
@@ -914,7 +916,9 @@ static RPCMethod getblock()
         tx_verbosity = TxVerbosity::SHOW_DETAILS_AND_PREVOUT;
     }
 
-    return blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, tx_verbosity, chainman.GetConsensus().powLimit);
+    UniValue result{blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, tx_verbosity, chainman.GetConsensus().powLimit)};
+    PushPosBlockInfo(chainman, block, *pblockindex, result);
+    return result;
 },
     };
 }
@@ -1431,6 +1435,8 @@ RPCMethod getblockchaininfo()
                 {RPCResult::Type::BOOL, "automatic_pruning", /*optional=*/true, "whether automatic pruning is enabled (only present if pruning is enabled)"},
                 {RPCResult::Type::NUM, "prune_target_size", /*optional=*/true, "the target size used by pruning (only present if automatic pruning is enabled)"},
                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "the block challenge (aka. block script), in hexadecimal (only present if the current network is a signet)"},
+                {RPCResult::Type::STR_HEX, "anchored_tip", /*optional=*/true, "FastBlocks: the highest block an anchor covers"},
+                {RPCResult::Type::STR_HEX, "final_tip", /*optional=*/true, "FastBlocks: the highest final block"},
                 (IsDeprecatedRPCEnabled("warnings") ?
                     RPCResult{RPCResult::Type::STR, "warnings", "any network and blockchain warnings (DEPRECATED)"} :
                     RPCResult{RPCResult::Type::ARR, "warnings", "any network and blockchain warnings (run with `-deprecatedrpc=warnings` to return the latest warning as a single string)",
@@ -1496,6 +1502,7 @@ RPCMethod getblockchaininfo()
         obj.pushKV("signet_challenge", HexStr(signet_challenge));
     }
 
+    PushPosChainInfo(chainman, obj);
     NodeContext& node = EnsureAnyNodeContext(request.context);
     obj.pushKV("warnings", node::GetWarningsForRpc(*CHECK_NONFATAL(node.warnings), IsDeprecatedRPCEnabled("warnings")));
     return obj;

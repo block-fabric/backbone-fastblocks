@@ -366,6 +366,7 @@ public:
         consensus.pos.max_validators = 32;
         consensus.pos.max_unanchored_slots = 600;
         consensus.pos.stall_seconds = 600;
+        consensus.pos.final_anchors = 3;
     }
 };
 
@@ -484,6 +485,7 @@ public:
         consensus.pos.max_validators = 32;
         consensus.pos.max_unanchored_slots = 600;
         consensus.pos.stall_seconds = 600;
+        consensus.pos.final_anchors = 3;
     }
 };
 
@@ -584,6 +586,7 @@ public:
             consensus.pos.max_validators = 8;
             consensus.pos.max_unanchored_slots = 100;
             consensus.pos.stall_seconds = 30;
+            consensus.pos.final_anchors = 1;
             consensus.pos.genesis_validators = opts.pos_validators;
         }
         m_assumed_blockchain_size = 0;

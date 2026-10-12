@@ -64,6 +64,11 @@ public:
         std::string error;
     };
     Status GetStatus() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether the producer makes blocks at its slots (setstaking): on when the node starts. */
+    bool Enabled() const { return m_enabled.load(); }
+    void SetEnabled(bool enabled) { m_enabled = enabled; }
+    /** The highest slot this node signed, by the slashing protection; -1 if none. */
+    int64_t LastSignedSlot() const;
     /** The x-only keys of this node's validators. */
     std::vector<uint256> Keys() const;
     const CScript& Payout() const { return m_payout; }
@@ -88,6 +93,7 @@ private:
     std::condition_variable_any m_wake;
     std::thread m_thread GUARDED_BY(m_mutex);
     std::atomic<bool> m_stop{false};
+    std::atomic<bool> m_enabled{true};
     Status m_status GUARDED_BY(m_mutex);
     //! Serializes Produce: the thread and RPC.
     Mutex m_produce_mutex;
