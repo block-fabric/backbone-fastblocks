@@ -73,8 +73,21 @@ std::vector<ChainAnchor> RecentAnchors(const FastBlocksHooks& hooks, const CBloc
  * another branch, or one whose ticket nobody showed) may be such a chain's anchor. So a block is
  * covered by k anchors net when every chain that leaves it out (forks below it) can have k fewer than
  * this one at most. Element k-1 is the highest block covered by k (newest first, at most `count`).
+ * A skipped commitment counts against the forks that could have it: those at its block's place, for a
+ * ticket or BMM block the node knows; every fork, for one it does not (its ticket was kept hidden).
  */
-std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<uint32_t>& skipped, int count);
+struct SkippedCommitment {
+    //! The mainchain height of the commitment.
+    uint32_t main_height{0};
+    //! Where a chain that has it as an anchor leaves this one, as far as the node knows: any fork
+    //! (a commitment whose ticket or block it does not know); at or above a height (the ticket names
+    //! a block of this chain there); or exactly at a height (a block of another branch).
+    std::optional<int> min_fork;
+    std::optional<int> exact_fork;
+    /** Whether a chain that leaves this one above `fork` can have it. */
+    bool UsableAt(int fork) const { return exact_fork ? fork == *exact_fork : (!min_fork || fork >= *min_fork); }
+};
+std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count);
 /** The same for the chain that ends at `tip`, with the commitments on its node's record (4 × final_anchors + 8 anchors walked). Called with cs_main held. */
 std::vector<int> AnchoredHeights(const FastBlocksHooks& hooks, const CBlockIndex& tip, int final_anchors) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

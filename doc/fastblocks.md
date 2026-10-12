@@ -155,8 +155,12 @@ one whose ticket nobody showed: a bidder can keep a branch and its ticket to
 itself) may be the anchor of a chain that leaves a block out. So a block counts
 k anchors when every chain that forks below it has k fewer at most, taking
 every skipped commitment since the last anchor they share as that chain's (the
-newest 4 · `final_anchors` + 8 anchors are looked at). Without skipped
-commitments this is the number of anchors that cover the block.
+newest 4 · `final_anchors` + 8 anchors are looked at). A skipped commitment
+whose ticket or BMM block the node knows counts only against the forks that
+could have it: where the block it rests on leaves the chain. Without skipped
+commitments this is the number of anchors that cover the block. Finality is
+what a node knows: one that never saw a ticket counts its commitment against
+every fork.
 
 `getblock` gives a block's `finality` (`status`, `anchors`), and its `kind`
 (`pos` or `bmm`), `slot`, `proposer` and `ack`; `getblockchaininfo` the

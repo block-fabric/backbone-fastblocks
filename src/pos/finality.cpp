@@ -30,7 +30,7 @@ std::vector<ChainAnchor> RecentAnchors(const FastBlocksHooks& hooks, const CBloc
     return anchors;
 }
 
-std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<uint32_t>& skipped, int count)
+std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count)
 {
     std::vector<int> heights;
     if (anchors.empty() || count <= 0) return heights;
@@ -48,7 +48,7 @@ std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, con
             if (anchor.anchored->nHeight > fork) ++above;
             if (anchor.block->nHeight <= fork) shared_height = std::max(shared_height, anchor.main_height);
         }
-        const int after{static_cast<int>(std::count_if(skipped.begin(), skipped.end(), [&](uint32_t h) { return h > shared_height; }))};
+        const int after{static_cast<int>(std::count_if(skipped.begin(), skipped.end(), [&](const SkippedCommitment& c) { return c.main_height > shared_height && c.UsableAt(fork); }))};
         return above - after;
     }};
     // The margin of a block at `height`: the least over the forks below it. It changes only where an
@@ -60,6 +60,9 @@ std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, con
         for (const ChainAnchor& anchor : anchors) {
             if (anchor.block->nHeight - 1 < height - 1) take(anchor.block->nHeight - 1);
         }
+        for (const SkippedCommitment& commitment : skipped) {
+            if (commitment.exact_fork && *commitment.exact_fork < height - 1) take(*commitment.exact_fork);
+        }
         // Deeper than every acknowledgement walked: as many anchors as were walked.
         return least == std::numeric_limits<int>::max() ? static_cast<int>(anchors.size()) : least;
     }};
@@ -67,6 +70,11 @@ std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, con
     for (const ChainAnchor& anchor : anchors) {
         candidates.insert(anchor.anchored->nHeight);
         candidates.insert(anchor.block->nHeight - 1);
+    }
+    // (A fork at a height adds a candidate just above it.)
+    for (const SkippedCommitment& commitment : skipped) {
+        if (commitment.exact_fork) candidates.insert(*commitment.exact_fork);
+        if (commitment.min_fork) candidates.insert(*commitment.min_fork);
     }
     std::vector<std::pair<int, int>> margins; // height, margin: the margin does not grow with the height
     for (const int height : candidates) margins.emplace_back(height, net(height));
@@ -86,14 +94,28 @@ std::vector<int> AnchoredHeights(const FastBlocksHooks& hooks, const CBlockIndex
     AssertLockHeld(::cs_main);
     if (final_anchors <= 0) return {};
     const std::vector<ChainAnchor> anchors{RecentAnchors(hooks, tip, static_cast<size_t>(final_anchors) * 4 + 8)};
-    std::vector<uint32_t> skipped;
+    std::vector<SkippedCommitment> skipped;
     const ChainstateManager* chainman{hooks.Chainman()};
     if (!anchors.empty() && chainman && chainman->m_mainchain) {
         std::set<uint32_t> used;
         for (const ChainAnchor& anchor : anchors) used.insert(anchor.main_height);
         const sidechain::Mainchain& record{*chainman->m_mainchain};
         for (int height{static_cast<int>(anchors.back().main_height) + 1}; height <= record.Height(); ++height) {
-            if (record.BmmAt(height) && !used.contains(static_cast<uint32_t>(height))) skipped.push_back(static_cast<uint32_t>(height));
+            const auto bmm{record.BmmAt(height)};
+            if (!bmm || used.contains(static_cast<uint32_t>(height))) continue;
+            SkippedCommitment commitment{.main_height = static_cast<uint32_t>(height)};
+            // Where a chain that has it leaves this one: at the branch of the block it rests on, if
+            // the node knows it (a BMM block, or the block a ticket names); anywhere otherwise.
+            const CBlockIndex* rests_on{chainman->m_blockman.LookupBlockIndex(*bmm)};
+            if (!rests_on) {
+                if (const auto ticket{hooks.GetTicket(*bmm)}) rests_on = chainman->m_blockman.LookupBlockIndex(ticket->anchored);
+            }
+            if (rests_on && tip.GetAncestor(rests_on->nHeight) == rests_on) {
+                commitment.min_fork = rests_on->nHeight;
+            } else if (rests_on) {
+                commitment.exact_fork = LastCommonAncestor(rests_on, &tip)->nHeight;
+            }
+            skipped.push_back(commitment);
         }
     }
     return NetAnchoredHeights(anchors, skipped, final_anchors);
