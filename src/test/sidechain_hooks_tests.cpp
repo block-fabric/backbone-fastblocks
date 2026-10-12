@@ -229,6 +229,16 @@ struct TwiceSignedHooks : SignedHooks {
     }
 };
 
+/** Hooks whose merged mined blocks carry an output of their own, and that note what they were asked for. */
+struct OwnOutputHooks : sidechain::ChainHooks {
+    mutable std::vector<uint256> asked;
+    std::vector<CTxOut> MergeMinedOutputs(const sidechain::StoreView&, const CBlockIndex& prev, int64_t) const override
+    {
+        asked.push_back(prev.GetBlockHash());
+        return {CTxOut{0, CScript() << OP_RETURN << std::vector<unsigned char>{0xDD, 'O', 'W', 'N'}}};
+    }
+};
+
 /** Hooks whose extended blocks take the peg actions of the step the test sets. */
 struct StepHooks : sidechain::ChainHooks {
     mutable sidechain::PegStep step;
@@ -1001,6 +1011,26 @@ BOOST_FIXTURE_TEST_CASE(block_extension_equivalent, SidechainSetup)
     BOOST_REQUIRE(chainman.m_blockman.ReadBlock(read, *index));
     BOOST_CHECK(read.ext == honest.ext);
     BOOST_CHECK(WITH_LOCK(::cs_main, return index->IsValid(BLOCK_VALID_SCRIPTS)));
+}
+
+BOOST_FIXTURE_TEST_CASE(merge_mined_outputs, SidechainSetup)
+{
+    // A merged mined block carries the outputs of the sidechain's own in its coinbase, after the
+    // payouts; the hook is asked with the block's parent. Without the hook, none.
+    const CTxOut own{0, CScript() << OP_RETURN << std::vector<unsigned char>{0xDD, 'O', 'W', 'N'}};
+    const CBlock plain{Build()};
+    BOOST_CHECK_EQUAL(std::count(plain.vtx[0]->vout.begin(), plain.vtx[0]->vout.end(), own), 0);
+    auto owned{std::make_unique<OwnOutputHooks>()};
+    OwnOutputHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    const uint256 tip{WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash())};
+    const CBlock block{Build()};
+    BOOST_REQUIRE_EQUAL(hooks.asked.size(), 1U);
+    BOOST_CHECK(hooks.asked[0] == tip);
+    BOOST_CHECK_EQUAL(std::count(block.vtx[0]->vout.begin(), block.vtx[0]->vout.end(), own), 1);
+    BOOST_CHECK(block.vtx[0]->vout[0] != own);
+    // The block is valid with it.
+    Take(block);
 }
 
 BOOST_FIXTURE_TEST_CASE(record_failures_pardoned, SidechainSetup)

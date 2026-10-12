@@ -32,6 +32,8 @@ uint256 ChainHooks::SectionsHash(std::span<const unsigned char> sections) const
     return (TaggedHash("sidechain/sections") << sections).GetSHA256();
 }
 
+std::vector<CTxOut> ChainHooks::MergeMinedOutputs(const StoreView&, const CBlockIndex&, int64_t) const { return {}; }
+
 OtherExtension ChainHooks::CheckOtherExtension(const CBlockHeader&, const CBlockIndex&) const { return OtherExtension::INVALID; }
 
 int64_t ChainHooks::MaxFutureBlockTime() const { return MAX_FUTURE_BLOCK_TIME; }

@@ -46,6 +46,7 @@ namespace sidechain {
 class Follower;
 class Mainchain;
 class State;
+class StoreView;
 
 /** The kinds of blocks a chain can have. */
 enum class BlockKind : uint8_t {
@@ -224,6 +225,15 @@ public:
     //
     // Block production and services
     //
+
+    /**
+     * Outputs of the sidechain's own that a block assembled with the template's peg actions (a merged
+     * mined block) puts in its coinbase, after the payouts and the bundle commitment: proofs its rules
+     * take, say. `view`: the state with the block as assembled so far; `prev` its parent and `time`
+     * its time. The rules check them as any other output of the coinbase. By default none. Called
+     * with cs_main held, by block assembly only.
+     */
+    virtual std::vector<CTxOut> MergeMinedOutputs(const StoreView& view, const CBlockIndex& prev, int64_t time) const;
 
     /**
      * Called by the Follower each round, once the record is up to date, in place of its own merged
