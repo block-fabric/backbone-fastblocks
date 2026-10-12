@@ -173,6 +173,7 @@ BASE_SCRIPTS = [
     'feature_fastblocks_rpc.py',
     'feature_fastblocks_partition.py',
     'feature_fastblocks_stall.py',
+    'feature_fastblocks_signature.py',
     'feature_sidechain_network.py',
     'feature_sidechain_follower.py',
     'feature_sidechain_rules.py',

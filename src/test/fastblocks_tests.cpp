@@ -1577,4 +1577,61 @@ BOOST_FIXTURE_TEST_CASE(stale_tickets, FastBlocksSetup)
     Take(PosBlock(4 + last));
 }
 
+BOOST_FIXTURE_TEST_CASE(swapped_signature, FastBlocksSetup)
+{
+    // The block hash does not cover the leader's signature: a node that has the header of a block of
+    // stake turns away a block with that hash and another signature (another key's, or none) as a
+    // mutated block, without taking the header for invalid; the block its leader signed is taken after.
+    StartPos();
+    Take(PosBlock(1));
+    const CBlock honest{PosBlock(2)};
+    const CKey& leader{Leader(pos::SlotOf(honest.nTime, Pos()))};
+    const CKey* other{nullptr};
+    for (const CKey& k : keys) {
+        if (XOnly(k) != XOnly(leader)) other = &k;
+    }
+    BOOST_REQUIRE(other);
+    CBlock swapped{honest};
+    BOOST_REQUIRE(pos::Producer::Sign(swapped, *other));
+    CBlock zeroed{honest};
+    zeroed.ext.sig.fill(0);
+    BOOST_REQUIRE(swapped.GetHash() == honest.GetHash() && zeroed.GetHash() == honest.GetHash());
+    BOOST_REQUIRE(swapped.ext.sig != honest.ext.sig);
+
+    // Without the header, the signature is checked with it: bad-pos-sig, and no index.
+    Submit(swapped);
+    BOOST_CHECK_EQUAL(Reason(swapped), "bad-pos-sig");
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(honest.GetHash())));
+
+    // With the header: a mutated block.
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(Chainman().ProcessNewBlockHeaders({{honest}}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    const CBlockIndex* index{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index);
+    for (const CBlock& bad : {swapped, zeroed}) {
+        BlockValidationState state;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return Chainman().AcceptBlock(std::make_shared<const CBlock>(bad), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-blk-extension");
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+        Submit(bad);
+        BOOST_CHECK_EQUAL(Reason(bad), "bad-blk-extension");
+        LOCK(::cs_main);
+        BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK(index->m_ext->sig == honest.ext.sig);
+    }
+    BOOST_CHECK(Tip() == index->pprev);
+    // The block its leader signed: taken, and stored with its signature.
+    Take(honest);
+    CBlock read;
+    BOOST_REQUIRE(Chainman().m_blockman.ReadBlock(read, *index));
+    BOOST_CHECK(read.ext == honest.ext);
+    // Afterwards, another signature is still a mutated block, and changes nothing.
+    BlockValidationState state;
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Chainman().AcceptBlock(std::make_shared<const CBlock>(swapped), state, nullptr, true, nullptr, nullptr, true)));
+    BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+    BOOST_CHECK(Tip() == index);
+    Take(PosBlock(3));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

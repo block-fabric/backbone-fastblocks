@@ -116,6 +116,7 @@ Block (`CheckBlock`):
 | `nNonce` is the acknowledged height, 0 without one | `bad-pos-ack-nonce` |
 | Ticket version 1 | `bad-pos-ticket-version` |
 | The payee is a standard script of 80 bytes or less, not data | `bad-pos-ticket-payee` |
+| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed) | `bad-blk-extension` |
 
 Acknowledgement (state):
 
@@ -336,6 +337,7 @@ after every step:
 | `feature_fastblocks.py` | Validators, anchors, the fee split and pot, a withdrawal, slashing protection, BMM blocks with transactions when stalled |
 | `feature_fastblocks_rpc.py` | RPCs, the wallet's finality, tickets and evidence over P2P, a late observer |
 | `feature_fastblocks_partition.py` | A leader that signs twice; a partition with an anchor on each side (the earlier one wins); an anchor of a branch the validators left; IBD |
+| `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex` |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
@@ -364,6 +366,10 @@ What the audit of this round changed (each with a test):
   tried; a new one names the tip if needed.
 - `nPowTargetSpacing` is the slot (Bitcoin's heuristics count blocks by it).
 - A header of a slot to come waits only if its leader signed it.
+- A block for a header the node has must carry its signature
+  (`bad-blk-extension`): a node could otherwise store, and serve, a block
+  of stake with another or no signature (template: `AcceptBlock`, compact
+  blocks; a block stored so before is read with its header's signature).
 
 ## Deviations from the design (phase 5)
 
