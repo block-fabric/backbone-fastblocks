@@ -16,6 +16,7 @@
 #include <node/context.h>
 #include <pos/hooks.h>
 #include <pos/producer.h>
+#include <pos/staking.h>
 #include <pow.h>
 #include <qt/clientmodel.h>
 #include <qt/noderpc.h>
@@ -35,9 +36,13 @@
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#include <QApplication>
 #include <QDir>
 #include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QTimer>
 #include <QTableWidget>
 #include <QTemporaryDir>
 
@@ -147,6 +152,31 @@ struct StakingChain : InstalledHooks {
     }
 };
 
+/**
+ * Press a button of every message box that pops up while `action` runs.
+ * @return the texts of the message boxes
+ */
+QStringList WithMessageBoxes(QMessageBox::StandardButton button, const std::function<void()>& action)
+{
+    QStringList texts;
+    QTimer timer;
+    QObject::connect(&timer, &QTimer::timeout, [button, &texts] {
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            auto* box{qobject_cast<QMessageBox*>(widget)};
+            if (!box || !box->isVisible()) continue;
+            texts << box->text();
+            // An information box only has OK.
+            QAbstractButton* choice{box->button(button)};
+            if (!choice) choice = box->button(QMessageBox::Ok);
+            if (choice) choice->click();
+        }
+    });
+    timer.start(20);
+    action();
+    timer.stop();
+    return texts;
+}
+
 void SaveScreenshot(QWidget& widget, const QString& name)
 {
     const QString dir{qEnvironmentVariable("CHAINS_GUI_SCREENSHOT_DIR")};
@@ -186,6 +216,8 @@ void StakingTests::stakingTests()
     {
         LOCK(wallet->cs_wallet);
         wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        // What the wallet makes goes to the node's mempool (the bonds below).
+        wallet->SetBroadcastTransactions(true);
         wallet->SetupDescriptorScriptPubKeyMans();
         FlatSigningProvider provider;
         std::string error;
@@ -277,10 +309,43 @@ void StakingTests::stakingTests()
     QVERIFY(!page.findChild<QLabel*>("stakingError")->text().contains("getstakinginfo"));
     SaveScreenshot(page, "staking-page");
 
+    // Bonds: the wallet bonds a coin to this node's validator key (the node signs the proof of
+    // possession); it is in the list of the wallet's bonds once a block of stake has it. Asked first.
+    auto* bond_key{page.findChild<QLineEdit*>("bondKey")};
+    auto* bond_amount{page.findChild<QLineEdit*>("bondAmount")};
+    auto* bond_button{page.findChild<QPushButton*>("bondButton")};
+    auto* unbond_button{page.findChild<QPushButton*>("unbondButton")};
+    auto* bonds{page.findChild<QTableWidget*>("bonds")};
+    QVERIFY(bond_key && bond_amount && bond_button && unbond_button && bonds);
+    QCOMPARE(bonds->rowCount(), 0);
+    bond_amount->setText("1");
+    // Said no: nothing happens.
+    QStringList texts{WithMessageBoxes(QMessageBox::No, [&] { bond_button->click(); })};
+    QCOMPARE(texts.size(), 1);
+    QVERIFY2(texts[0].startsWith("Bond 1 to the validator key"), qPrintable(texts[0]));
+    QCOMPARE(bond_amount->text(), QString{"1"});
+    texts = WithMessageBoxes(QMessageBox::Yes, [&] { bond_button->click(); });
+    QCOMPARE(texts.size(), 2);
+    QVERIFY2(texts[1].contains("The bond is in transaction"), qPrintable(texts.join(" / ")));
+    QVERIFY2(page.findChild<QLabel*>("stakingError")->text().isEmpty(), qPrintable(page.findChild<QLabel*>("stakingError")->text()));
+    QTRY_VERIFY_WITH_TIMEOUT(bonds->rowCount() == 1 && bonds->item(0, 1)->text() == "1.00000000", 30000);
+    QCOMPARE(WITH_LOCK(::cs_main, return pos::GetStakeState(context.chainman->ActiveChainstate().SideState().View()).bonded), COIN);
+    QCOMPARE(bonds->item(0, 0)->toolTip(), QString::fromStdString(XOnlyHex(ValidatorKey(1))));
+    // Unbond all of it (no amount): unbonding, paid some anchors later.
+    QVERIFY(bond_amount->text().isEmpty());
+    texts = WithMessageBoxes(QMessageBox::Yes, [&] { unbond_button->click(); });
+    QCOMPARE(texts.size(), 2);
+    QVERIFY2(texts[0].contains("all of the bond"), qPrintable(texts[0]));
+    QVERIFY2(texts[1].contains("The unbond of 1.00000000"), qPrintable(texts.join(" / ")));
+    QTRY_VERIFY_WITH_TIMEOUT(bonds->item(0, 1)->text() == "0.00000000" && bonds->item(0, 2)->text() == "1.00000000", 30000);
+    SaveScreenshot(page, "staking-page-bonds");
+
     // Without a wallet, the rest of the page still works.
     page.setWalletModel(nullptr);
     page.refresh();
     QVERIFY(page.findChild<QLabel*>("stakingError")->text().isEmpty());
+    QVERIFY(!bond_button->isEnabled());
+    QCOMPARE(bonds->rowCount(), 0);
     page.hide();
     chain.Hooks().StopServices(context);
 }

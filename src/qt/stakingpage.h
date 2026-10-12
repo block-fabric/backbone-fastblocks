@@ -20,6 +20,7 @@ class WalletModel;
 QT_BEGIN_NAMESPACE
 class QHideEvent;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QShowEvent;
 class QTableWidget;
@@ -32,9 +33,11 @@ QT_END_NAMESPACE
  *  - this node as a validator: its keys, what it made, its next slot; staking on and off;
  *  - finality: how far the chain is anchored and final, and the wallet's coins that are soft,
  *    anchored or final;
- *  - the validators of the epoch, and the newest anchors.
+ *  - the validators of the epoch, and the newest anchors;
+ *  - the wallet's bonds: bond coins to a validator key, unbond them.
  * It works through the node's RPC commands (getposinfo, getstakinginfo, setstaking, getvalidators,
- * getanchorinfo, getbalances), and refreshes every few seconds while it is shown.
+ * getanchorinfo, getbalances, listbonds, createbond, createunbond), and refreshes every few seconds
+ * while it is shown.
  */
 class StakingPage : public QWidget
 {
@@ -60,6 +63,12 @@ private:
     /** Run an RPC command; nothing, with the error noted on the page, if it fails. */
     std::optional<UniValue> call(const std::string& method, const UniValue& params, bool wallet = false);
     void setStaking(bool enabled);
+    /** Bond the amount entered to the key entered (this node's first validator key if none), after asking. */
+    void bond();
+    /** Unbond the amount entered (all of it if none) from the key entered, after asking. */
+    void unbond();
+    /** The key entered, or this node's first validator key. */
+    QString bondKey();
 
     ClientModel* m_client_model{nullptr};
     QPointer<WalletModel> m_wallet_model;
@@ -75,6 +84,11 @@ private:
     QLabel* m_balance_final{nullptr};
     QTableWidget* m_validators{nullptr};
     QTableWidget* m_anchors{nullptr};
+    QLineEdit* m_bond_key{nullptr};
+    QLineEdit* m_bond_amount{nullptr};
+    QPushButton* m_bond_button{nullptr};
+    QPushButton* m_unbond_button{nullptr};
+    QTableWidget* m_bonds{nullptr};
     QLabel* m_error{nullptr};
 };
 
