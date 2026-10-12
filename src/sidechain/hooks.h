@@ -169,6 +169,14 @@ public:
     /** Whether refund requests are valid only in blocks that take the peg actions. */
     virtual bool RefundsOnlyInPegSteps() const { return false; }
     /**
+     * Rules of the sidechain's own for a transaction that is not a coinbase, after the template's
+     * (State::ApplyTx): outputs of kinds of its own, say. `state` is the transaction's own overlay,
+     * so a transaction that breaks a rule changes nothing; what it adds to `payouts` is paid as
+     * refunds are. The mempool asks it too, on an overlay it drops, with the height of the next block
+     * and `peg_step` false. By default nothing: every transaction keeps them.
+     */
+    virtual bool ApplyTx(State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const;
+    /**
      * Peg actions of the sidechain's own, first in a block that takes them: what it adds to
      * `owed_tx` is paid by the coinbase as refunds are. Block assembly calls it too, with the block
      * as far as it is known then: its parent, version, time and sections (SidechainAssembly), and a
