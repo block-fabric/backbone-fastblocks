@@ -67,6 +67,13 @@ struct PegStep {
     uint256 nonce;
     //! If set, a bundle the block starts takes only withdrawals made at this height or below.
     std::optional<int32_t> max_withdrawal_height;
+    /**
+     * If set, the height the peg actions count as at, in place of the block's: the lock time of a
+     * bundle the block starts, and the height of a bundle failure it sees, from which the retry delay
+     * counts. A block that takes the peg actions for another one (its nonce) sets it to that one's
+     * height, so that every block taking them for the same one builds the same bundle.
+     */
+    std::optional<int32_t> peg_height;
     friend bool operator==(const PegStep&, const PegStep&) = default;
 };
 

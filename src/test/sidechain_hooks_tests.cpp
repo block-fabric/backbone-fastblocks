@@ -184,6 +184,19 @@ struct SignedHooks : sidechain::ChainHooks {
     }
 };
 
+/** Hooks whose extended blocks take the peg actions of the step the test sets. */
+struct StepHooks : sidechain::ChainHooks {
+    mutable sidechain::PegStep step;
+    bool BlockExtensions() const override { return true; }
+    sidechain::BlockKind Kind(const CBlockHeader& header) const override { return header.IsExtended() ? sidechain::BlockKind::PLUGIN : sidechain::BlockKind::BMM; }
+    bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& out, std::string& reject_reason) const override
+    {
+        if (!block.IsExtended()) return ChainHooks::GetPegStep(block, mainchain, out, reject_reason);
+        out = step;
+        return true;
+    }
+};
+
 /** A chain that is a sidechain in slot 3, with a record of its mainchain the test writes. */
 struct SidechainSetup : public TestingSetup {
     SidechainSetup() : TestingSetup{ChainType::REGTEST, {.extra_args = {"-sidechainslot=3"}}} {}
@@ -287,7 +300,7 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     AppendMain(mainchain, 101, block.GetHash());
     BOOST_CHECK(hooks.GetPegStep(block, mainchain, step, reason));
     BOOST_REQUIRE(step);
-    BOOST_CHECK(*step == (sidechain::PegStep{.main_height = 0, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt}));
+    BOOST_CHECK(*step == (sidechain::PegStep{.main_height = 0, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt, .peg_height = std::nullopt}));
     BOOST_CHECK(hooks.WaitingReady(block, mainchain) == std::optional<int64_t>{1});
 
     // The sidechain's own peg actions and notes: none.
@@ -661,7 +674,7 @@ BOOST_FIXTURE_TEST_CASE(assembly_takes_own_peg_actions, SidechainSetup)
     // A block with the peg actions of a given step, and sections.
     node::SidechainAssembly assembly;
     assembly.peg = node::SidechainAssembly::Peg::STEP;
-    assembly.step = sidechain::PegStep{.main_height = 0, .nonce = tip, .max_withdrawal_height = std::nullopt};
+    assembly.step = sidechain::PegStep{.main_height = 0, .nonce = tip, .max_withdrawal_height = std::nullopt, .peg_height = std::nullopt};
     assembly.sections = {1, 2, 3};
     {
         const auto block_template{node::BlockAssembler{chainstate, m_node.mempool.get(), options, assembly}.CreateNewBlock()};
@@ -846,6 +859,80 @@ BOOST_FIXTURE_TEST_CASE(block_extension_mismatch, SidechainSetup)
     // Blocks without the extension are not touched by the rule.
     sidechain::SetHooks(nullptr);
     BOOST_CHECK(sidechain::SameExtension(Header(false), CBlockIndex{Header(false)}));
+}
+
+BOOST_AUTO_TEST_CASE(peg_height)
+{
+    // A step may say at what height the peg actions count: the bundle's lock time and the height of a
+    // failure (the retry delay) then depend on it, not on the height of the block that takes them.
+    auto owned{std::make_unique<StepHooks>()};
+    StepHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    Consensus::SidechainParams params;
+    params.bundle_retry_delay = 3;
+    sidechain::Mainchain mainchain;
+    AppendMain(mainchain, 100);
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay base{empty, /*journal=*/false};
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    {
+        sidechain::State state{base};
+        BOOST_REQUIRE_MESSAGE(state.ApplyTx(Tx({WithdrawalOut(COIN)}, 1), 1, params, payouts, reason), reason);
+    }
+    hooks.step = sidechain::PegStep{.main_height = 0, .nonce = uint256{0xa}, .max_withdrawal_height = 1, .peg_height = 2};
+    const auto expected{sidechain::State{base}.NextBundle(2, uint256{0xa}, params, nullptr, 1)};
+    BOOST_REQUIRE(expected);
+    BOOST_CHECK_EQUAL(expected->nLockTime, 2U);
+    const uint256 bundle_hash{expected->GetHash().ToUint256()};
+    // Blocks at different heights that take the same step build the same bundle.
+    for (const int height : {5, 9}) {
+        sidechain::StoreOverlay store{base, /*journal=*/true};
+        sidechain::State state{store};
+        CAmount minted{-1};
+        BOOST_CHECK_MESSAGE(state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(bundle_hash)}}), height, params, mainchain, minted, reason), reason);
+        BOOST_REQUIRE(state.Bundle());
+        BOOST_CHECK(state.Bundle()->hash == bundle_hash);
+        BOOST_CHECK_EQUAL(state.Bundle()->height, 2);
+        BOOST_CHECK_EQUAL(Assert(state.BundleTx())->nLockTime, 2U);
+    }
+    // Without it, the block's height, as in the template.
+    {
+        hooks.step.peg_height.reset();
+        sidechain::StoreOverlay store{base, /*journal=*/true};
+        sidechain::State state{store};
+        CAmount minted{-1};
+        BOOST_CHECK(!state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(bundle_hash)}}), 5, params, mainchain, minted, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-sc-bundle-hash");
+        hooks.step.peg_height = 2;
+    }
+
+    // The mainchain fails the bundle: the failure is at the height the step says, and the retry
+    // delay counts from it, whatever the heights of the blocks.
+    sidechain::StoreOverlay store{base, /*journal=*/false};
+    sidechain::State state{store};
+    CAmount minted{-1};
+    BOOST_REQUIRE_MESSAGE(state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(bundle_hash)}}), 5, params, mainchain, minted, reason), reason);
+    sidechain::MainBlock failed;
+    failed.hash = uint256{0x99};
+    failed.prev_hash = mainchain.TipHash();
+    failed.time = 101;
+    failed.bundles.push_back({bundle_hash, /*paid=*/false});
+    BOOST_REQUIRE(mainchain.Append(failed));
+    hooks.step = sidechain::PegStep{.main_height = 1, .nonce = uint256{0xb}, .max_withdrawal_height = 6, .peg_height = 6};
+    BOOST_REQUIRE_MESSAGE(state.ConnectBlock(CoinbaseBlock(true), 50, params, mainchain, minted, reason), reason);
+    BOOST_CHECK(!state.Bundle());
+    BOOST_CHECK_EQUAL(state.LastFailureHeight(), 6);
+    // Two after it: too early, although the block is far higher.
+    hooks.step = sidechain::PegStep{.main_height = 1, .nonce = uint256{0xc}, .max_withdrawal_height = 8, .peg_height = 8};
+    const auto early{sidechain::State{store}.NextBundle(9, uint256{0xc}, params, nullptr, 8)};
+    BOOST_REQUIRE(early);
+    BOOST_CHECK(!state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(early->GetHash().ToUint256())}}), 60, params, mainchain, minted, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-sc-bundle-not-allowed");
+    // Three after it: the bundle again, at that height.
+    hooks.step = sidechain::PegStep{.main_height = 1, .nonce = uint256{0xc}, .max_withdrawal_height = 9, .peg_height = 9};
+    BOOST_REQUIRE_MESSAGE(state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(early->GetHash().ToUint256())}}), 61, params, mainchain, minted, reason), reason);
+    BOOST_CHECK_EQUAL(state.Bundle()->height, 9);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -59,7 +59,7 @@ bool ChainHooks::GetPegStep(const CBlock& block, const Mainchain& mainchain, std
         reject_reason = "bmm-unknown";
         return false;
     }
-    step = PegStep{.main_height = *bmm_height - 1, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt};
+    step = PegStep{.main_height = *bmm_height - 1, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt, .peg_height = std::nullopt};
     return true;
 }
 
