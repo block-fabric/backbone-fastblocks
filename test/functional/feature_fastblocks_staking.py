@@ -23,6 +23,7 @@ import os
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
+from test_framework.authproxy import JSONRPCException
 from test_framework.fastblocks import KEYS, SLOT, XONLY, assert_peg_balance, bond_pop
 from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error, rpc_port
 
@@ -168,6 +169,12 @@ class FastBlocksStakingTest(SidechainTest):
         assert_raises_rpc_error(-8, "What stays bonded must be nothing or at least the minimum stake", n1.createunbond, XONLY[1], Decimal("0.00999"))
         unbond = n1.createunbond(XONLY[1])
         assert_equal(unbond["amount"], Decimal("0.01"))
+        # One at a time: a second, with the same sequence, could never be mined.
+        try:
+            n1.createunbond(XONLY[1])
+            raise AssertionError("a second unbond was made")
+        except JSONRPCException as e:
+            assert "waits for a block" in e.error["message"] or "nothing bonded" in e.error["message"], e.error
         owner = unbond["owner"]
         self.wait_until(lambda: n1.gettransaction(unbond["txid"])["confirmations"] > 0, timeout=60)
         listed = n1.listbonds()[0]

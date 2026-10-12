@@ -371,6 +371,18 @@ RPCMethod createunbond()
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("What stays bonded must be nothing or at least the minimum stake of %s %s", FormatMoney(staking.min_stake), CURRENCY_UNIT));
     }
 
+    // One unbond of a validator per block: a second with the same sequence could never be mined.
+    {
+        LOCK(pwallet->cs_wallet);
+        for (const auto& [txid, wtx] : pwallet->mapWallet) {
+            if (pwallet->GetTxDepthInMainChain(wtx) != 0 || wtx.isAbandoned()) continue;
+            for (const CTxOut& out : wtx.GetTx()->vout) {
+                const auto pending{pos::ParseUnbond(out)};
+                if (pending && pending->pubkey == pubkey) throw JSONRPCError(RPC_WALLET_ERROR, "An unbond of this validator waits for a block: try again once it is mined");
+            }
+        }
+    }
+
     EnsureWalletIsUnlocked(*pwallet);
     pos::Unbond unbond;
     unbond.pubkey = pubkey;
@@ -384,7 +396,7 @@ RPCMethod createunbond()
     const CTransactionRef tx{SendScript(*pwallet, pos::UnbondScript(unbond), 0)};
     if (CommittedTransactionRefused(*pwallet, tx)) {
         pwallet->AbandonTransaction(tx->GetHash());
-        throw JSONRPCError(RPC_WALLET_ERROR, "The unbond was not accepted into the mempool: another unbond of this validator may be waiting for a block");
+        throw JSONRPCError(RPC_WALLET_ERROR, "The unbond was not accepted into the mempool");
     }
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
