@@ -170,9 +170,9 @@ Putting proofs in blocks and the penalty come with staking (phase 3).
 
 | Message | Content | Rule |
 |---|---|---|
-| `fbticket` | A ticket | Kept and relayed if it names a block the node knows, or the mainchain committed to it |
+| `fbticket` | A ticket | Kept and relayed if the mainchain committed to it, or if it names a block the node knows: of those, 8 a peer per mainchain block at most (anyone can make them by the thousand) |
 | `fbgettickets` | Up to 16 h* | The node sends the tickets it has; more than 16 is misbehaving |
-| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) |
+| `fbevidence` | Two headers | Kept and relayed if it is a proof (above); a peer that sends one that is not misbehaves |
 
 **Catching up.** Headers and blocks come as usual and are checked in full
 (leader signatures included); an acknowledgement waits until the node's own
@@ -225,7 +225,12 @@ value reaches the mainchain's miners.
   with the acknowledgement of the first committed ticket it can carry, notes
   the slot in `validator_protection.dat` (synced to disk before signing),
   signs and relays the block. It never signs at or below a slot it signed
-  before, and refuses to start if another node holds the key file's lock.
+  before, and refuses to start if another node holds the key file's lock. It
+  makes no block while it has a block of more work than its tip to connect; a
+  header of more work alone does not stop it (a leader can sign a header that
+  claims an acknowledgement and keep its block).
+- Acknowledgements are noted (to find the blocks that rest on a commitment the
+  mainchain drops) only from blocks signed by the leader of their slot.
 - `-validatorpayout=<address>`: where the producer's share goes.
 - With `setbmm`, while PoS blocks come, the node's merged miner makes a ticket
   per mainchain block (P is the block before its tip, or the last

@@ -40,6 +40,8 @@ inline constexpr size_t MAX_TICKETS_ASKED{16};
 inline constexpr size_t MAX_TICKETS{1000};
 //! Acknowledging blocks whose commitment a node keeps in memory, at most (others are read from disk).
 inline constexpr size_t MAX_NOTED_ACKS{20000};
+//! Tickets the mainchain has not committed to that a node takes from one peer per mainchain block, at most.
+inline constexpr size_t MAX_PEER_TICKETS{8};
 
 /**
  * What the state of the chain says about anchors, the fee pot and PoS blocks, after a block: one
@@ -128,6 +130,8 @@ public:
     /** Note a ticket (`own`: this node's merged miner made it). @return whether it was new */
     bool AddTicket(const AnchorTicket& ticket, bool own = false) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     std::optional<AnchorTicket> GetTicket(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
+    /** Whether a ticket the mainchain has not committed to may be taken from `peer` (and count it): MAX_PEER_TICKETS per mainchain block. */
+    bool TicketAllowed(int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     std::vector<AnchorTicket> Tickets() const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     /** Relay a ticket to the peers (but `except`). */
     void RelayTicket(const AnchorTicket& ticket, std::optional<int64_t> except = std::nullopt) const;
@@ -192,6 +196,9 @@ private:
     mutable std::map<uint256, AnchorTicket> m_tickets GUARDED_BY(m_tickets_mutex);
     mutable std::deque<uint256> m_ticket_order GUARDED_BY(m_tickets_mutex);
     mutable std::set<uint256> m_own_tickets GUARDED_BY(m_tickets_mutex);
+    //! Tickets taken from each peer that the mainchain had not committed to, since the mainchain block m_ticket_counts_for.
+    mutable std::map<int64_t, size_t> m_ticket_counts GUARDED_BY(m_tickets_mutex);
+    mutable uint256 m_ticket_counts_for GUARDED_BY(m_tickets_mutex);
 
     mutable node::NodeContext* m_node{nullptr};
     mutable std::unique_ptr<Producer> m_producer;

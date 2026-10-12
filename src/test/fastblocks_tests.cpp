@@ -1244,4 +1244,125 @@ BOOST_FIXTURE_TEST_CASE(staking_switch, FastBlocksSetup)
     BOOST_CHECK(producer->Enabled());
 }
 
+BOOST_FIXTURE_TEST_CASE(withheld_header, FastBlocksSetup)
+{
+    // A leader signs a header that claims an acknowledgement (more anchors than any chain) and keeps
+    // its block: the node's best header has more work than its tip for as long as the block does not
+    // come. The validators go on making blocks all the same.
+    StartPos();
+    Take(PosBlock(1));
+    CBlock claimed{PosBlock(2)};
+    pos::PosSections sections;
+    sections.ack = pos::AnchorAck{.ticket = Ticket(Tip()->GetBlockHash(), script), .main_height = Record().Height()};
+    claimed.vSections = sections.Encode();
+    claimed.nNonce = static_cast<uint32_t>(Record().Height());
+    Resign(claimed);
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(Chainman().ProcessNewBlockHeaders({{claimed}}, /*min_pow_checked=*/true, state), state.ToString());
+    }
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Chainman().m_best_header->GetBlockHash()) == claimed.GetHash());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return pos::Producer::Behind(Chainman())));
+    std::string error;
+    const auto made{producer->Produce(Slot(3), error)};
+    BOOST_REQUIRE_MESSAGE(made, error);
+    BOOST_CHECK(Tip()->GetBlockHash() == *made);
+
+    // A block of more work the node has, and has yet to connect: behind, no block.
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    const CBlock better{PosBlock(4, ack)};
+    {
+        LOCK(::cs_main);
+        BlockValidationState state;
+        CBlockIndex* index{nullptr};
+        bool new_block{false};
+        BOOST_REQUIRE_MESSAGE(Chainman().AcceptBlock(std::make_shared<const CBlock>(better), state, &index, /*fRequested=*/true, /*dbp=*/nullptr, &new_block, /*min_pow_checked=*/true),
+                              state.ToString());
+        BOOST_CHECK(Chain().setBlockIndexCandidates.contains(index));
+        BOOST_CHECK(pos::Producer::Behind(Chainman()));
+    }
+    BOOST_CHECK(!producer->Produce(Slot(5), error));
+    BOOST_CHECK_EQUAL(error, "the node is still taking in the best chain");
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    BOOST_CHECK(Tip()->GetBlockHash() == better.GetHash());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return pos::Producer::Behind(Chainman())));
+}
+
+BOOST_FIXTURE_TEST_CASE(ticket_flood, FastBlocksSetup)
+{
+    // Anyone can make tickets for a known block by the thousand, and each new one would go to every
+    // peer: a node takes MAX_PEER_TICKETS a peer per mainchain block of those the mainchain did not
+    // commit to; those it committed to, always.
+    StartPos();
+    const auto send{[&](int64_t peer, const pos::AnchorTicket& ticket) {
+        DataStream stream{};
+        stream << ticket;
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(peer, pos::MSG_TICKET, stream, misbehaving));
+        BOOST_CHECK_EQUAL(misbehaving, "");
+        return Hooks().GetTicket(ticket.Hash()).has_value();
+    }};
+    const auto ticket{[&](uint32_t i) {
+        return Ticket(Tip()->GetBlockHash(), GetScriptForDestination(WitnessV0KeyHash{uint160{std::vector<unsigned char>(20, static_cast<unsigned char>(i))}}));
+    }};
+    for (uint32_t i{0}; i < pos::MAX_PEER_TICKETS; ++i) BOOST_CHECK(send(1, ticket(i)));
+    BOOST_CHECK(!send(1, ticket(100)));
+    // Another peer has its own count.
+    BOOST_CHECK(send(2, ticket(101)));
+    // A ticket the mainchain committed to is taken, past the count.
+    const pos::AnchorTicket committed{ticket(102)};
+    Commit(committed.Hash());
+    BOOST_CHECK(send(1, committed));
+    // A new mainchain block: the counts start again.
+    BOOST_CHECK(send(1, ticket(100)));
+}
+
+BOOST_FIXTURE_TEST_CASE(acks_noted_only_when_signed, FastBlocksSetup)
+{
+    // The blocks that rest on a commitment are noted from blocks that read, before their header is
+    // checked: only those signed by the leader of their slot, or a flood of blocks anyone can make
+    // would push those that count out of memory.
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    CBlock forged{PosBlock(2, ack)};
+    forged.ext.sig[5] ^= 1;
+    BlockValidationState state;
+    BOOST_CHECK(Hooks().CheckBlock(forged, state));
+    auto resting{Hooks().BlocksCommittedBy(ack.ticket.Hash())};
+    BOOST_CHECK(std::find(resting.begin(), resting.end(), forged.GetHash()) == resting.end());
+    // The header rules turn it away.
+    BOOST_CHECK_EQUAL(Check(forged), "bad-pos-sig");
+    const CBlock signed_block{PosBlock(2, ack)};
+    BOOST_CHECK(Hooks().CheckBlock(signed_block, state));
+    resting = Hooks().BlocksCommittedBy(ack.ticket.Hash());
+    BOOST_CHECK(std::find(resting.begin(), resting.end(), signed_block.GetHash()) != resting.end());
+}
+
+BOOST_FIXTURE_TEST_CASE(false_evidence_misbehaves, FastBlocksSetup)
+{
+    // A proof that is none costs two signature checks: the peer that sends it misbehaves (the
+    // validator set is the chain's: an honest node relays only proofs that check).
+    StartPos();
+    const CBlock first{PosBlock(1)};
+    const auto send{[&](const pos::DoubleProposal& proof) {
+        DataStream stream{};
+        stream << proof;
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(3, pos::MSG_EVIDENCE, stream, misbehaving));
+        return misbehaving;
+    }};
+    BOOST_CHECK_EQUAL(send({.a = first, .b = first}), "invalid evidence: bad-pos-evidence-same");
+    CBlock second{first};
+    SetCoinbase(second, [](CMutableTransaction& tx) { tx.vout.emplace_back(0, CScript() << OP_RETURN); });
+    Resign(second);
+    BOOST_CHECK_EQUAL(send({.a = first, .b = second}), "");
+    // Known already: no fault.
+    BOOST_CHECK_EQUAL(send({.a = second, .b = first}), "");
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

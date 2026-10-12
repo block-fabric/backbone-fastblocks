@@ -44,6 +44,23 @@ int64_t Producer::ProducerShare(int64_t fees, int64_t bps)
     return fees / 10000 * bps + fees % 10000 * bps / 10000;
 }
 
+bool Producer::Behind(ChainstateManager& chainman)
+{
+    AssertLockHeld(::cs_main);
+    // (Not initial block download as such: a chain stalled for a day, restarted, would never start again.)
+    const Chainstate& chainstate{chainman.ActiveChainstate()};
+    const CBlockIndex* tip{chainstate.m_chain.Tip()};
+    if (!tip) return true;
+    // A block of more work that the node has, with all below it (a candidate for the tip): it is
+    // connecting it. Not merely a header of more work.
+    for (auto it{chainstate.setBlockIndexCandidates.rbegin()}; it != chainstate.setBlockIndexCandidates.rend(); ++it) {
+        const CBlockIndex* candidate{*it};
+        if (candidate->nChainWork <= tip->nChainWork) break;
+        if (!(candidate->nStatus & BLOCK_FAILED_VALID)) return true;
+    }
+    return false;
+}
+
 std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const FastBlocksHooks& hooks, std::string& error)
 {
     const ArgsManager& args{*node.args};
@@ -245,8 +262,10 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     {
         LOCK(::cs_main);
         const CBlockIndex* tip{chainman.ActiveChain().Tip()};
-        // Not while this node is behind: its block would fork the chain.
-        if (chainman.m_best_header && chainman.m_best_header->nChainWork > tip->nChainWork) return fail("the node is still taking in the best chain");
+        // Not while this node is behind: its block would fork the chain. Behind means a better block
+        // it has and has yet to connect, not a better header: a leader can sign a header that claims
+        // an acknowledgement (more anchors than any chain) and never send its block.
+        if (Behind(chainman)) return fail("the node is still taking in the best chain");
         if (const auto last{FastBlocksHooks::LastPosSlot(tip, params)}; last && *last >= slot) return fail("the chain has a block of this slot or a later one");
         if (SlotTime(slot, params) <= tip->GetMedianTimePast()) return fail("the slot is not after the median time of the chain");
         const FastState fast{GetFastState(chainman.ActiveChainstate().SideState().View())};

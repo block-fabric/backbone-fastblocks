@@ -5,6 +5,7 @@
 #ifndef BITCOIN_POS_PRODUCER_H
 #define BITCOIN_POS_PRODUCER_H
 
+#include <kernel/cs_main.h>
 #include <key.h>
 #include <pos/header.h>
 #include <pos/protection.h>
@@ -22,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+class ChainstateManager;
 namespace node {
 struct NodeContext;
 } // namespace node
@@ -72,6 +74,13 @@ public:
     /** The x-only keys of this node's validators. */
     std::vector<uint256> Keys() const;
     const CScript& Payout() const { return m_payout; }
+
+    /**
+     * Whether the node is behind, and should not make blocks: it has a block of more work than its
+     * tip, and all below it, and has yet to connect it. A header of more work alone is not: its block
+     * may never come (a leader can sign a header that claims an acknowledgement, and keep the block).
+     */
+    static bool Behind(ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** The producer's share of fees `fees`, in integers: floor(fees * bps / 10000). */
     static int64_t ProducerShare(int64_t fees, int64_t bps);

@@ -167,7 +167,14 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
     }
     if (ack.ticket.version != 1) return invalid("bad-pos-ticket-version", "unknown ticket version");
     if (!IsValidPayee(ack.ticket.payee)) return invalid("bad-pos-ticket-payee", "a ticket pays the pot to a standard script of 80 bytes or less");
-    NoteAck(block.GetHash(), ack);
+    // Noted (to find the blocks that rest on a commitment the mainchain drops) only if the leader of
+    // its slot signed it: anyone can make a block that reads, and enough of them would push the
+    // acknowledgements that count out of memory. (The header rules turn the others away.)
+    const int64_t time{block.nTime};
+    if (time > m_params.genesis_time && (time - m_params.genesis_time) % m_params.slot_seconds == 0) {
+        const auto leader{m_validators.Leader(SlotOf(time, m_params), m_params, m_chain_params.GetConsensus().hashGenesisBlock)};
+        if (leader && CheckBlockSig(block, m_validators.Validators()[*leader].pubkey)) NoteAck(block.GetHash(), ack);
+    }
     return true;
 }
 
@@ -523,6 +530,22 @@ bool FastBlocksHooks::AddTicket(const AnchorTicket& ticket, bool own) const
     return true;
 }
 
+bool FastBlocksHooks::TicketAllowed(int64_t peer) const
+{
+    const ChainstateManager* chainman{Chainman()};
+    const uint256 main_tip{chainman && chainman->m_mainchain ? chainman->m_mainchain->TipHash() : uint256{}};
+    LOCK(m_tickets_mutex);
+    // Counted per mainchain block: all counts start again with a new one.
+    if (m_ticket_counts_for != main_tip) {
+        m_ticket_counts.clear();
+        m_ticket_counts_for = main_tip;
+    }
+    size_t& count{m_ticket_counts[peer]};
+    if (count >= MAX_PEER_TICKETS) return false;
+    ++count;
+    return true;
+}
+
 std::optional<AnchorTicket> FastBlocksHooks::GetTicket(const uint256& hash) const
 {
     LOCK(m_tickets_mutex);
@@ -563,8 +586,17 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
         // still taking in the chain needs those of the newest anchors): others cannot be acknowledged
         // here anyway, and anyone can make them.
         if (!chainman) return true;
-        const bool known{WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ticket.anchored) != nullptr)};
-        if (!known && !(chainman->m_mainchain && chainman->m_mainchain->CommittedHeight(ticket.Hash()))) return true;
+        const bool committed{chainman->m_mainchain && chainman->m_mainchain->CommittedHeight(ticket.Hash())};
+        if (!committed) {
+            if (!WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ticket.anchored) != nullptr)) return true;
+            // Anyone can make tickets for a block, by the thousand, and each new one goes to every
+            // peer: a few per peer and mainchain block (bidders make one each), the rest dropped.
+            // Those the mainchain committed to cost a commitment each, and are always taken.
+            if (!TicketAllowed(peer)) {
+                LogDebug(BCLog::NET, "FastBlocks: anchor ticket from peer=%d dropped: too many for this mainchain block\n", peer);
+                return true;
+            }
+        }
         if (AddTicket(ticket)) RelayTicket(ticket, peer);
         return true;
     }
@@ -601,9 +633,10 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
             misbehaving = "malformed evidence";
             return true;
         }
-        // Relayed only if it is a proof (one this node does not know yet).
+        // Relayed only if it is a proof (one this node does not know yet). One that is not (two
+        // signature checks for nothing) is the peer's fault: the validator set is the chain's.
         std::string reason;
-        AddEvidence(proof, reason, peer);
+        if (!AddEvidence(proof, reason, peer)) misbehaving = "invalid evidence: " + reason;
         return true;
     }
     return false;
