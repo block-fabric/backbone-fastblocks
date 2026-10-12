@@ -324,3 +324,51 @@ and the producer.
   comes with phase 3).
 - The design's header rule against `P_last` is checked as far as headers tell
   (an acknowledgement's P is in its block): the state checks the rest.
+
+## Tests, fuzzing and the audit (phase 5)
+
+Unit tests: `src/test/fastblocks_tests.cpp` (every reject reason above is
+asserted there). Functional tests, each checking `pegbalance` on every node
+after every step:
+
+| Test | What |
+|---|---|
+| `feature_fastblocks.py` | Validators, anchors, the fee split and pot, a withdrawal, slashing protection, BMM blocks with transactions when stalled |
+| `feature_fastblocks_rpc.py` | RPCs, the wallet's finality, tickets and evidence over P2P, a late observer |
+| `feature_fastblocks_partition.py` | A leader that signs twice; a partition with an anchor on each side (the earlier one wins); an anchor of a branch the validators left; IBD |
+| `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
+
+Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
+`pos_evidence`, `pos_state` (a whole chain from fuzzed choices: the state agrees
+with the chain key, the coins are the deposits, a tip taken back and connected
+again gives the same state).
+
+What the audit of this round changed (each with a test):
+
+- `max_unanchored_slots` 120 on 30-second networks: an hour, as decided (the
+  design's table had 1200 and 600, ten and five hours).
+- Producers are not stopped by a header of more work whose block never comes.
+- Tickets from peers: 8 a peer per mainchain block of those not committed to.
+- Acknowledgements are noted only from blocks their leader signed; evidence
+  that is no proof is misbehaving.
+- Blocks at most 10 minutes ahead of the clock while PoS is on (template hook
+  `MaxFutureBlockTime`).
+- A BMM block's chain key follows its commitment when a mainchain reorg moves it
+  (template: `ReconsiderRecordFailure` recomputes `nChainWork`).
+- The best header may be lower than the tip (template:
+  `GuessVerificationProgress` no longer assumes otherwise; a debug build
+  aborted).
+- Finality counts anchors net of skipped commitments (a hidden ticket could
+  take back an "anchored" block with one bid and one slot).
+- After an anchor stall, a ticket that came too late is not waited for nor
+  tried; a new one names the tip if needed.
+- `nPowTargetSpacing` is the slot (Bitcoin's heuristics count blocks by it).
+- A header of a slot to come waits only if its leader signed it.
+
+## Deviations from the design (phase 5)
+
+- Leaders do not move to an anchored branch they left (§4.2): such an anchor
+  is acknowledged only by leaders on that branch, and is otherwise void.
+  Finality counts it against the blocks it could take back.
+- Nothing of phase 3 (bonding, epoch snapshots, a mainchain seed, slashing):
+  evidence is found and relayed, not punished.
