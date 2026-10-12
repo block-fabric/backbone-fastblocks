@@ -204,9 +204,10 @@ public:
     void RelayNewEvidence() const;
     /**
      * The acknowledgement a PoS block of `slot` on top of `tip` can carry: of the anchor committed first
-     * among those it may acknowledge (Acknowledgeable), if any. Called with cs_main held.
+     * among those it may acknowledge (Acknowledgeable), if any, but the tickets in `skip` (by hash).
+     * Called with cs_main held.
      */
-    std::optional<AnchorAck> NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
+    std::optional<AnchorAck> NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot, const std::set<uint256>* skip = nullptr) const;
     /**
      * Whether a PoS block of `slot` on top of `tip` may acknowledge a ticket, as far as the chain tells
      * (not the record): a ticket of version 1 with a payee, for a block on the chain at or after the

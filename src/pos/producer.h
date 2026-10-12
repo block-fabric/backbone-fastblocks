@@ -7,6 +7,7 @@
 
 #include <kernel/cs_main.h>
 #include <key.h>
+#include <pos/evidence.h>
 #include <pos/header.h>
 #include <pos/protection.h>
 #include <primitives/block.h>
@@ -18,8 +19,10 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -92,6 +95,15 @@ public:
     /** Sign a block with `key` (no slashing protection: for the producer, and tests). */
     static bool Sign(CBlock& block, const CKey& key);
 
+    /**
+     * Tests only: a check of the signed block after the node's (a reason makes the block invalid), to
+     * reach what the producer does with a block the node refuses.
+     */
+    void SetExtraCheckForTesting(std::function<std::optional<std::string>(const CBlock&)> check) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The tickets and the offences this producer no longer puts in its blocks: a block with them was invalid. */
+    std::set<uint256> RefusedTickets() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    std::set<Offence> RefusedOffences() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
 private:
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
@@ -107,6 +119,11 @@ private:
     std::atomic<bool> m_stop{false};
     std::atomic<bool> m_enabled{true};
     Status m_status GUARDED_BY(m_mutex);
+    //! A block with them was invalid, once signed: not tried again (a second block of that slot would
+    //! be a second signature). Bounded: emptied when full.
+    std::set<uint256> m_refused_tickets GUARDED_BY(m_mutex);
+    std::set<Offence> m_refused_offences GUARDED_BY(m_mutex);
+    std::function<std::optional<std::string>(const CBlock&)> m_extra_check GUARDED_BY(m_mutex);
     //! Serializes Produce: the thread and RPC.
     Mutex m_produce_mutex;
 };

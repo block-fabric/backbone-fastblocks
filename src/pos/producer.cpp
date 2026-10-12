@@ -32,6 +32,9 @@
 namespace pos {
 
 namespace {
+//! Tickets (and offences) the producer leaves out of its blocks, at most.
+constexpr size_t MAX_REFUSED{1000};
+
 uint256 XOnly(const CKey& key)
 {
     const XOnlyPubKey xonly{key.GetPubKey()};
@@ -115,6 +118,24 @@ Producer::Producer(node::NodeContext& node, const FastBlocksHooks& hooks, std::v
 }
 
 Producer::~Producer() { Stop(); }
+
+void Producer::SetExtraCheckForTesting(std::function<std::optional<std::string>(const CBlock&)> check)
+{
+    LOCK(m_mutex);
+    m_extra_check = std::move(check);
+}
+
+std::set<uint256> Producer::RefusedTickets() const
+{
+    LOCK(m_mutex);
+    return m_refused_tickets;
+}
+
+std::set<Offence> Producer::RefusedOffences() const
+{
+    LOCK(m_mutex);
+    return m_refused_offences;
+}
 
 void Producer::Start()
 {
@@ -259,6 +280,7 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
 
     std::optional<AnchorAck> ack;
     std::vector<DoubleProposal> evidence;
+    std::vector<Offence> offences;
     uint256 tip_hash;
     uint256 leader_key;
     const CKey* key{nullptr};
@@ -286,7 +308,8 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
         if (SlotTime(slot, params) <= tip->GetMedianTimePast()) return fail("the slot is not after the median time of the chain");
         const sidechain::StoreView& view{chainman.ActiveChainstate().SideCache()};
         const FastState fast{GetFastState(view)};
-        ack = m_hooks.NextAck(*tip, fast, slot);
+        const auto [refused_tickets, refused_offences]{WITH_LOCK(m_mutex, return std::make_pair(m_refused_tickets, m_refused_offences))};
+        ack = m_hooks.NextAck(*tip, fast, slot, &refused_tickets);
         if (!ack && fast.first_unanchored_slot >= 0 && slot - fast.first_unanchored_slot >= params.max_unanchored_slots) {
             return fail("no anchor for too long: blocks of stake wait for one");
         }
@@ -294,8 +317,12 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
         const uint64_t anchors{fast.anchors + (ack ? 1 : 0)};
         for (const auto& [offence, proof] : m_hooks.Evidence().All()) {
             if (evidence.size() >= MAX_SECTION_EVIDENCE) break;
+            if (refused_offences.contains(offence)) continue;
             std::string reason;
-            if (m_hooks.CheckChainEvidence(proof, *tip, slot, view, anchors, reason)) evidence.push_back(proof);
+            if (m_hooks.CheckChainEvidence(proof, *tip, slot, view, anchors, reason)) {
+                evidence.push_back(proof);
+                offences.push_back(offence);
+            }
         }
         tip_hash = tip->GetBlockHash();
     }
@@ -315,28 +342,29 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     if (!m_protection->MaySign(leader_key, slot, protection_error)) return fail("slashing protection: " + protection_error);
     if (!Sign(*block, *key)) return fail("signing failed");
 
-    const auto check{[&]() -> std::optional<std::string> {
+    // The block is not made again without what made it invalid: the node checked the signed header
+    // (and noted it, to find leaders that sign twice), and a second block of the slot would be a
+    // second signature, which this node would take for proof against its own key. The slot is lost;
+    // the acknowledgement and the proofs it carried are left out of the blocks to come.
+    std::optional<std::string> invalid;
+    {
         LOCK(::cs_main);
-        if (chainman.ActiveChain().Tip()->GetBlockHash() != tip_hash) return "the tip moved while the block was built";
+        if (chainman.ActiveChain().Tip()->GetBlockHash() != tip_hash) return fail("the tip moved while the block was built");
         const BlockValidationState state{TestBlockValidity(chainman.ActiveChainstate(), *block, /*check_pow=*/false, /*check_merkle_root=*/true)};
-        if (!state.IsValid()) return "the block is not valid: " + state.ToString();
-        return std::nullopt;
-    }};
-    auto invalid{check()};
-    // An acknowledgement or proofs that make the block invalid (what the state checks against the
-    // record, say): the block without them, rather than no block. (Signed again: only one of the two
-    // leaves the node.)
-    if (invalid && (ack || !evidence.empty())) {
-        LogInfo("FastBlocks: slot %d without the acknowledgement or the proofs: %s", slot, *invalid);
-        ack.reset();
-        evidence.clear();
-        block = Build(slot, ack, build_error);
-        if (!block) return fail(build_error);
-        if (block->hashPrevBlock != tip_hash) return fail("the tip moved while the block was built");
-        if (!Sign(*block, *key)) return fail("signing failed");
-        invalid = check();
+        if (!state.IsValid()) invalid = state.ToString();
     }
-    if (invalid) return fail(*invalid);
+    if (const auto extra{WITH_LOCK(m_mutex, return m_extra_check)}; !invalid && extra) invalid = extra(*block);
+    if (invalid) {
+        if (ack || !evidence.empty()) {
+            LogInfo("FastBlocks: slot %d lost; its acknowledgement and proofs are left out of the next blocks: %s", slot, *invalid);
+            LOCK(m_mutex);
+            if (m_refused_tickets.size() >= MAX_REFUSED) m_refused_tickets.clear();
+            if (m_refused_offences.size() >= MAX_REFUSED) m_refused_offences.clear();
+            if (ack) m_refused_tickets.insert(ack->ticket.Hash());
+            m_refused_offences.insert(offences.begin(), offences.end());
+        }
+        return fail("the block is not valid: " + *invalid);
+    }
     const auto shared{std::make_shared<const CBlock>(*block)};
     bool new_block{false};
     if (!chainman.ProcessNewBlock(shared, /*force_processing=*/true, /*min_pow_checked=*/true, &new_block)) return fail("the node refused the block");

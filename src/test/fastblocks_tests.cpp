@@ -2474,4 +2474,54 @@ BOOST_FIXTURE_TEST_CASE(no_second_ack_while_one_waits, FastBlocksSetup)
     BOOST_CHECK(*again == ack);
 }
 
+BOOST_FIXTURE_TEST_CASE(one_signature_per_slot, FastBlocksSetup)
+{
+    // A block the node finds invalid once signed (here: one with an acknowledgement, refused by a
+    // check of the test's) is not made again without what made it invalid: a second block of the slot
+    // would be a second signature, which the node, having checked the first header, would take for
+    // proof against its own key, relay, and have the chain punish. The slot is lost; the
+    // acknowledgement is left out of the blocks to come.
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    producer->SetExtraCheckForTesting([](const CBlock& block) -> std::optional<std::string> {
+        if (!block.vSections.empty()) return "refused by the test";
+        return std::nullopt;
+    });
+    const uint256 tip{Tip()->GetBlockHash()};
+    std::string error;
+    BOOST_CHECK(!producer->Produce(Slot(2), error));
+    BOOST_CHECK(error.find("refused by the test") != std::string::npos);
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 0U);
+    BOOST_CHECK(Hooks().Evidence().TakeUnrelayed().empty());
+    BOOST_CHECK(producer->RefusedTickets() == std::set<uint256>{ack.ticket.Hash()});
+    // The next slot: a block without the acknowledgement; still no proof against the producer.
+    const auto made{producer->Produce(Slot(3), error)};
+    BOOST_REQUIRE_MESSAGE(made, error);
+    BOOST_CHECK(Tip()->GetBlockHash() == *made);
+    BOOST_CHECK_EQUAL(Tip()->nNonce, 0U);
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 0U);
+    // Proofs that made a block invalid are left out too.
+    producer->SetExtraCheckForTesting({});
+    const auto [first, second]{TwoBlocks(4)};
+    Take(first);
+    std::string reason;
+    const auto offence{Hooks().AddEvidence({.a = first, .b = second}, reason)};
+    BOOST_REQUIRE_MESSAGE(offence, reason);
+    producer->SetExtraCheckForTesting([](const CBlock& block) -> std::optional<std::string> {
+        pos::PosSections sections;
+        if (pos::PosSections::Decode(block.vSections, sections) && !sections.evidence.empty()) return "refused by the test";
+        return std::nullopt;
+    });
+    BOOST_CHECK(!producer->Produce(Slot(5), error));
+    BOOST_CHECK(producer->RefusedOffences() == std::set<pos::Offence>{*offence});
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
+    const auto next{producer->Produce(Slot(6), error)};
+    BOOST_REQUIRE_MESSAGE(next, error);
+    CBlock block;
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(block, *Tip())));
+    BOOST_CHECK(block.vSections.empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

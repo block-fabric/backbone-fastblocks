@@ -796,7 +796,7 @@ bool FastBlocksHooks::Acknowledgeable(const AnchorTicket& ticket, const CBlockIn
     return InTime(tip, *target, slot);
 }
 
-std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot) const
+std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot, const std::set<uint256>* skip) const
 {
     AssertLockHeld(::cs_main);
     ChainstateManager* chainman{Chainman()};
@@ -804,6 +804,7 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
     const sidechain::Mainchain& record{*chainman->m_mainchain};
     std::optional<AnchorAck> best;
     for (const AnchorTicket& ticket : Tickets()) {
+        if (skip && skip->contains(ticket.Hash())) continue;
         const auto committed{record.CommittedHeight(ticket.Hash())};
         if (!committed || *committed <= fast.last_main_height) continue;
         if (best && best->main_height <= *committed) continue;
