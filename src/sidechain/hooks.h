@@ -159,10 +159,10 @@ public:
      * Whether a header for a block marked failed against the record of the mainchain, or on top of
      * one, is no reason to punish the peer that sent it (AcceptBlockHeader: BLOCK_TIME_FUTURE,
      * "record-failed"): the peer's record may simply be ahead of this node's, and its chain valid by
-     * it. Off by default: the template punishes as Bitcoin does. A chain whose blocks come every few
-     * seconds wants it, or a node a little behind on the record cuts itself off from its peers.
+     * it. On for every sidechain: a node a little behind on the record would otherwise cut itself off
+     * from the peers that are not. A chain that wants Bitcoin's punishment turns it off.
      */
-    virtual bool PardonRecordFailures() const { return false; }
+    virtual bool PardonRecordFailures() const { return true; }
 
     /** Whether a header turned away for `reject_reason` may become valid later, and should wait. */
     virtual bool IsWaitReason(const std::string& reject_reason) const;
