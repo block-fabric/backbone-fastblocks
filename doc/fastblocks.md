@@ -9,9 +9,11 @@ what is built. The fee pot won through BMM bids is inspired by sol-drivechain;
 no code of it is used.
 
 Built so far: phase 2 of the design (a fixed validator set from the chain
-parameters). Not yet: bonding and unbonding, epoch snapshots and a mainchain
-seed, slashing and evidence (phase 3); wallet and GUI finality, the `evidence`
-message, IBD from tickets (phase 4).
+parameters) and phase 4 (RPCs, wallet and GUI finality, the staking page, the
+`fbevidence` and `fbgettickets` messages, headers that wait, catching up from
+tickets). Not yet: phase 3 (bonding and unbonding, epoch snapshots and a
+mainchain seed, slashing): so no `createbond`/`createunbond` either, and evidence
+is found, checked and relayed but not yet put in blocks nor punished.
 
 ## Identity
 
@@ -38,6 +40,7 @@ test network and signet only warn (it is 0 there until the slot activates).
 | `max_unanchored_slots` | 1200 (1 h) | 600 | 100 |
 | `stall_seconds` | 1800 | 600 | 30 |
 | Producer share | 50 % | 50 % | 50 % |
+| Anchors that make a block final (wallets) | 6 | 3 | 1 |
 | Validator set | none yet | none yet | `-posvalidators` |
 
 Without enough validators a network has no PoS blocks: it is the template's
@@ -84,7 +87,13 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later | `pos-time-future` |
 | Signed by the slot's leader | `bad-pos-sig` |
+| Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
 | An acknowledged height has a commitment on record; may come later | `pos-ack-unknown` |
+
+A header that may come later (`pos-time-future`, `pos-ack-unknown`, and
+`bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
+headers, with the headers a peer sent after it; each is taken in once it and
+every waiting header below it can be, in the order of their heights.
 
 Block (`CheckBlock`):
 
@@ -120,6 +129,76 @@ Every block (state):
 The state of these rules is one entry of the sidechain store (table `0x55`)
 and the pot accrued by height (`0x56`): the store's journal is their undo.
 Amounts are integers throughout.
+
+## Finality
+
+Not consensus: what nodes and wallets show (design §4.5). A block on the
+active chain is
+
+- **soft** while no anchor covers it (only blocks of stake are on it);
+- **anchored** once an anchor covers it: it is at or below the block an anchor
+  anchors (the block a ticket names, or a BMM block's parent). Undoing it takes
+  the mainchain's merged miners, not stake;
+- **final** once `final_anchors` anchors cover it: 6 on main, 3 on testnet
+  and signet, 1 on regtest.
+
+`getblock` gives a block's `finality` (`status`, `anchors`), and its `kind`
+(`pos` or `bmm`), `slot`, `proposer` and `ack`; `getblockchaininfo` the
+`anchored_tip` and the `final_tip`. In the wallet, `gettransaction` and
+`listtransactions` give a confirmed transaction's `finality`, and
+`getbalances` the confirmed coins by finality (`mine.finality.soft`,
+`anchored`, `final`).
+
+## Evidence
+
+Two headers the leader of a slot signed for that slot prove that it signed
+twice. A node notes the first header signed for each slot it sees (the last
+4000 slots); a second one makes the proof. Proofs are checked, kept (1000, the
+oldest slots go first) and relayed in `fbevidence`:
+
+| Rule | Reason |
+|---|---|
+| Two headers of blocks of stake | `bad-pos-evidence-kind` |
+| Of one slot, at its start | `bad-pos-evidence-slot` |
+| Two different headers | `bad-pos-evidence-same` |
+| Both signed by the slot's leader | `bad-pos-evidence-sig` |
+
+`submitevidence <hex>` (the two headers, serialized) and `listevidence`.
+Putting proofs in blocks and the penalty come with staking (phase 3).
+
+## P2P
+
+| Message | Content | Rule |
+|---|---|---|
+| `fbticket` | A ticket | Kept and relayed if it names a block the node knows, or the mainchain committed to it |
+| `fbgettickets` | Up to 16 h* | The node sends the tickets it has; more than 16 is misbehaving |
+| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) |
+
+**Catching up.** Headers and blocks come as usual and are checked in full
+(leader signatures included); an acknowledgement waits until the node's own
+record has the commitment it names. The tickets of the newest commitments, not
+acknowledged yet, are asked for with `fbgettickets`: at each new mainchain
+block, a node asks its peers for those of the commitments on record after the
+last acknowledged one that it has neither a ticket nor a block of.
+
+## RPCs
+
+| RPC | |
+|---|---|
+| `getposinfo` | The validators, slot and leader, anchors, the pot, the producer |
+| `getvalidators [epoch]` | The set, and the slots of the epoch each one leads |
+| `getvalidator <pubkey>` | One validator: stake, slots, next slot, offences known |
+| `getleaderschedule [epoch]` | The leader of each slot of an epoch |
+| `getanchorinfo [count]` | The newest anchors, the anchored and final tips, the pot, the tickets known |
+| `submitevidence <hex>`, `listevidence` | Evidence (above) |
+| `setstaking true\|false`, `getstakinginfo` | This node as a validator: on or off (on at start), its keys, what it made, its next slot |
+
+## The staking page
+
+`fastblocks-qt` has a Staking page (Alt+6): the chain's slot and leader,
+this node as a validator with buttons to start and stop staking, how far the
+chain is anchored and final and the wallet's soft, anchored and final coins,
+the validators of the epoch and the newest anchors.
 
 ## Fork choice
 
@@ -176,3 +255,19 @@ and the producer.
 - A slot is a PoS block's alone: BMM blocks do not take slots.
 - The leader seed is from the epoch and the first block (phase 3 takes it
   from the mainchain).
+
+## Deviations from the design (phase 4)
+
+- Phase 4 came before phase 3: the wallet has no `createbond` and
+  `createunbond` yet (a bond output without the rules that keep it would burn
+  the coins), and evidence is relayed but not yet in blocks.
+- Finality is shown on the Staking page (the chain and the wallet's coins), and
+  by RPC per transaction; not yet as a badge per transaction in the transaction
+  list, nor on the Overview page. `getbalance` has no `minfinality`.
+- A BMM block counts as anchoring its parent, as in fork choice: the BMM
+  block itself is soft until the next anchor.
+- Evidence names no validator index (the leader is known from the slot); a
+  proof of a slot outside the evidence window is still relayed (the window
+  comes with phase 3).
+- The design's header rule against `P_last` is checked as far as headers tell
+  (an acknowledgement's P is in its block): the state checks the rest.
