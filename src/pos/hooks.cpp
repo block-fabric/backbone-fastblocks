@@ -170,6 +170,18 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
     const auto invalid{[&](const char* reason, const char* debug) { return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, debug); }};
     size_t pots{0};
     for (const CTxOut& out : block.vtx.at(0)->vout) pots += IsPotScript(out.scriptPubKey);
+    // Proofs in the coinbase of a BMM block (a block of stake has them in its sections): their form (the
+    // chain checks the rest: AfterBlock).
+    size_t coinbase_proofs{0};
+    for (const CTxOut& out : block.vtx.at(0)->vout) {
+        if (!IsEvidenceScript(out.scriptPubKey)) continue;
+        if (IsPosHeader(block)) return invalid("bad-pos-evidence-not-bmm", "a block of stake carries proofs in its sections, not its coinbase");
+        if (++coinbase_proofs > MAX_BMM_EVIDENCE) return invalid("bad-pos-evidence-count", "too many proofs in the coinbase of a BMM block");
+        const auto proof{ParseEvidenceScript(out.scriptPubKey)};
+        if (!proof) return invalid("bad-pos-evidence-output", "a proof in the coinbase of a BMM block does not read");
+        std::string reason;
+        if (!CheckEvidenceForm(*proof, m_params, reason)) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, "a proof that a leader signed twice does not have the form of one");
+    }
     if (!IsPosHeader(block)) {
         if (pots) return invalid("bad-pos-pot-not-pos", "only a block of stake puts coins in the fee pot");
         return true;
@@ -609,6 +621,17 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
             // (A BMM block's commitment is on record, so is the block before.)
             const auto main{step && chainman->m_mainchain ? chainman->m_mainchain->GetBlock(step->main_height) : std::nullopt};
             if (pos_active && (!main || !Stalled(fast, main->time, pos_active))) return Fail(reject_reason, "bad-pos-bmm-not-stalled");
+        }
+        // Proofs in its coinbase, as in a block of stake: punished, and its payee (the coinbase's first
+        // output, which the pot is paid to) paid for them at the next peg step.
+        for (const CTxOut& txout : coinbase.vout) {
+            if (!IsEvidenceScript(txout.scriptPubKey)) continue;
+            const auto proof{ParseEvidenceScript(txout.scriptPubKey)};
+            if (!proof) return Fail(reject_reason, "bad-pos-evidence-output");
+            const auto offence{CheckChainEvidence(*proof, *prev, slot, state.View(), fast.anchors, reject_reason)};
+            if (!offence) return false;
+            if (!m_staking.Punish(out, *offence, coinbase.vout.at(0).scriptPubKey, fast.anchors, reject_reason)) return false;
+            LogDebug(BCLog::VALIDATION, "FastBlocks: validator %s punished for signing two blocks at slot %d (proof in a BMM block)\n", HexStr(offence->pubkey), offence->slot);
         }
         // It anchors everything below it.
         fast.first_unanchored_slot = -1;
@@ -1158,6 +1181,26 @@ std::vector<uint256> FastBlocksHooks::AskMissingTickets() const
     m_node->peerman->BroadcastSidechainMessage(MSG_GETTICKETS, {UCharCast(s.data()), UCharCast(s.data()) + s.size()});
     LogDebug(BCLog::NET, "FastBlocks: asked the peers for %u anchor ticket(s)\n", missing.size());
     return missing;
+}
+
+std::vector<CTxOut> FastBlocksHooks::MergeMinedOutputs(const sidechain::StoreView& view, const CBlockIndex& prev, int64_t time) const
+{
+    AssertLockHeld(::cs_main);
+    // The proofs this node knows that the chain has not punished, one per validator (a validator is
+    // slashed once), a few at most.
+    std::vector<CTxOut> outputs;
+    std::set<uint256> offenders;
+    const int64_t slot{SlotOf(time, m_params)};
+    const uint64_t anchors{FAST_STATE.Get(view).anchors};
+    for (const auto& [offence, proof] : m_evidence.All()) {
+        if (outputs.size() >= MAX_MINED_EVIDENCE) break;
+        if (offenders.contains(offence.pubkey)) continue;
+        std::string reason;
+        if (!CheckChainEvidence(proof, prev, slot, view, anchors, reason)) continue;
+        offenders.insert(offence.pubkey);
+        outputs.emplace_back(0, EvidenceScript(proof));
+    }
+    return outputs;
 }
 
 bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const

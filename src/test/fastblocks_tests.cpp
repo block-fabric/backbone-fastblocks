@@ -2876,6 +2876,9 @@ BOOST_FIXTURE_TEST_CASE(slashed_once_and_out_of_the_schedule, FastBlocksSetup)
     BOOST_CHECK(sections.evidence.empty());
     BOOST_CHECK(Stake() == stake);
     BOOST_CHECK(*Validator(offender) == banned);
+    // A merged mined block leaves it out too.
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    for (const CTxOut& out : bmm.vtx[0]->vout) BOOST_CHECK(!pos::IsEvidenceScript(out.scriptPubKey));
 }
 
 BOOST_FIXTURE_TEST_CASE(self_reported, FastBlocksSetup)
@@ -2906,6 +2909,83 @@ BOOST_FIXTURE_TEST_CASE(self_reported, FastBlocksSetup)
     const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
     BOOST_CHECK(!Pays(bmm, CTxOut{penalty / 8, carrying.vtx[0]->vout[0].scriptPubKey}));
     MineBmm(bmm);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+}
+
+BOOST_FIXTURE_TEST_CASE(evidence_in_bmm_blocks, FastBlocksSetup)
+{
+    // A merged mined block carries proofs in its coinbase (OP_RETURN 0xDD'EVD' | the proof), under the
+    // rules of a block of stake's; the reward goes to its payee (its coinbase's first output) at the
+    // next peg step. The node's merged miner puts the proofs it knows in.
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key)), BondOut(keys[1], bond, Owner(key)), BondOut(keys[2], bond, Owner(key))}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    pos::DoubleProposal proof{.a = first, .b = second};
+    proof.Normalize();
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+
+    // The form, context free (CheckBlock).
+    const auto form{[&](const CBlock& block) {
+        BlockValidationState state;
+        return Hooks().CheckBlock(block, state) ? std::string{} : state.GetRejectReason();
+    }};
+    const auto with_outputs{[&](CBlock block, const std::vector<CTxOut>& outputs) {
+        SetCoinbase(block, [&](CMutableTransaction& tx) { tx.vout.insert(tx.vout.end(), outputs.begin(), outputs.end()); });
+        return block;
+    }};
+    const CBlock plain{BmmBlock(/*use_mempool=*/false)};
+    BOOST_CHECK_EQUAL(form(with_outputs(plain, {CTxOut{0, pos::EvidenceScript(proof)}})), "");
+    BOOST_CHECK_EQUAL(form(with_outputs(plain, {CTxOut{0, CScript() << OP_RETURN << std::vector<unsigned char>{0xDD, 'E', 'V', 'D', 1, 2}}})), "bad-pos-evidence-output");
+    BOOST_CHECK_EQUAL(form(with_outputs(plain, {CTxOut{0, pos::EvidenceScript({.a = first, .b = first})}})), "bad-pos-evidence-same");
+    BOOST_CHECK_EQUAL(form(with_outputs(plain, std::vector<CTxOut>(pos::MAX_BMM_EVIDENCE, CTxOut{0, pos::EvidenceScript(proof)}))), "");
+    BOOST_CHECK_EQUAL(form(with_outputs(plain, std::vector<CTxOut>(pos::MAX_BMM_EVIDENCE + 1, CTxOut{0, pos::EvidenceScript(proof)}))), "bad-pos-evidence-count");
+    BOOST_CHECK_EQUAL(form(with_outputs(PosBlock(3), {CTxOut{0, pos::EvidenceScript(proof)}})), "bad-pos-evidence-not-bmm");
+    BOOST_CHECK(pos::ParseEvidenceScript(pos::EvidenceScript(proof)) == std::optional<pos::DoubleProposal>{proof});
+
+    // Two for one offence, in a BMM block: the second is known.
+    {
+        CBlock twice{with_outputs(plain, {CTxOut{0, pos::EvidenceScript(proof)}, CTxOut{0, pos::EvidenceScript(proof)}})};
+        FinishBmm(twice);
+        Commit(twice.GetHash());
+        BOOST_CHECK_EQUAL(Check(twice), "bad-pos-evidence-known");
+    }
+
+    // The merged miner puts the proof the node knows in its block.
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof, reason), reason);
+    CKey payee_key;
+    payee_key.MakeNewKey(/*fCompressed=*/true);
+    const CScript payee{GetScriptForDestination(WitnessV0KeyHash{payee_key.GetPubKey()})};
+    const CBlock carrying{BmmBlock(/*use_mempool=*/false, payee)};
+    std::vector<pos::DoubleProposal> carried;
+    for (const CTxOut& out : carrying.vtx[0]->vout) {
+        if (const auto read{pos::ParseEvidenceScript(out.scriptPubKey)}) carried.push_back(*read);
+    }
+    BOOST_REQUIRE_EQUAL(carried.size(), 1U);
+    BOOST_CHECK(carried[0] == proof);
+    MineBmm(carrying);
+    const CAmount penalty{bond / 10};
+    BOOST_CHECK(Validator(offender)->tombstoned);
+    BOOST_CHECK_EQUAL(Stake().slashed, penalty);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, penalty / 8);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, penalty - penalty / 8);
+    // Not again: the next one carries nothing, and one that does is refused.
+    const CBlock next{BmmBlock(/*use_mempool=*/false)};
+    for (const CTxOut& out : next.vtx[0]->vout) BOOST_CHECK(!pos::IsEvidenceScript(out.scriptPubKey));
+    {
+        CBlock again{with_outputs(next, {CTxOut{0, pos::EvidenceScript(proof)}})};
+        FinishBmm(again);
+        Commit(again.GetHash());
+        BOOST_CHECK_EQUAL(Check(again), "bad-pos-evidence-known");
+    }
+    // The reward, to the BMM block's payee, at the next peg step.
+    BOOST_CHECK(Pays(next, CTxOut{penalty / 8, payee}));
+    MineBmm(next);
     BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
 }
 

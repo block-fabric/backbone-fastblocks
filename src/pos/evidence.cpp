@@ -7,9 +7,53 @@
 #include <pos/header.h>
 #include <pos/schedule.h>
 
+#include <streams.h>
+
 #include <algorithm>
+#include <ios>
 
 namespace pos {
+
+namespace {
+/** If `script` is OP_RETURN and one push that starts with EVIDENCE_TAG, what follows the tag. */
+std::optional<std::vector<unsigned char>> EvidencePayload(const CScript& script)
+{
+    CScript::const_iterator pc{script.begin()};
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    if (!script.GetOp(pc, opcode) || opcode != OP_RETURN) return std::nullopt;
+    if (!script.GetOp(pc, opcode, data) || opcode > OP_PUSHDATA4 || pc != script.end()) return std::nullopt;
+    if (data.size() < sizeof(EVIDENCE_TAG) || !std::equal(std::begin(EVIDENCE_TAG), std::end(EVIDENCE_TAG), data.begin())) return std::nullopt;
+    data.erase(data.begin(), data.begin() + sizeof(EVIDENCE_TAG));
+    return data;
+}
+} // namespace
+
+CScript EvidenceScript(const DoubleProposal& proof)
+{
+    DataStream s{};
+    s << proof;
+    std::vector<unsigned char> data{std::begin(EVIDENCE_TAG), std::end(EVIDENCE_TAG)};
+    data.insert(data.end(), UCharCast(s.data()), UCharCast(s.data()) + s.size());
+    return CScript() << OP_RETURN << data;
+}
+
+bool IsEvidenceScript(const CScript& script) { return EvidencePayload(script).has_value(); }
+
+std::optional<DoubleProposal> ParseEvidenceScript(const CScript& script)
+{
+    const auto payload{EvidencePayload(script)};
+    if (!payload) return std::nullopt;
+    try {
+        SpanReader reader{*payload};
+        DoubleProposal proof;
+        reader >> proof;
+        if (!reader.empty()) return std::nullopt;
+        return proof;
+    } catch (const std::ios_base::failure&) {
+        return std::nullopt;
+    }
+}
 
 void DoubleProposal::Normalize()
 {

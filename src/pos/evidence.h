@@ -7,6 +7,7 @@
 
 #include <pos/params.h>
 #include <primitives/block.h>
+#include <script/script.h>
 #include <serialize.h>
 #include <sync.h>
 #include <uint256.h>
@@ -48,6 +49,20 @@ struct DoubleProposal {
     /** The slot of the first header. */
     int64_t Slot(const Consensus::PosParams& params) const;
 };
+
+//! Coinbase output of a BMM block that carries a proof: OP_RETURN with EVIDENCE_TAG | the proof (serialized).
+inline constexpr unsigned char EVIDENCE_TAG[4]{0xDD, 'E', 'V', 'D'};
+//! Proofs a BMM block's coinbase may carry, at most (as many as the sections of a block of stake).
+inline constexpr size_t MAX_BMM_EVIDENCE{16};
+//! Proofs this node's merged miner puts in a BMM block, at most (the coinbase's weight is set aside for little).
+inline constexpr size_t MAX_MINED_EVIDENCE{4};
+
+/** The coinbase output of a BMM block that carries `proof`. */
+CScript EvidenceScript(const DoubleProposal& proof);
+/** Whether a script claims to carry a proof (EVIDENCE_TAG), well formed or not. */
+bool IsEvidenceScript(const CScript& script);
+/** The proof an output carries; nothing if it carries none or it does not read. */
+std::optional<DoubleProposal> ParseEvidenceScript(const CScript& script);
 
 /** What a valid proof says: who signed twice, and at which slot. */
 struct Offence {

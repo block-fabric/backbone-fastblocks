@@ -100,7 +100,7 @@ height (design §4.3.4).
 
 **BMM block**: the template's. It anchors its parent, takes the peg actions,
 and its first coinbase output's script is paid the pot. It carries
-transactions only in stall mode.
+transactions only in stall mode. Its coinbase may carry proofs (see Evidence).
 
 ## Rules (reject reasons)
 
@@ -283,7 +283,7 @@ that made less than `liveness_min_bps` of the slots it led in an earlier epoch,
 having led `liveness_min_assigned` or more, is jailed: left out of the sets
 made in the next `jail_epochs` + 1 epochs. No coins are lost.
 
-**Slashing.** A block of stake may carry proofs that leaders signed two blocks
+**Slashing.** A block (of stake, or merged mined) may carry proofs that leaders signed two blocks
 for a slot (below). The offender loses `slash_bps` (10 %) of its stake, bonded
 then unbonding, once: it is banned for good, a proof of another of its offences
 takes nothing more (`bad-pos-evidence-banned`), and the rest of its bond is
@@ -316,12 +316,18 @@ sets, `0x5d` liveness. (`0x51` and `0x52` are the template's `Q` and `R`.)
 
 Two headers the leader of a slot signed for that slot prove that it signed
 twice. A node notes the first header signed for each slot it sees (the last
-4000 slots); a second one makes the proof. Proofs are checked, kept (1000, the
+4000 slots); a second one makes the proof. proofs are checked, kept (1000, the
 oldest slots go first), relayed in `fbevidence`, and put in its blocks of stake
-by a leader (16 at most) while the chain has not punished them:
+by a leader (16 at most, in the sections) while the chain has not punished
+them, and in its BMM blocks by a merged miner (4 at most from the node, 16 by
+the rules: one coinbase output each, `OP_RETURN 0xDD'EVD' | the proof`, after
+the payouts). The same rules apply to both; a BMM block's reward goes to its
+payee, the script of its coinbase's first output:
 
 | Rule | Reason |
 |---|---|
+| In a BMM block's coinbase only (a block of stake has its proofs in its sections) | `bad-pos-evidence-not-bmm` |
+| A coinbase output with the tag reads as a proof; 16 at most in a BMM block | `bad-pos-evidence-output`, `bad-pos-evidence-count` |
 | Two headers of blocks of stake | `bad-pos-evidence-kind` |
 | Of one slot, at its start | `bad-pos-evidence-slot` |
 | Two different headers | `bad-pos-evidence-same` |
@@ -504,9 +510,9 @@ and the producer.
   its block is connected, rather than waiting: a waiting header could deadlock
   a node that needs the branch to learn the set (a partition with anchors on
   both sides).
-- Proofs are carried by blocks of stake only, not by BMM blocks (design 5.1:
-  a coinbase output in BMM blocks); the window for proofs counts anchors since
-  the anchor that made the set of the offence's epoch.
+- The window for proofs counts anchors since the anchor that made the set of
+  the offence's epoch. (BMM blocks carry proofs too, since 2026-10-12: each in
+  a coinbase output of its own, rather than a commitment to their root.)
 - No correlated penalty above 1/3 of the stake, no forced unbond after three
   jails (design 5.2): not in the decisions of section 13.
 - Liveness charges at most an epoch of empty slots per block of stake; a
@@ -529,7 +535,7 @@ after every step:
 | `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex`; the producer's signatures are deterministic; another valid signature of the leader is the same block (taken, the node's own kept, no peer disconnected; two nodes holding the two stay in sync) |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; an unbond paid unbonding_anchors anchors later |
-| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
+| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; a BMM block carries a proof (all validators stopped), its payee rewarded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
 `pos_evidence`, `pos_state` (a whole chain from fuzzed choices, with bonds,
@@ -640,6 +646,11 @@ functional tests named).
   leader is the offender pays no reporter; the penalty applies all the same,
   and the reward's share goes to the reserve (`self_reported`,
   `feature_fastblocks_slashing.py`).
+- Proofs in BMM blocks too: a merged mined block's coinbase may carry proofs,
+  under the same rules, the reward to its payee, so that validators who stop
+  making blocks of stake cannot keep a proof off the chain (template hook
+  `MergeMinedOutputs`: the node's merged miner puts in the proofs it knows)
+  (`evidence_in_bmm_blocks`, `feature_fastblocks_slashing.py`).
 <!-- decisions-2026-10-12 -->
 
 ## Deviations from the design (phase 5)

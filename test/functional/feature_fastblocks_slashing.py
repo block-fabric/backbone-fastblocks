@@ -15,11 +15,13 @@ set, a bootstrap of regtest), one key per node, each with a bond:
   - banned, a validator leads no more from the next block (its slots stay empty), and a proof of
     another of its offences takes nothing more (slashed once);
   - a leader that carries the proof against itself is paid nothing for it (the share to the reserve);
+  - with every validator stopped, a merged mined block carries a proof, and its payee is paid the reward;
   - after every step, the coins of every node are the mainchain's escrow (pegbalance), the reserve
     and the rewards owed included.
 """
 
 import os
+import time
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
@@ -31,6 +33,8 @@ from test_framework.util import assert_equal, assert_greater_than, assert_raises
 BOND = Decimal("1")
 PENALTY = BOND / 10
 REWARD = PENALTY / 8
+#: The tag of a proof in a BMM block's coinbase (OP_RETURN 0xDD'EVD' | the proof).
+EVIDENCE_TAG = "dd455644"
 
 
 class FastBlocksSlashingTest(SidechainTest):
@@ -234,6 +238,51 @@ class FastBlocksSlashingTest(SidechainTest):
         while blockhash != carrying2["hash"]:
             assert not self.pays(n0, blockhash, REWARD, reporter2)
             blockhash = n0.getblock(blockhash)["previousblockhash"]
+        self.check_peg()
+
+        self.log.info("A merged mined block carries a proof: the same rules, the reward to its payee")
+        self.settle_sets(n0)
+        self.wait_until(lambda: self.pos_tip(n0)["proposer"] == third, timeout=60)
+        for n in self.nodes:
+            n.setstaking(False)
+        self.wait_in_sync()
+        made = self.pos_tip(n0)
+        assert_equal(made["proposer"], third)
+        first, second = self.rival(n0, made["hash"])
+        assert_equal(n1.submitblock(second.serialize().hex()), "inconclusive")
+        self.wait_until(lambda: all(any(e["pubkey"] == third for e in n.listevidence()) for n in self.nodes), timeout=60)
+        slashed = n0.getposinfo()["staking"]["slashed"]
+        # No block of stake comes: after stall_seconds the merged miner makes BMM blocks, with the proof.
+        deadline = time.time() + 240
+        while not n0.getvalidator(third)["bond"]["banned"]:
+            assert time.time() < deadline, "no BMM block carried the proof"
+            self.mine_main()
+            time.sleep(1)
+        self.wait_until(lambda: all(n.getvalidator(third)["bond"]["banned"] for n in self.nodes), timeout=60)
+        self.wait_in_sync()
+        bmm = n0.getblock(n0.getbestblockhash(), 2)
+        while not any(out["scriptPubKey"]["hex"].startswith("6a4d") and EVIDENCE_TAG in out["scriptPubKey"]["hex"][:16] for out in bmm["tx"][0]["vout"]):
+            bmm = n0.getblock(bmm["previousblockhash"], 2)
+        assert_equal(bmm["kind"], "bmm")
+        payee = bmm["tx"][0]["vout"][0]["scriptPubKey"]["hex"]
+        staking = n0.getposinfo()["staking"]
+        assert_equal(staking["slashed"], slashed + PENALTY)
+        assert_equal(staking["rewardsowed"], REWARD)
+        self.check_peg()
+        # Paid to its payee by the next merged mined block (the next peg step).
+        tip = n0.getbestblockhash()
+        deadline = time.time() + 120
+        while n0.getposinfo()["staking"]["rewardsowed"] != 0:
+            assert time.time() < deadline, "the reward was not paid"
+            self.mine_main()
+            time.sleep(1)
+        self.wait_in_sync()
+        hashes = []
+        blockhash = n0.getbestblockhash()
+        while blockhash != bmm["hash"]:
+            hashes.append(blockhash)
+            blockhash = n0.getblock(blockhash)["previousblockhash"]
+        assert_equal(sum(self.pays(n0, h, REWARD, payee) for h in hashes), 1)
         self.check_peg()
 
     def settle_sets(self, node):

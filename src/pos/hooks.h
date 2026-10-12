@@ -182,6 +182,8 @@ public:
     bool AfterBlock(sidechain::State& state, const CBlock& block, int height, const std::optional<sidechain::PegStep>& step, CAmount minted,
                     const Consensus::SidechainParams& params, std::string& reject_reason) const override;
 
+    /** The proofs this node knows that the chain has not punished, in a BMM block's coinbase (MAX_MINED_EVIDENCE, one per validator). */
+    std::vector<CTxOut> MergeMinedOutputs(const sidechain::StoreView& view, const CBlockIndex& prev, int64_t time) const override;
     bool FollowerRound(sidechain::Follower& follower) const override;
     void StartServices(node::NodeContext& node) const override;
     void StopServices(node::NodeContext& node) const override;
