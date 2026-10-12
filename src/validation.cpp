@@ -4712,6 +4712,19 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     return true;
 }
 
+/**
+ * Whether a block marked failed failed against the record of the mainchain: it, or the block it
+ * descends from that failed first (descendants of a failed block are marked failed too, unnoted).
+ */
+static bool FailedAgainstRecord(const ChainstateManager& chainman, const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!chainman.m_mainchain) return false;
+    for (; index && (index->nStatus & BLOCK_FAILED_VALID); index = index->pprev) {
+        if (const auto failure{chainman.m_mainchain->GetFailure(index->GetBlockHash())}) return *failure == sidechain::Mainchain::Failure::RECORD;
+    }
+    return false;
+}
+
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
 {
     AssertLockHeld(cs_main);
@@ -4727,6 +4740,10 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 *ppindex = pindex;
             if (pindex->nStatus & BLOCK_FAILED_VALID) {
                 LogDebug(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
+                // Against the record, which the peer's may be ahead of: no fault of the peer's (with the hook).
+                if (sidechain::Hooks().PardonRecordFailures() && FailedAgainstRecord(*this, pindex)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "record-failed", strprintf("block %s failed against the record of the mainchain", hash.ToString()));
+                }
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
                                      strprintf("block %s was previously marked invalid", hash.ToString()));
             }
@@ -4748,6 +4765,9 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         pindexPrev = &((*mi).second);
         if (pindexPrev->nStatus & BLOCK_FAILED_VALID) {
             LogDebug(BCLog::VALIDATION, "header %s has prev block invalid: %s\n", hash.ToString(), block.hashPrevBlock.ToString());
+            if (sidechain::Hooks().PardonRecordFailures() && FailedAgainstRecord(*this, pindexPrev)) {
+                return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "record-failed", strprintf("block %s failed against the record of the mainchain", block.hashPrevBlock.ToString()));
+            }
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
         if (!ContextualCheckBlockHeader(block, state, *this, pindexPrev)) {

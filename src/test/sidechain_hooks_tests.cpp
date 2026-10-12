@@ -167,6 +167,11 @@ struct TxRulesHooks : sidechain::ChainHooks {
     }
 };
 
+/** Hooks that do not punish peers for headers of or on blocks that failed against the record. */
+struct PardonHooks : sidechain::ChainHooks {
+    bool PardonRecordFailures() const override { return true; }
+};
+
 /** Hooks that let blocks be at most a minute ahead of the clock. */
 struct NearTimeHooks : sidechain::ChainHooks {
     int64_t MaxFutureBlockTime() const override { return 60; }
@@ -266,6 +271,7 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     BOOST_CHECK(!BlockExtensionsEnabled());
     BOOST_CHECK(!hooks.CustomChainOrder());
     BOOST_CHECK(!hooks.RefundsOnlyInPegSteps());
+    BOOST_CHECK(!hooks.PardonRecordFailures());
 
     // Every block is merged mined, the extension bit included: it means nothing.
     const CBlockHeader plain{Header(false)}, flagged{Header(true)};
@@ -909,6 +915,46 @@ BOOST_FIXTURE_TEST_CASE(block_extension_mismatch, SidechainSetup)
     // Blocks without the extension are not touched by the rule.
     sidechain::SetHooks(nullptr);
     BOOST_CHECK(sidechain::SameExtension(Header(false), CBlockIndex{Header(false)}));
+}
+
+BOOST_FIXTURE_TEST_CASE(record_failures_pardoned, SidechainSetup)
+{
+    // A block that failed against the record of the mainchain, and the blocks on it: a header of one,
+    // or on one, is punishable in the template (Bitcoin's results); with the hook, it is no fault of
+    // the peer's, whose record may be ahead. A block the operator marked invalid stays punishable.
+    const CBlock first{Build()};
+    Take(first);
+    const CBlock second{Build()};
+    Take(second);
+    CBlockIndex* failed{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(first.GetHash()))};
+    BlockValidationState invalidated;
+    BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(invalidated, failed, /*by_record=*/true));
+    // A header on top of the second block.
+    CBlockHeader next;
+    next.nVersion = 0x20000000;
+    next.hashPrevBlock = second.GetHash();
+    next.hashMerkleRoot = uint256{5};
+    next.nTime = second.nTime + 1;
+    next.nBits = second.nBits;
+    while (!CheckProofOfWork(next.GetHash(), next.nBits, m_node.chainman->GetConsensus())) ++next.nNonce;
+    const auto result{[&](const CBlockHeader& header) {
+        BlockValidationState state;
+        m_node.chainman->ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state);
+        return std::make_pair(state.GetResult(), state.GetRejectReason());
+    }};
+    BOOST_CHECK(result(first).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
+    {
+        InstallHooks installed{std::make_unique<PardonHooks>()};
+        for (const CBlockHeader& header : {CBlockHeader{first}, CBlockHeader{second}, next}) {
+            BOOST_CHECK(result(header) == std::make_pair(BlockValidationResult::BLOCK_TIME_FUTURE, std::string{"record-failed"}));
+        }
+        // Marked invalid by the operator: punishable all the same.
+        BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(invalidated, failed, /*by_record=*/false));
+        BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
+        BOOST_CHECK(result(first).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(peg_height)
