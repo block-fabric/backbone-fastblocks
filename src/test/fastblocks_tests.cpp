@@ -27,6 +27,7 @@
 #include <pos/producer.h>
 #include <pos/protection.h>
 #include <pos/schedule.h>
+#include <pos/staking.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <script/sign.h>
@@ -84,10 +85,12 @@ struct InstallFastBlocks {
     std::string validators;
     std::vector<std::string> args;
     std::unique_ptr<const CChainParams> params;
-    explicit InstallFastBlocks(bool with_validators = true)
+    std::optional<int64_t> seed_lookahead;
+    explicit InstallFastBlocks(bool with_validators = true, std::optional<int64_t> lookahead = std::nullopt) : seed_lookahead{lookahead}
     {
         CChainParams::RegTestOptions options;
         options.sidechain_slot = 5;
+        options.pos_seed_lookahead = lookahead;
         if (with_validators) {
             ECC_Context ecc;
             for (const CKey& key : keys) {
@@ -111,6 +114,7 @@ std::vector<const char*> SetupArgs(InstallFastBlocks& installed)
 {
     installed.args = {"-sidechainslot=5"};
     if (!installed.validators.empty()) installed.args.push_back("-posvalidators=" + installed.validators);
+    if (installed.seed_lookahead) installed.args.push_back(strprintf("-posseedlookahead=%d", *installed.seed_lookahead));
     std::vector<const char*> args;
     for (const std::string& arg : installed.args) args.push_back(arg.c_str());
     return args;
@@ -123,8 +127,8 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
     std::unique_ptr<pos::Producer> producer;
     int64_t base_slot{0};
 
-    explicit FastBlocksSetup(bool with_validators = true)
-        : InstallFastBlocks{with_validators}, TestingSetup{ChainType::REGTEST, TestOpts{.extra_args = SetupArgs(*this)}}
+    explicit FastBlocksSetup(bool with_validators = true, std::optional<int64_t> lookahead = std::nullopt)
+        : InstallFastBlocks{with_validators, lookahead}, TestingSetup{ChainType::REGTEST, TestOpts{.extra_args = SetupArgs(*this)}}
     {
         Hooks().Attach(m_node.chainman.get());
         Mock(START_TIME);
@@ -178,9 +182,9 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
     }
     const CKey& Leader(int64_t slot)
     {
-        const auto leader{Hooks().Validators().Leader(slot, Pos(), Chainman().GetConsensus().hashGenesisBlock)};
-        BOOST_REQUIRE(leader);
-        const uint256 pubkey{Hooks().Validators().Validators()[*leader].pubkey};
+        const auto leader{Hooks().ActiveLeaderOf(slot)};
+        BOOST_REQUIRE(leader.status == pos::FastBlocksHooks::LeaderStatus::OK);
+        const uint256 pubkey{leader.pubkey};
         for (const CKey& k : keys) {
             if (XOnly(k) == pubkey) return k;
         }
@@ -328,10 +332,123 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         // A BMM block first, so that the chain has an anchor point.
         MineBmm(BmmBlock(/*use_mempool=*/false));
     }
+
+    //
+    // Staking
+    //
+
+    uint256 Genesis() { return Chainman().GetConsensus().hashGenesisBlock; }
+    /** The state of the active chain (the store of the chainstate, which lives as long as it). */
+    const sidechain::StoreView& ActiveView()
+    {
+        LOCK(::cs_main);
+        return Chain().SideCache();
+    }
+    uint160 Owner(const CKey& owner) { return uint160{owner.GetPubKey().GetID()}; }
+    pos::StakeState Stake() { return WITH_LOCK(::cs_main, return pos::GetStakeState(Chain().SideState().View())); }
+    std::optional<pos::ValidatorRecord> Validator(const uint256& pubkey) { return WITH_LOCK(::cs_main, return pos::GetValidator(Chain().SideState().View(), pubkey)); }
+    /** A bond output: `validator` signs the proof of possession for `owner`. */
+    CTxOut BondOut(const CKey& validator, CAmount amount, const uint160& owner)
+    {
+        std::array<unsigned char, 64> pop;
+        BOOST_REQUIRE(validator.SignSchnorr(pos::BondPopHash(owner, Genesis()), pop, nullptr, uint256{}));
+        return CTxOut{amount, pos::BondScript(XOnly(validator), owner, pop)};
+    }
+    /** An unbond output, signed by `owner`. */
+    CTxOut UnbondOut(const CKey& validator, CAmount amount, uint32_t sequence, const CKey& owner)
+    {
+        pos::Unbond unbond;
+        unbond.pubkey = XOnly(validator);
+        unbond.amount = amount;
+        unbond.sequence = sequence;
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, amount, sequence, Genesis())), unbond.signature));
+        return CTxOut{0, pos::UnbondScript(unbond)};
+    }
+    /** A transaction with these outputs, spending the coin, its change to the key. */
+    CMutableTransaction Pay(COutPoint& coin, CTxOut& spent, std::vector<CTxOut> outputs)
+    {
+        CAmount out{0};
+        for (const CTxOut& o : outputs) out += o.nValue;
+        outputs.emplace_back(spent.nValue - out - TX_FEE, script);
+        const CMutableTransaction tx{Spend(coin, spent, outputs)};
+        coin = COutPoint{tx.GetHash(), static_cast<uint32_t>(outputs.size() - 1)};
+        spent = outputs.back();
+        return tx;
+    }
+    /** Why the mempool turns a transaction away. */
+    std::string Refused(const CMutableTransaction& tx)
+    {
+        const auto result{WITH_LOCK(::cs_main, return Chainman().ProcessTransaction(MakeTransactionRef(tx), /*test_accept=*/true))};
+        return result.m_result_type == MempoolAcceptResult::ResultType::VALID ? std::string{} : result.m_state.GetRejectReason();
+    }
+    /** The staking rules on a transaction, on an overlay of the tip's state that is dropped. */
+    std::string StakingRules(const CTransaction& tx)
+    {
+        LOCK(::cs_main);
+        sidechain::StoreOverlay overlay{Chain().SideState().View()};
+        std::string reason;
+        if (Hooks().GetStaking().ApplyTx(overlay, tx, Tip()->nHeight + 1, Fast().anchors, reason)) return {};
+        return reason;
+    }
+    CTransaction TxWith(std::vector<CTxOut> outputs)
+    {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{0x77}), 0});
+        tx.vout = std::move(outputs);
+        return CTransaction{tx};
+    }
+    /** Two blocks of stake of slot base_slot + i on the tip, both signed by its leader. */
+    std::pair<CBlock, CBlock> TwoBlocks(int i)
+    {
+        const CBlock first{PosBlock(i)};
+        CBlock second{first};
+        SetCoinbase(second, [](CMutableTransaction& tx) { tx.vout.emplace_back(0, CScript() << OP_RETURN); });
+        Resign(second);
+        return {first, second};
+    }
+    /** What AfterBlock says of a block on the tip, on a state over `base`. */
+    std::string After(const CBlock& block, const sidechain::StoreView& base)
+    {
+        sidechain::StoreOverlay overlay{base};
+        sidechain::State state{overlay};
+        std::string reason;
+        LOCK(::cs_main);
+        if (Hooks().AfterBlock(state, block, Tip()->nHeight + 1, std::nullopt, 0, Chainman().GetConsensus().sidechain, reason)) return {};
+        return reason;
+    }
+    const CKey& NotLeader(int64_t slot)
+    {
+        for (const CKey& k : keys) {
+            if (XOnly(k) != XOnly(Leader(slot))) return k;
+        }
+        BOOST_FAIL("every key leads the slot");
+        return keys[0];
+    }
+    /** The block of stake of slot base_slot + i carrying these proofs. */
+    CBlock WithEvidence(int i, const std::vector<pos::DoubleProposal>& evidence, const std::optional<pos::AnchorAck>& ack = std::nullopt)
+    {
+        const int64_t slot{Slot(i)};
+        std::string error;
+        auto block{producer->Build(slot, ack, error, evidence)};
+        BOOST_REQUIRE_MESSAGE(block, error);
+        BOOST_REQUIRE(pos::Producer::Sign(*block, Leader(slot)));
+        return *block;
+    }
+    /** Whether a coinbase pays this output. */
+    static bool Pays(const CBlock& block, const CTxOut& out)
+    {
+        const auto& vout{block.vtx.at(0)->vout};
+        return std::find(vout.begin(), vout.end(), out) != vout.end();
+    }
 };
 
 struct NoValidatorsSetup : public FastBlocksSetup {
     NoValidatorsSetup() : FastBlocksSetup{/*with_validators=*/false} {}
+};
+
+/** The genesis validators, and the seed of an epoch taken at its start (no lookahead). */
+struct SeedSetup : public FastBlocksSetup {
+    SeedSetup() : FastBlocksSetup{/*with_validators=*/true, /*lookahead=*/0} {}
 };
 
 } // namespace
@@ -433,9 +550,9 @@ BOOST_AUTO_TEST_CASE(leader_schedule)
     BOOST_CHECK(set.Active());
     std::vector<int> led(3, 0);
     for (int64_t slot{0}; slot < 2000; ++slot) {
-        const auto leader{set.Leader(slot, params, uint256{9})};
+        const auto leader{set.Leader(slot, pos::ValidatorSet::Seed(pos::EpochOf(slot, params), uint256{9}))};
         BOOST_REQUIRE(leader);
-        BOOST_CHECK(leader == set.Leader(slot, params, uint256{9}));
+        BOOST_CHECK(leader == set.Leader(slot, pos::ValidatorSet::Seed(pos::EpochOf(slot, params), uint256{9})));
         ++led[*leader];
     }
     BOOST_CHECK_GT(led[0], 1400);
@@ -444,7 +561,7 @@ BOOST_AUTO_TEST_CASE(leader_schedule)
     // Too few validators: no leader.
     params.min_active_validators = 4;
     BOOST_CHECK(!pos::ValidatorSet{params}.Active());
-    BOOST_CHECK(!pos::ValidatorSet{params}.Leader(1, params, uint256{9}));
+    BOOST_CHECK(!pos::ValidatorSet{params}.Leader(1, uint256{9}));
 }
 
 BOOST_AUTO_TEST_CASE(slashing_protection)
@@ -580,7 +697,8 @@ BOOST_FIXTURE_TEST_CASE(header_rules, FastBlocksSetup)
 BOOST_FIXTURE_TEST_CASE(no_validators, NoValidatorsSetup)
 {
     // Without validators the chain is the template's: merged mined blocks only, which carry transactions.
-    BOOST_CHECK(!Hooks().Validators().Active());
+    BOOST_CHECK(!Hooks().GenesisSet().Active());
+    BOOST_CHECK(!Hooks().PosActiveNow());
     COutPoint coin;
     const CTxOut spent{Fund(COIN, coin)};
     Accept(Spend(coin, spent, {CTxOut{COIN - TX_FEE, script}}));
@@ -977,7 +1095,7 @@ BOOST_AUTO_TEST_CASE(hooks_without_context)
         SetBlockExtensions(false);
     }
     // Without validators, no block of stake.
-    BOOST_CHECK(!hooks.Validators().Active());
+    BOOST_CHECK(!hooks.GenesisSet().Active());
 }
 
 BOOST_FIXTURE_TEST_CASE(finality, FastBlocksSetup)
@@ -1080,45 +1198,44 @@ BOOST_FIXTURE_TEST_CASE(evidence, FastBlocksSetup)
     SetCoinbase(second, [](CMutableTransaction& tx) { tx.vout.emplace_back(0, CScript() << OP_RETURN); });
     Resign(second);
     BOOST_REQUIRE(first.GetHash() != second.GetHash());
-    const uint256 genesis{Chainman().GetConsensus().hashGenesisBlock};
     const int64_t slot{pos::SlotOf(first.nTime, Pos())};
+    const uint256 leader{XOnly(Leader(slot))};
     std::string reason;
 
     // Two headers of one slot, both signed by its leader: the offence.
     const pos::DoubleProposal proof{.a = first, .b = second};
-    const auto offence{pos::CheckEvidence(proof, Hooks().Validators(), Pos(), genesis, reason)};
+    const auto offence{pos::CheckEvidence(proof, leader, Pos(), reason)};
     BOOST_REQUIRE_MESSAGE(offence, reason);
     BOOST_CHECK(offence->pubkey == XOnly(Leader(slot)));
     BOOST_CHECK_EQUAL(offence->slot, slot);
     // Headers of blocks of stake.
-    BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = BmmBlock(/*use_mempool=*/false)}, Hooks().Validators(), Pos(), genesis, reason));
+    BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = BmmBlock(/*use_mempool=*/false)}, leader, Pos(), reason));
     BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-kind");
     // Of one slot, which starts at their time.
     {
         CBlock later{PosBlock(2)};
-        BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = later}, Hooks().Validators(), Pos(), genesis, reason));
+        BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = later}, leader, Pos(), reason));
         BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-slot");
         CBlockHeader a{first}, b{second};
         a.nTime = b.nTime = static_cast<uint32_t>(Pos().genesis_time);
-        BOOST_CHECK(!pos::CheckEvidence({.a = a, .b = b}, Hooks().Validators(), Pos(), genesis, reason));
+        BOOST_CHECK(!pos::CheckEvidence({.a = a, .b = b}, leader, Pos(), reason));
         BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-slot");
     }
     // Two headers, not one twice.
-    BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = first}, Hooks().Validators(), Pos(), genesis, reason));
+    BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = first}, leader, Pos(), reason));
     BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-same");
     // Both signed by the leader of the slot.
     for (const CKey& other : keys) {
         if (XOnly(other) == XOnly(Leader(slot))) continue;
         CBlock forged{second};
         Resign(forged, &other);
-        BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = forged}, Hooks().Validators(), Pos(), genesis, reason));
+        BOOST_CHECK(!pos::CheckEvidence({.a = first, .b = forged}, leader, Pos(), reason));
         BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-sig");
     }
-    // Without validators, no leader: no offence.
-    {
-        Consensus::PosParams none{Pos()};
-        none.genesis_validators.clear();
-        BOOST_CHECK(!pos::CheckEvidence(proof, pos::ValidatorSet{none}, none, genesis, reason));
+    // Not the leader's key: no offence of its.
+    for (const CKey& other : keys) {
+        if (XOnly(other) == leader) continue;
+        BOOST_CHECK(!pos::CheckEvidence(proof, XOnly(other), Pos(), reason));
         BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-sig");
     }
 
@@ -1708,6 +1825,601 @@ BOOST_FIXTURE_TEST_CASE(bundle_fixed_by_anchored_block, FastBlocksSetup)
     }
     Take(q2);
     BOOST_CHECK(WITH_LOCK(::cs_main, return Chain().SideState().Bundle()->hash) == *bundle1);
+}
+
+BOOST_AUTO_TEST_CASE(staking_parameters)
+{
+    // The user's decisions (design, section 13): a minimum stake of 1 CHN (0.01 on the test networks,
+    // 0.0001 on regtest), 4 to 100 validators (3 to 32; 1 to 8), slashing of 10 % with 1/8 to the
+    // reporter, about two days to unbond. The main and test networks start with no validators: merged
+    // mined only until enough stake is bonded.
+    const auto main{CChainParams::Main()};
+    const Consensus::PosParams& m{main->GetConsensus().pos};
+    BOOST_CHECK_EQUAL(m.min_stake, COIN);
+    BOOST_CHECK_EQUAL(m.min_active_validators, 4U);
+    BOOST_CHECK_EQUAL(m.max_validators, 100U);
+    BOOST_CHECK_EQUAL(m.slots_per_epoch * m.slot_seconds, 60 * 60);
+    // Two days of anchors, one a mainchain block (a minute).
+    BOOST_CHECK_EQUAL(m.unbonding_anchors, 2 * 24 * 60);
+    for (const auto& params : {CChainParams::Main(), CChainParams::TestNet(), CChainParams::SigNet({})}) {
+        const Consensus::PosParams& pos{params->GetConsensus().pos};
+        BOOST_CHECK(pos.genesis_validators.empty());
+        BOOST_CHECK(!pos::ValidatorSet{pos}.Active());
+        BOOST_CHECK_EQUAL(pos.slash_bps, 1000);
+        BOOST_CHECK_EQUAL(pos.reporter_share_divisor, 8);
+        // A proof lands while the stake is still bonded or unbonding.
+        BOOST_CHECK_GE(pos.unbonding_anchors, 2 * pos.evidence_window_anchors);
+        // The stake is fixed an epoch before the seed exists (the seed block is mined some minutes after
+        // its median time, which is at most an epoch before the epoch starts).
+        BOOST_CHECK_LE(pos.seed_lookahead_seconds, pos.slots_per_epoch * pos.slot_seconds);
+    }
+    for (const auto& params : {CChainParams::TestNet(), CChainParams::SigNet({})}) {
+        const Consensus::PosParams& pos{params->GetConsensus().pos};
+        BOOST_CHECK_EQUAL(pos.min_stake, COIN / 100);
+        BOOST_CHECK_EQUAL(pos.min_active_validators, 3U);
+        BOOST_CHECK_EQUAL(pos.max_validators, 32U);
+        BOOST_CHECK_EQUAL(pos.slots_per_epoch, 20);
+    }
+    CChainParams::RegTestOptions options;
+    options.sidechain_slot = 5;
+    const Consensus::PosParams& reg{CChainParams::RegTest(options)->GetConsensus().pos};
+    BOOST_CHECK_EQUAL(reg.min_stake, COIN / 10000);
+    BOOST_CHECK_EQUAL(reg.min_active_validators, 1U);
+    BOOST_CHECK_EQUAL(reg.max_validators, 8U);
+    BOOST_CHECK_EQUAL(reg.slots_per_epoch, 20);
+    BOOST_CHECK_EQUAL(reg.unbonding_anchors, 20);
+}
+
+BOOST_AUTO_TEST_CASE(staking_scripts)
+{
+    ECC_Context ecc;
+    CKey validator, owner;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    owner.MakeNewKey(/*fCompressed=*/true);
+    const uint160 owner_hash{owner.GetPubKey().GetID()};
+    const uint256 genesis{1};
+    std::array<unsigned char, 64> pop;
+    BOOST_REQUIRE(validator.SignSchnorr(pos::BondPopHash(owner_hash, genesis), pop, nullptr, uint256{}));
+    // A bond reads back as written; the proof of possession is for one owner, on one chain.
+    const CTxOut bond_out{5000, pos::BondScript(XOnly(validator), owner_hash, pop)};
+    const auto bond{pos::ParseBond(bond_out)};
+    BOOST_REQUIRE(bond);
+    BOOST_CHECK(bond->pubkey == XOnly(validator) && bond->owner == owner_hash && bond->pop == pop && bond->amount == 5000);
+    BOOST_CHECK(pos::IsBondScript(bond_out.scriptPubKey) && !pos::IsUnbondScript(bond_out.scriptPubKey));
+    BOOST_CHECK(pos::CheckBondPop(XOnly(validator), owner_hash, pop, genesis));
+    BOOST_CHECK(!pos::CheckBondPop(XOnly(validator), uint160{}, pop, genesis));
+    BOOST_CHECK(!pos::CheckBondPop(XOnly(validator), owner_hash, pop, uint256{2}));
+    BOOST_CHECK(!pos::CheckBondPop(XOnly(owner), owner_hash, pop, genesis));
+    // A script with the tag claims to be a bond, read or not.
+    const CScript truncated{CScript() << OP_RETURN << std::vector<unsigned char>{0xDB, 'S', 'T', 'K', 1, 2, 3}};
+    BOOST_CHECK(pos::IsBondScript(truncated));
+    BOOST_CHECK(!pos::ParseBond(CTxOut{1, truncated}));
+    // An unbond reads back; an amount above MAX_MONEY does not read.
+    pos::Unbond unbond;
+    unbond.pubkey = XOnly(validator);
+    unbond.amount = 4000;
+    unbond.sequence = 7;
+    BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, genesis)), unbond.signature));
+    const auto read{pos::ParseUnbond(CTxOut{0, pos::UnbondScript(unbond)})};
+    BOOST_REQUIRE(read);
+    BOOST_CHECK(read->pubkey == unbond.pubkey && read->amount == 4000 && read->sequence == 7 && read->signature == unbond.signature);
+    BOOST_CHECK(pos::IsUnbondScript(pos::UnbondScript(unbond)));
+    pos::Unbond huge{unbond};
+    huge.amount = MAX_MONEY + 1;
+    BOOST_CHECK(!pos::ParseUnbond(CTxOut{0, pos::UnbondScript(huge)}));
+    // The message names the validator, the amount, the sequence and the chain.
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 8, genesis));
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 7, uint256{2}));
+    // The penalty: 10 %, in integers, without overflow.
+    Consensus::PosParams params;
+    const pos::Staking staking{params, genesis};
+    BOOST_CHECK_EQUAL(staking.Penalty(100000), 10000);
+    BOOST_CHECK_EQUAL(staking.Penalty(9), 0);
+    BOOST_CHECK_EQUAL(staking.Penalty(MAX_MONEY), MAX_MONEY / 10);
+}
+
+BOOST_AUTO_TEST_CASE(leader_seed)
+{
+    // The seed of an epoch: the hash of the highest mainchain block whose median time is at least
+    // seed_lookahead_seconds before the epoch starts; known once a later block is on record.
+    Consensus::PosParams params;
+    params.genesis_time = 1000;
+    params.slot_seconds = 30;
+    params.slots_per_epoch = 120;
+    params.seed_lookahead_seconds = 1200;
+    sidechain::Mainchain record;
+    BOOST_CHECK(!pos::SeedHeight(1, params, record));
+    const auto append{[&](int height, uint8_t salt = 0) {
+        sidechain::MainBlock block;
+        block.hash = uint256{static_cast<uint8_t>(height + salt)};
+        block.prev_hash = record.TipHash();
+        block.time = 1000 + 60 * height;
+        BOOST_REQUIRE(record.Append(block));
+    }};
+    // Epoch 1 starts at 1000 + 3600; its seed is taken at 3400: block 40.
+    BOOST_CHECK_EQUAL(pos::SeedTime(1, params), 3400);
+    for (int height{0}; height <= 40; ++height) append(height);
+    BOOST_CHECK(!pos::SeedHeight(1, params, record));
+    BOOST_CHECK(!pos::EpochSeed(1, params, record));
+    append(41);
+    BOOST_CHECK(pos::SeedHeight(1, params, record) == std::optional<int>{40});
+    BOOST_CHECK(pos::EpochSeed(1, params, record) == pos::ValidatorSet::Seed(1, uint256{40}));
+    // Before the first block on record: a null hash.
+    BOOST_CHECK(pos::SeedHeight(0, params, record) == std::optional<int>{-1});
+    BOOST_CHECK(pos::EpochSeed(0, params, record) == pos::ValidatorSet::Seed(0, uint256{}));
+    // A mainchain reorg that replaces the block moves the seed.
+    record.Truncate(39);
+    append(40, 100);
+    append(41, 100);
+    BOOST_CHECK(pos::EpochSeed(1, params, record) == pos::ValidatorSet::Seed(1, uint256{140}));
+    BOOST_CHECK(pos::ValidatorSet::Seed(1, uint256{40}) != pos::ValidatorSet::Seed(2, uint256{40}));
+}
+
+BOOST_FIXTURE_TEST_CASE(bonds, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    CKey validator, stranger;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    stranger.MakeNewKey(/*fCompressed=*/true);
+    const uint256 pubkey{XOnly(validator)};
+    const CAmount min{Pos().min_stake};
+    // The mempool (and blocks) refuse a bond whose proof of possession another key signed.
+    {
+        const auto signed_by_stranger{*pos::ParseBond(BondOut(stranger, 2 * min, Owner(key)))};
+        COutPoint c{coin};
+        CTxOut s{spent};
+        BOOST_CHECK_EQUAL(Refused(Pay(c, s, {CTxOut{2 * min, pos::BondScript(pubkey, Owner(key), signed_by_stranger.pop)}})), "bad-pos-bond-pop");
+    }
+    // A bond: the coins leave circulation into the state, the key's owner is the bond's.
+    Accept(Pay(coin, spent, {BondOut(validator, 2 * min, Owner(key))}));
+    const CBlock block{PosBlock(1)};
+    BOOST_REQUIRE_EQUAL(block.vtx.size(), 2U);
+    Take(block);
+    auto record{Validator(pubkey)};
+    BOOST_REQUIRE(record);
+    BOOST_CHECK(record->owner == Owner(key));
+    BOOST_CHECK_EQUAL(record->bonded, 2 * min);
+    BOOST_CHECK_EQUAL(record->first_bond_height, Tip()->nHeight);
+    BOOST_CHECK(record->Eligible(Pos()));
+    BOOST_CHECK_EQUAL(Stake().bonded, 2 * min);
+    // More, by the same owner.
+    Accept(Pay(coin, spent, {BondOut(validator, min, Owner(key))}));
+    Take(PosBlock(2));
+    BOOST_CHECK_EQUAL(Validator(pubkey)->bonded, 3 * min);
+    BOOST_CHECK_EQUAL(Stake().bonded, 3 * min);
+    // The rules.
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(stranger))})), "bad-pos-bond-owner");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, uint160{})})), "bad-pos-bond-owner");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, 0, Owner(key))})), "bad-pos-bond-amount");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, MAX_MONEY + 1, Owner(key))})), "bad-pos-bond-amount");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({CTxOut{min, CScript() << OP_RETURN << std::vector<unsigned char>{0xDB, 'S', 'T', 'K', 1}}})), "bad-pos-bond");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(key))})), "");
+    // A smaller bond is taken, but the key takes part only with min_stake.
+    Accept(Pay(coin, spent, {BondOut(stranger, min - 1, Owner(key))}));
+    Take(PosBlock(3));
+    BOOST_CHECK_EQUAL(Validator(XOnly(stranger))->bonded, min - 1);
+    BOOST_CHECK(!Validator(XOnly(stranger))->Eligible(Pos()));
+    // The sets made at anchors: the next anchor's set has the bonded key, with its stake as weight
+    // (and the genesis validators); used from the epoch after the next.
+    MineBmm(BmmBlock(/*use_mempool=*/false));
+    const int64_t epoch{pos::EpochOf(pos::SlotOf(Tip()->nTime, Pos()), Pos()) + 2};
+    const auto set{WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), epoch))};
+    BOOST_REQUIRE(set);
+    const auto index{set->Find(pubkey)};
+    BOOST_REQUIRE(index);
+    BOOST_CHECK_EQUAL(set->Validators()[*index].stake, 3 * min);
+    BOOST_CHECK(!set->Find(XOnly(stranger)));
+    BOOST_CHECK_EQUAL(set->Validators().size(), 4U);
+    // The set of the epoch before is still the genesis set.
+    const auto before{WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), epoch - 1))};
+    BOOST_REQUIRE(before);
+    BOOST_CHECK(!before->Find(pubkey));
+}
+
+BOOST_FIXTURE_TEST_CASE(unbonds, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    CKey validator, stranger;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    stranger.MakeNewKey(/*fCompressed=*/true);
+    const uint256 pubkey{XOnly(validator)};
+    const CAmount min{Pos().min_stake};
+    Accept(Pay(coin, spent, {BondOut(validator, 3 * min, Owner(key))}));
+    Take(PosBlock(1));
+    // The rules.
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({CTxOut{0, CScript() << OP_RETURN << std::vector<unsigned char>{0xDC, 'U', 'N', 'B', 1}}})), "bad-pos-unbond");
+    CTxOut valued{UnbondOut(validator, min, 0, key)};
+    valued.nValue = 1;
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({valued})), "bad-pos-unbond-value");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(stranger, min, 0, key)})), "bad-pos-unbond-unknown");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, min, 1, key)})), "bad-pos-unbond-sequence");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 0, 0, key)})), "bad-pos-unbond-amount");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 3 * min + 1, 0, key)})), "bad-pos-unbond-amount");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 3 * min - min / 2, 0, key)})), "bad-pos-unbond-remainder");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, min, 0, stranger)})), "bad-pos-unbond-sig");
+    {
+        COutPoint c{coin};
+        CTxOut s{spent};
+        BOOST_CHECK_EQUAL(Refused(Pay(c, s, {UnbondOut(validator, min, 0, stranger)})), "bad-pos-unbond-sig");
+    }
+    // An unbond: off the stake at once, paid unbonding_anchors anchors later to the owner's key.
+    const uint64_t anchors{Fast().anchors};
+    Accept(Pay(coin, spent, {UnbondOut(validator, min, 0, key)}));
+    Take(PosBlock(2));
+    auto record{*Validator(pubkey)};
+    BOOST_CHECK_EQUAL(record.bonded, 2 * min);
+    BOOST_CHECK_EQUAL(record.unbond_seq, 1U);
+    BOOST_REQUIRE_EQUAL(record.unbonding.size(), 1U);
+    BOOST_CHECK(record.unbonding[0] == (pos::UnbondingEntry{.release_anchor = anchors + Pos().unbonding_anchors, .sequence = 0, .amount = min}));
+    BOOST_CHECK_EQUAL(Stake().bonded, 2 * min);
+    BOOST_CHECK_EQUAL(Stake().unbonding, min);
+    // Not twice.
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, min, 0, key)})), "bad-pos-unbond-sequence");
+    // All that is left: the key no longer takes part.
+    Accept(Pay(coin, spent, {UnbondOut(validator, 2 * min, 1, key)}));
+    Take(PosBlock(3));
+    BOOST_CHECK(!Validator(pubkey)->Eligible(Pos()));
+    BOOST_CHECK_EQUAL(Stake().unbonding, 3 * min);
+    // Paid at the anchor it is due, through the payouts of the peg actions: not before.
+    const CTxOut first{min, script}, second{2 * min, script};
+    while (Fast().anchors + 1 < anchors + Pos().unbonding_anchors) {
+        const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+        BOOST_CHECK(!Pays(bmm, first) && !Pays(bmm, second));
+        MineBmm(bmm);
+    }
+    const CBlock paying{BmmBlock(/*use_mempool=*/false)};
+    BOOST_CHECK(Pays(paying, first));
+    BOOST_CHECK(Pays(paying, second));
+    MineBmm(paying);
+    BOOST_CHECK_EQUAL(Stake().unbonding, 0);
+    BOOST_CHECK_EQUAL(Stake().bonded, 0);
+    BOOST_CHECK(Validator(pubkey)->unbonding.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(staking_starts_pos, NoValidatorsSetup)
+{
+    // The main and test networks start so: no validators, merged mined blocks only (with
+    // transactions), until enough stake is bonded. Then blocks of stake from the epoch after next.
+    BOOST_CHECK(!Hooks().PosActiveNow());
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CKey& validator{keys[0]};
+    Accept(Pay(coin, spent, {BondOut(validator, Pos().min_stake, Owner(key))}));
+    const CBlock bonding{BmmBlock()};
+    BOOST_REQUIRE_EQUAL(bonding.vtx.size(), 2U);
+    MineBmm(bonding);
+    // The anchor after it makes a set with it.
+    MineBmm(BmmBlock(/*use_mempool=*/false));
+    const int64_t epoch{pos::EpochOf(pos::SlotOf(Tip()->nTime, Pos()), Pos()) + 2};
+    std::string error;
+    {
+        const int64_t slot{(epoch - 1) * Pos().slots_per_epoch};
+        Mock(pos::SlotTime(slot, Pos()));
+        BOOST_CHECK(!Hooks().PosActiveNow());
+        BOOST_CHECK(!producer->Produce(slot, error));
+        BOOST_CHECK_EQUAL(error, "no blocks of stake in this epoch: too few validators");
+    }
+    const int64_t slot{epoch * Pos().slots_per_epoch};
+    Mock(pos::SlotTime(slot, Pos()));
+    BOOST_CHECK(Hooks().PosActiveNow());
+    const auto made{producer->Produce(slot, error)};
+    BOOST_REQUIRE_MESSAGE(made, error);
+    BOOST_CHECK(Tip()->GetBlockHash() == *made);
+    BOOST_CHECK(pos::CheckBlockSig(Tip()->GetBlockHeader(), XOnly(validator)));
+    // Off again once the stake leaves: the set an anchor makes then is empty.
+    Accept(Pay(coin, spent, {UnbondOut(validator, Pos().min_stake, 0, key)}));
+    Mock(pos::SlotTime(slot + 1, Pos()));
+    BOOST_REQUIRE_MESSAGE(producer->Produce(slot + 1, error), error);
+    BOOST_CHECK_EQUAL(Validator(XOnly(validator))->bonded, 0);
+    MineBmm(BmmBlock(/*use_mempool=*/false));
+    const int64_t off{pos::EpochOf(pos::SlotOf(Tip()->nTime, Pos()), Pos()) + 2};
+    Mock(pos::SlotTime(off * Pos().slots_per_epoch, Pos()));
+    BOOST_CHECK(!Hooks().PosActiveNow());
+    BOOST_CHECK(!producer->Produce(off * Pos().slots_per_epoch, error));
+    BOOST_CHECK_EQUAL(error, "no blocks of stake in this epoch: too few validators");
+}
+
+BOOST_AUTO_TEST_CASE(jailing)
+{
+    // A validator that made less than half the blocks it led in an epoch (and led at least ten) is
+    // left out of the sets made in the next epochs, jail_epochs more; it keeps its coins.
+    ECC_Context ecc;
+    std::vector<CKey> validators(3);
+    for (CKey& k : validators) k.MakeNewKey(/*fCompressed=*/true);
+    Consensus::PosParams params;
+    params.slots_per_epoch = 20;
+    params.min_active_validators = 1;
+    params.max_validators = 8;
+    params.min_stake = 1000;
+    const uint256 genesis{1};
+    const uint160 owner{*uint160::FromHex("0101010101010101010101010101010101010101")};
+    const pos::Staking staking{params, genesis};
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay out{empty};
+    std::vector<CTxOut> bonds;
+    for (const CKey& k : validators) {
+        std::array<unsigned char, 64> pop;
+        BOOST_REQUIRE(k.SignSchnorr(pos::BondPopHash(owner, genesis), pop, nullptr, uint256{}));
+        bonds.emplace_back(5000, pos::BondScript(XOnly(k), owner, pop));
+    }
+    CMutableTransaction tx;
+    tx.vout = bonds;
+    std::string reason;
+    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{tx}, 1, 0, reason));
+    const uint256 a{XOnly(validators[0])}, b{XOnly(validators[1])}, c{XOnly(validators[2])};
+    // Epoch 0: A made its ten; B led twelve and made none; C led four and made none (too few to tell).
+    for (int64_t slot{0}; slot < 10; ++slot) staking.NoteLiveness(out, slot, a, {});
+    std::vector<std::pair<int64_t, uint256>> missed;
+    for (int64_t slot{10}; slot < 18; ++slot) missed.emplace_back(slot, b);
+    for (int64_t slot{0}; slot < 4; ++slot) missed.emplace_back(slot, b);
+    for (int64_t slot{0}; slot < 4; ++slot) missed.emplace_back(slot, c);
+    staking.NoteLiveness(out, 19, a, missed);
+    BOOST_CHECK(pos::GetLiveness(out, 0, a) == (pos::Liveness{.assigned = 11, .produced = 11}));
+    BOOST_CHECK(pos::GetLiveness(out, 0, b) == (pos::Liveness{.assigned = 12, .produced = 0}));
+    // The first anchor of epoch 1 jails B; its set leaves B out.
+    std::vector<CTxOut> owed;
+    const auto made{staking.PegStep(out, uint256{0xa1}, 1, 20, 1, owed)};
+    BOOST_CHECK(made.set_active);
+    BOOST_CHECK(owed.empty());
+    BOOST_CHECK_EQUAL(pos::GetValidator(out, b)->jailed_until_epoch, 3);
+    BOOST_CHECK_EQUAL(pos::GetValidator(out, a)->jailed_until_epoch, 0);
+    BOOST_CHECK_EQUAL(pos::GetValidator(out, c)->jailed_until_epoch, 0);
+    BOOST_CHECK(!pos::GetLiveness(out, 0, b));
+    const auto set{pos::GetSetVersion(out, pos::GetAnchorSet(out, uint256{0xa1})->version)};
+    BOOST_REQUIRE(set);
+    BOOST_CHECK_EQUAL(set->size(), 2U);
+    BOOST_CHECK(!pos::ValidatorSet(*set, params).Find(b));
+    // No coins lost.
+    BOOST_CHECK_EQUAL(pos::GetValidator(out, b)->bonded, 5000);
+    BOOST_CHECK_EQUAL(pos::GetStakeState(out).bonded, 15000);
+    // Out of the sets made in epoch 2 too; back in those of epoch 3.
+    BOOST_CHECK(!staking.MakeSet(out, 2).Find(b));
+    BOOST_CHECK(staking.MakeSet(out, 3).Find(b));
+    staking.PegStep(out, uint256{0xa2}, 2, 60, 3, owed);
+    BOOST_CHECK(pos::ValidatorSet(*pos::GetSetVersion(out, pos::GetAnchorSet(out, uint256{0xa2})->version), params).Find(b));
+}
+
+BOOST_FIXTURE_TEST_CASE(liveness_noted, FastBlocksSetup)
+{
+    // Each block of stake: its leader made one; the leaders of the slots since the last one (an epoch
+    // of them at most) made none.
+    StartPos();
+    Take(PosBlock(1));
+    Take(PosBlock(4));
+    const auto epoch{pos::EpochOf(base_slot, Pos())};
+    uint32_t assigned{0}, produced{0};
+    LOCK(::cs_main);
+    for (int64_t e{epoch - 1}; e <= epoch + 1; ++e) {
+        for (const CKey& k : keys) {
+            const auto liveness{pos::GetLiveness(Chain().SideState().View(), e, XOnly(k))};
+            if (!liveness) continue;
+            assigned += liveness->assigned;
+            produced += liveness->produced;
+        }
+    }
+    // The first block of stake: the epoch of slots before it unmade, and itself; the second: two slots and itself.
+    BOOST_CHECK_EQUAL(assigned, static_cast<uint32_t>(Pos().slots_per_epoch + 1 + 2 + 1));
+    BOOST_CHECK_EQUAL(produced, 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    // Every validator bonds.
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key)), BondOut(keys[1], bond, Owner(key)), BondOut(keys[2], bond, Owner(key))}));
+    const CBlock bonding{PosBlock(1)};
+    Take(bonding);
+    BOOST_CHECK_EQUAL(Stake().bonded, 3 * bond);
+    // The leader of slot 2 signs two blocks for it; the first is taken.
+    const auto [first, second]{TwoBlocks(2)};
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    const CKey& other{NotLeader(base_slot + 2)};
+    Take(first);
+
+    // Proofs the chain refuses (asked of the rules directly: blocks of one slot given to validation
+    // would be proofs that its leader signed them all). One of a slot after the block's.
+    const sidechain::StoreView& view{ActiveView()};
+    {
+        const auto [x, y]{TwoBlocks(4)};
+        BOOST_CHECK_EQUAL(After(WithEvidence(3, {{.a = x, .b = y}}), view), "bad-pos-evidence-late");
+    }
+    // Not signed by the slot's leader.
+    {
+        CBlock a{first}, b{second};
+        Resign(a, &other);
+        Resign(b, &other);
+        BOOST_CHECK_EQUAL(After(WithEvidence(3, {{.a = a, .b = b}}), view), "bad-pos-evidence-sig");
+    }
+    // Not of the form of one (context free, CheckBlock): two blocks of stake of one slot, different.
+    const auto form{[&](const CBlock& block) {
+        BlockValidationState state;
+        return Hooks().CheckBlock(block, state) ? std::string{} : state.GetRejectReason();
+    }};
+    BOOST_CHECK_EQUAL(form(WithEvidence(3, {{.a = first, .b = first}})), "bad-pos-evidence-same");
+    BOOST_CHECK_EQUAL(form(WithEvidence(3, {{.a = first, .b = bonding}})), "bad-pos-evidence-slot");
+    BOOST_CHECK_EQUAL(form(WithEvidence(3, {{.a = first, .b = BmmBlock(/*use_mempool=*/false)}})), "bad-pos-evidence-kind");
+    // At most MAX_SECTION_EVIDENCE in a block.
+    BOOST_CHECK_EQUAL(form(WithEvidence(3, std::vector<pos::DoubleProposal>(pos::MAX_SECTION_EVIDENCE + 1, proof))), "bad-pos-sections");
+    BOOST_CHECK_EQUAL(form(WithEvidence(3, std::vector<pos::DoubleProposal>(pos::MAX_SECTION_EVIDENCE, proof))), "");
+    // Two in a block for one offence.
+    BOOST_CHECK_EQUAL(After(WithEvidence(3, {proof, proof}), view), "bad-pos-evidence-known");
+    BOOST_CHECK_EQUAL(After(WithEvidence(3, {proof}), view), "");
+
+    // The proof, in the block of slot 3 (as the producer puts the proofs it knows in): the leader loses
+    // 10 % of its stake and is banned, the rest is unbonded; the block is owed 1/8 of the penalty.
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof, reason), reason);
+    const int64_t slot3{Slot(3)};
+    std::string error;
+    // (The producer's key for slot 3 is one of the fixture's.)
+    BOOST_REQUIRE_MESSAGE(producer->Produce(slot3, error), error);
+    CBlock carrying;
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(carrying, *Tip())));
+    pos::PosSections sections;
+    BOOST_REQUIRE(pos::PosSections::Decode(carrying.vSections, sections));
+    BOOST_REQUIRE_EQUAL(sections.evidence.size(), 1U);
+    const CAmount penalty{bond / 10};
+    const auto record{Validator(offender)};
+    BOOST_REQUIRE(record);
+    BOOST_CHECK(record->tombstoned);
+    BOOST_CHECK_EQUAL(record->bonded, 0);
+    BOOST_CHECK_EQUAL(record->Unbonding(), bond - penalty);
+    BOOST_CHECK(!record->Eligible(Pos()));
+    BOOST_CHECK_EQUAL(Stake().bonded, 2 * bond);
+    BOOST_CHECK_EQUAL(Stake().unbonding, bond - penalty);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, penalty / 8);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, penalty - penalty / 8);
+    BOOST_CHECK_EQUAL(Stake().slashed, penalty);
+    // Every coin still accounted for.
+    BOOST_CHECK_EQUAL(Stake().bonded + Stake().unbonding + Stake().pot_reserve + Stake().rewards_owed, 3 * bond);
+    // Not twice; and no more bonds of its key.
+    BOOST_CHECK_EQUAL(After(WithEvidence(4, {proof}), view), "bad-pos-evidence-known");
+    for (const CKey& k : keys) {
+        if (XOnly(k) == offender) BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(k, bond, Owner(key))})), "bad-pos-bond-tombstoned");
+    }
+    // The producer does not put it in again.
+    BOOST_REQUIRE_MESSAGE(producer->Produce(Slot(4), error), error);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(carrying, *Tip())));
+    BOOST_REQUIRE(pos::PosSections::Decode(carrying.vSections, sections));
+    BOOST_CHECK(sections.evidence.empty());
+
+    // At the next peg step: the reward, to the script of the first output of the block that carried
+    // the proof; a share of the reserve, with the pot, to the anchor's payee.
+    const CScript reporter{GetScriptForDestination(WitnessV0KeyHash{key.GetPubKey()})};
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    BOOST_CHECK(Pays(bmm, CTxOut{penalty / 8, reporter}));
+    const CAmount due{Fast().pot_accrued - Fast().pot_paid};
+    const CAmount reserve{penalty - penalty / 8};
+    const CAmount release{reserve / Pos().pot_reserve_anchors + (reserve % Pos().pot_reserve_anchors != 0)};
+    BOOST_CHECK(Pays(bmm, CTxOut{due + release, CScript() << OP_TRUE}));
+    MineBmm(bmm);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, reserve - release);
+    // The sets made from then on leave the offender out.
+    const auto set{WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), pos::EpochOf(pos::SlotOf(Tip()->nTime, Pos()), Pos()) + 2))};
+    BOOST_REQUIRE(set);
+    BOOST_CHECK(!set->Find(offender));
+    BOOST_CHECK_EQUAL(set->Validators().size(), 2U);
+
+    // A proof of a slot whose set was made more than evidence_window_anchors anchors before: too old.
+    const auto [late_a, late_b]{TwoBlocks(5)};
+    Take(late_a);
+    for (int64_t i{0}; i <= Pos().evidence_window_anchors; ++i) MineBmm(BmmBlock(/*use_mempool=*/false));
+    BOOST_CHECK_EQUAL(Check(WithEvidence(60, {{.a = late_a, .b = late_b}})), "bad-pos-evidence-old");
+}
+
+BOOST_FIXTURE_TEST_CASE(leader_checked_when_connected, FastBlocksSetup)
+{
+    StartPos();
+    // A block whose epoch's set this state does not have (the header was taken before the node knew
+    // it): refused when connected. (The set of the anchor of an epoch two on, not looked up yet.)
+    {
+        const int64_t slot{Slot(2 * static_cast<int>(Pos().slots_per_epoch) + 5)};
+        std::string error;
+        const auto block{producer->Build(slot, std::nullopt, error)};
+        BOOST_REQUIRE_MESSAGE(block, error);
+        sidechain::EmptyStore empty;
+        BOOST_CHECK_EQUAL(After(*block, empty), "bad-pos-set-unknown");
+    }
+    // Signed by another key than the leader's: refused when connected, whatever the header check said.
+    CBlock block{PosBlock(1)};
+    const sidechain::StoreView& view{ActiveView()};
+    BOOST_CHECK_EQUAL(After(block, view), "");
+    Resign(block, &NotLeader(pos::SlotOf(block.nTime, Pos())));
+    BOOST_CHECK_EQUAL(After(block, view), "bad-pos-sig");
+}
+
+BOOST_FIXTURE_TEST_CASE(inactive_when_connected, NoValidatorsSetup)
+{
+    // No validators: a block of stake is refused when connected, too.
+    StartPos();
+    const int64_t slot{Slot(1)};
+    std::string error;
+    const auto block{producer->Build(slot, std::nullopt, error)};
+    BOOST_REQUIRE_MESSAGE(block, error);
+    const sidechain::StoreView& view{ActiveView()};
+    BOOST_CHECK_EQUAL(After(*block, view), "bad-pos-inactive");
+}
+
+BOOST_FIXTURE_TEST_CASE(seed_from_the_mainchain, SeedSetup)
+{
+    // The seed of an epoch is the hash of the highest mainchain block whose median time is at or
+    // before the epoch's start (no lookahead here): a block of stake of an epoch whose seed the record
+    // does not have yet waits.
+    StartPos();
+    BOOST_CHECK(Hooks().IsWaitReason("pos-seed-unknown"));
+    // The first slot of the next epoch.
+    const int64_t epoch{pos::EpochOf(base_slot, Pos()) + 1};
+    const int i{static_cast<int>(epoch * Pos().slots_per_epoch - base_slot)};
+    const int64_t slot{Slot(i)};
+    // Its leader will be that of the seed of the block on record now.
+    const uint256 seed{pos::ValidatorSet::Seed(epoch, Record().TipHash())};
+    const auto leader{Hooks().GenesisSet().Leader(slot, seed)};
+    BOOST_REQUIRE(leader);
+    std::string error;
+    BOOST_CHECK(!producer->Produce(slot, error));
+    BOOST_CHECK_EQUAL(error, "the mainchain block that seeds the epoch is not on record yet");
+    auto block{producer->Build(slot, std::nullopt, error)};
+    BOOST_REQUIRE_MESSAGE(block, error);
+    for (const CKey& k : keys) {
+        if (XOnly(k) == Hooks().GenesisSet().Validators()[*leader].pubkey) BOOST_REQUIRE(pos::Producer::Sign(*block, k));
+    }
+    BOOST_CHECK_EQUAL(Check(*block), "pos-seed-unknown");
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Hooks().WaitingReady(*block, Record())));
+    const sidechain::StoreView& view{ActiveView()};
+    BOOST_CHECK_EQUAL(After(*block, view), "pos-seed-unknown");
+    // A mainchain block after the epoch's start: the seed is known, the block taken.
+    Mock(GetTime() + 1);
+    Main();
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().WaitingReady(*block, Record())));
+    Take(*block);
+    // A mainchain reorg that replaces the block that seeds the epoch moves its leaders: the blocks of
+    // stake of the epoch whose leader changed are taken back, and given back when the record is.
+    std::vector<uint256> blocks{block->GetHash()};
+    for (int n{1}; n <= 6; ++n) {
+        Take(PosBlock(i + n));
+        blocks.push_back(Tip()->GetBlockHash());
+    }
+    const uint256 tip{Tip()->GetBlockHash()};
+    Hooks().CheckSeeds();
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
+    const int seed_height{Record().Height() - 1};
+    const auto replaced{Record().Truncate(seed_height - 1)};
+    for (sidechain::MainBlock main : replaced) {
+        main.prev_hash = Record().TipHash();
+        main.hash = ArithToUint256(UintToArith256(main.hash) + 1);
+        BOOST_REQUIRE(Record().Append(main));
+    }
+    Hooks().CheckSeeds();
+    // (Whether a block's leader changed is up to the new seed: with seven blocks, some did.)
+    const auto changed{[&](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        const CBlockIndex* index{Chainman().m_blockman.LookupBlockIndex(hash)};
+        const auto now{Hooks().LeaderOf(*index->pprev, pos::SlotOf(index->nTime, Pos()))};
+        return now.status != pos::FastBlocksHooks::LeaderStatus::OK || !pos::CheckBlockSig(index->GetBlockHeader(), now.pubkey);
+    }};
+    {
+        LOCK(::cs_main);
+        const auto first_changed{std::find_if(blocks.begin(), blocks.end(), changed)};
+        if (first_changed != blocks.end()) {
+            BOOST_CHECK(Chainman().m_blockman.LookupBlockIndex(*first_changed)->nStatus & BLOCK_FAILED_VALID);
+            BOOST_CHECK(!Chain().m_chain.Contains(*Chainman().m_blockman.LookupBlockIndex(*first_changed)));
+        } else {
+            BOOST_CHECK(Tip()->GetBlockHash() == tip);
+        }
+    }
+    // The record as it was: the blocks are given back.
+    Record().Truncate(seed_height - 1);
+    for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+    Hooks().CheckSeeds();
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -6,6 +6,7 @@
 #define BITCOIN_POS_HEADER_H
 
 #include <consensus/amount.h>
+#include <pos/evidence.h>
 #include <pos/params.h>
 #include <primitives/block.h>
 #include <script/script.h>
@@ -27,7 +28,7 @@
  *  - nBits is the proof-of-work limit of the chain, a constant (there is no proof of work);
  *  - nNonce is the mainchain height of the anchor the block acknowledges, 0 if none: it is in the
  *    header, and so in the block hash, because the order of chains depends on it (pos/forkchoice.h).
- * Its sections hold the acknowledgement of an anchor, if any (and, later, evidence).
+ * Its sections hold the acknowledgement of an anchor, if any, and proofs that leaders signed twice.
  *
  * An anchor ticket is what the mainchain commits to (BIP301, through createbmmrequest): the hash of
  * a block it anchors and of who is paid the fee pot for it.
@@ -78,9 +79,13 @@ struct AnchorAck {
     friend bool operator==(const AnchorAck&, const AnchorAck&) = default;
 };
 
-/** The sections of a PoS block. */
+//! Proofs a block of stake may carry, at most.
+inline constexpr size_t MAX_SECTION_EVIDENCE{16};
+
+/** The sections of a PoS block: an acknowledgement, and proofs that leaders signed twice. */
 struct PosSections {
     std::optional<AnchorAck> ack;
+    std::vector<DoubleProposal> evidence;
 
     /** The bytes of CBlock::vSections: none when there is nothing. */
     std::vector<unsigned char> Encode() const;

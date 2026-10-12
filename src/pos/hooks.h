@@ -8,7 +8,9 @@
 #include <pos/evidence.h>
 #include <pos/header.h>
 #include <pos/schedule.h>
+#include <pos/staking.h>
 #include <sidechain/hooks.h>
+#include <kernel/cs_main.h>
 #include <sidechain/store.h>
 #include <sync.h>
 #include <uint256.h>
@@ -99,8 +101,46 @@ public:
     /** The chainstate manager the hooks read the block index and the mainchain record from (none to forget it). */
     void Attach(ChainstateManager* chainman) { m_chainman.store(chainman); }
     ChainstateManager* Chainman() const { return m_chainman.load(); }
-    const ValidatorSet& Validators() const { return m_validators; }
+    /** The validators the chain starts with (PosParams::genesis_validators): the set of its first epochs. */
+    const ValidatorSet& GenesisSet() const { return m_genesis_set; }
+    const Staking& GetStaking() const { return m_staking; }
     const Consensus::PosParams& Params() const { return m_params; }
+
+    /** What the chain says of the leader of a slot. */
+    enum class LeaderStatus { OK, INACTIVE, SET_UNKNOWN, SEED_UNKNOWN };
+    struct SlotLeader {
+        LeaderStatus status{LeaderStatus::SET_UNKNOWN};
+        //! The leader's key (OK only).
+        uint256 pubkey;
+        //! The validator set of the slot's epoch, and the anchors of the chain at the anchor that made it.
+        std::shared_ptr<const ValidatorSet> set;
+        uint64_t set_anchors{0};
+        uint256 seed;
+    };
+    /**
+     * The validator set of `epoch` for a block on top of `prev`: the one the newest anchor at or below
+     * `prev` whose slot is before the epoch before `epoch` made (none: the genesis set). nullptr if this
+     * node does not know it: the anchor is on a branch whose blocks it has not connected. `view`: the
+     * state to read the sets of anchors from, the active chain's if none. Called with cs_main held.
+     */
+    std::shared_ptr<const ValidatorSet> SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view = nullptr, uint64_t* set_anchors = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    /** The leader of `slot` for a block on top of `prev`: its epoch's set, and seed (from the record). Called with cs_main held. */
+    SlotLeader LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    /** The leader of `slot` on the active chain's tip. */
+    SlotLeader ActiveLeaderOf(int64_t slot) const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
+    /** Whether blocks of stake can be made now: the active chain has an active set for the current epoch. */
+    bool PosActiveNow() const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
+    /**
+     * Check a proof that a block on top of `prev`, of `slot`, carries: the leader of the proof's slot
+     * on this chain signed both headers, within the window, and was not punished for it before.
+     * Reasons: those of CheckEvidence; bad-pos-evidence-late (a slot after the block's),
+     * bad-pos-evidence-old (more than evidence_window_anchors anchors since the set of its epoch was
+     * made, or a set the state no longer has), bad-pos-evidence-known, pos-seed-unknown. Called with
+     * cs_main held. `anchors`: those of the chain with the block.
+     */
+    std::optional<Offence> CheckChainEvidence(const DoubleProposal& proof, const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view, uint64_t anchors,
+                                              std::string& reason) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
 
     bool BlockExtensions() const override { return true; }
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
@@ -121,6 +161,7 @@ public:
     bool RefundsOnlyInPegSteps() const override { return true; }
     bool BeforePegStep(sidechain::State& state, const CBlock& block, int height, const sidechain::PegStep& step, const Consensus::SidechainParams& params,
                        std::vector<CTxOut>& owed_tx, std::string& reject_reason) const override;
+    bool ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const override;
     bool AfterBlock(sidechain::State& state, const CBlock& block, int height, const std::optional<sidechain::PegStep>& step, CAmount minted,
                     const Consensus::SidechainParams& params, std::string& reject_reason) const override;
 
@@ -178,8 +219,11 @@ public:
      * the tip until one comes). Called with cs_main held.
      */
     const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
-    /** Whether a BMM block built now would be in stall mode (and may take transactions). */
-    bool Stalled(const FastState& fast, int64_t main_time) const;
+    /**
+     * Whether a BMM block built now would be in stall mode (and may take transactions): no active
+     * validator set (`pos_active` false), or no block of stake for stall_seconds by `main_time`.
+     */
+    bool Stalled(const FastState& fast, int64_t main_time, bool pos_active) const;
     const Producer* GetProducer() const { return m_producer.get(); }
     Producer* GetProducer() { return m_producer.get(); }
     /**
@@ -187,6 +231,13 @@ public:
      * names; for a BMM block, its parent. Nothing for a block that is no anchor. Called with cs_main held.
      */
     const CBlockIndex* AnchoredBy(const CBlockIndex& index) const;
+    /**
+     * Blocks of stake on the active chain whose leader the record no longer agrees with (a mainchain
+     * reorg moved the seed of their epoch): taken back, as blocks that lost their commitment are; and
+     * those taken back so whose leader it agrees with again, given back. Once per mainchain tip, in the
+     * follower's round.
+     */
+    void CheckSeeds() const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
     /** Why the block producer the options ask for could not start; empty if it did, or none was asked for. */
     std::string ProducerError() const { return m_producer_error; }
 
@@ -201,11 +252,30 @@ private:
     /** The acknowledgement a PoS block carries, from memory or else from disk. */
     std::optional<AnchorAck> ReadAck(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
 
+    /** The set an anchor made, from memory or the state `view` (noted in memory then). */
+    std::shared_ptr<const ValidatorSet> AnchorSetOf(const uint256& anchor, const sidechain::StoreView& view, uint64_t* set_anchors) const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
+
     const CChainParams& m_chain_params;
     const Consensus::PosParams& m_params;
-    const ValidatorSet m_validators;
+    const ValidatorSet m_genesis_set;
+    const Staking m_staking;
     const uint32_t m_pos_bits;
     std::atomic<ChainstateManager*> m_chainman{nullptr};
+    //! Whether this node has seen an active validator set made from the state (blocks of stake on the network).
+    mutable std::atomic<bool> m_staking_seen{false};
+
+    mutable Mutex m_sets_mutex;
+    struct KnownSet {
+        std::shared_ptr<const ValidatorSet> set;
+        uint64_t anchors{0};
+    };
+    //! The sets anchors made, by anchor, as this node read them from a state: of branches no longer active too.
+    mutable std::map<uint256, KnownSet> m_known_sets GUARDED_BY(m_sets_mutex);
+    mutable std::deque<uint256> m_known_order GUARDED_BY(m_sets_mutex);
+    //! Blocks taken back because the record moved the seed of their epoch.
+    mutable std::set<uint256> m_seed_failed GUARDED_BY(m_sets_mutex);
+    //! The mainchain tip for which the seeds of the active chain were last checked.
+    mutable uint256 m_seeds_checked_for GUARDED_BY(m_sets_mutex);
 
     mutable Mutex m_acks_mutex;
     //! Commitment (h*) of each acknowledging block seen, and the blocks of each commitment.

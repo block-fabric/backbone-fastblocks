@@ -18,12 +18,11 @@ void DoubleProposal::Normalize()
 
 int64_t DoubleProposal::Slot(const Consensus::PosParams& params) const { return SlotOf(a.nTime, params); }
 
-std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const ValidatorSet& validators, const Consensus::PosParams& params,
-                                     const uint256& genesis_hash, std::string& reason)
+bool CheckEvidenceForm(const DoubleProposal& proof, const Consensus::PosParams& params, std::string& reason)
 {
-    const auto fail{[&](const char* why) -> std::optional<Offence> {
+    const auto fail{[&](const char* why) {
         reason = why;
-        return std::nullopt;
+        return false;
     }};
     if (!IsPosHeader(proof.a) || !IsPosHeader(proof.b)) return fail("bad-pos-evidence-kind");
     const int64_t time{proof.a.nTime};
@@ -31,12 +30,17 @@ std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const Validato
         return fail("bad-pos-evidence-slot");
     }
     if (proof.a.GetHash() == proof.b.GetHash()) return fail("bad-pos-evidence-same");
-    const int64_t slot{SlotOf(time, params)};
-    const auto leader{validators.Leader(slot, params, genesis_hash)};
-    if (!leader) return fail("bad-pos-evidence-sig");
-    const uint256& pubkey{validators.Validators()[*leader].pubkey};
-    if (!CheckBlockSig(proof.a, pubkey) || !CheckBlockSig(proof.b, pubkey)) return fail("bad-pos-evidence-sig");
-    return Offence{.pubkey = pubkey, .slot = slot};
+    return true;
+}
+
+std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256& pubkey, const Consensus::PosParams& params, std::string& reason)
+{
+    if (!CheckEvidenceForm(proof, params, reason)) return std::nullopt;
+    if (!CheckBlockSig(proof.a, pubkey) || !CheckBlockSig(proof.b, pubkey)) {
+        reason = "bad-pos-evidence-sig";
+        return std::nullopt;
+    }
+    return Offence{.pubkey = pubkey, .slot = SlotOf(proof.a.nTime, params)};
 }
 
 bool EvidencePool::Add(const Offence& offence, DoubleProposal proof)

@@ -15,6 +15,7 @@
 #include <node/context.h>
 #include <node/miner.h>
 #include <pos/hooks.h>
+#include <pos/staking.h>
 #include <pubkey.h>
 #include <random.h>
 #include <tinyformat.h>
@@ -89,11 +90,8 @@ std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const Fast
         error = strprintf("the validator key file %s has no key", fs::PathToString(key_path));
         return nullptr;
     }
-    for (const CKey& key : keys) {
-        if (!hooks.Validators().Find(XOnly(key))) {
-            LogWarning("FastBlocks: validator key %s is not in the validator set: it makes no blocks", HexStr(XOnly(key)));
-        }
-    }
+    // (A key leads slots once it is in the validator set of an epoch: from the start, or bonded.)
+    for (const CKey& key : keys) LogInfo("FastBlocks: validator key %s", HexStr(XOnly(key)));
     // The producer's share of fees goes to -validatorpayout, or else to the first key (P2WPKH).
     CScript payout{GetScriptForDestination(WitnessV0KeyHash{keys[0].GetPubKey()})};
     if (args.IsArgSet("-validatorpayout")) {
@@ -160,6 +158,17 @@ std::vector<uint256> Producer::Keys() const
     return keys;
 }
 
+std::optional<std::array<unsigned char, 64>> Producer::SignBondPop(const uint256& pubkey, const uint160& owner) const
+{
+    for (const CKey& key : m_keys) {
+        if (XOnly(key) != pubkey) continue;
+        std::array<unsigned char, 64> pop;
+        if (!key.SignSchnorr(BondPopHash(owner, m_node.chainman->GetConsensus().hashGenesisBlock), pop, /*merkle_root=*/nullptr, GetRandHash())) return std::nullopt;
+        return pop;
+    }
+    return std::nullopt;
+}
+
 void Producer::Run()
 {
     const Consensus::PosParams& params{m_hooks.Params()};
@@ -178,7 +187,7 @@ void Producer::Run()
     }
 }
 
-std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAck>& ack, std::string& error) const
+std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAck>& ack, std::string& error, const std::vector<DoubleProposal>& evidence) const
 {
     ChainstateManager& chainman{*m_node.chainman};
     const Consensus::PosParams& params{m_hooks.Params()};
@@ -187,6 +196,7 @@ std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAc
     options.test_block_validity = false;
     node::SidechainAssembly assembly;
     PosSections sections;
+    sections.evidence = evidence;
     if (ack) {
         const CBlockIndex* anchored{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(ack->ticket.anchored))};
         if (!anchored) {
@@ -239,17 +249,6 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     LOCK(m_produce_mutex);
     ChainstateManager& chainman{*m_node.chainman};
     const Consensus::PosParams& params{m_hooks.Params()};
-    const auto leader{m_hooks.Validators().Leader(slot, params, chainman.GetConsensus().hashGenesisBlock)};
-    if (!leader) {
-        error = "no blocks of stake on this chain";
-        return std::nullopt;
-    }
-    const uint256 leader_key{m_hooks.Validators().Validators()[*leader].pubkey};
-    const CKey* key{nullptr};
-    for (const CKey& candidate : m_keys) {
-        if (XOnly(candidate) == leader_key) key = &candidate;
-    }
-    if (!key) return std::nullopt;
     const auto fail{[&](std::string why) -> std::optional<uint256> {
         error = std::move(why);
         LOCK(m_mutex);
@@ -259,30 +258,54 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     }};
 
     std::optional<AnchorAck> ack;
+    std::vector<DoubleProposal> evidence;
     uint256 tip_hash;
+    uint256 leader_key;
+    const CKey* key{nullptr};
     {
         LOCK(::cs_main);
         const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+        // The leader of the slot on the tip: the set of its epoch, which an anchor made, and its seed.
+        const FastBlocksHooks::SlotLeader leader{m_hooks.LeaderOf(*tip, slot)};
+        switch (leader.status) {
+        case FastBlocksHooks::LeaderStatus::INACTIVE: error = "no blocks of stake in this epoch: too few validators"; return std::nullopt;
+        case FastBlocksHooks::LeaderStatus::SEED_UNKNOWN: error = "the mainchain block that seeds the epoch is not on record yet"; return std::nullopt;
+        case FastBlocksHooks::LeaderStatus::SET_UNKNOWN: error = "the validator set of the epoch is not known"; return std::nullopt;
+        case FastBlocksHooks::LeaderStatus::OK: break;
+        }
+        leader_key = leader.pubkey;
+        for (const CKey& candidate : m_keys) {
+            if (XOnly(candidate) == leader_key) key = &candidate;
+        }
+        if (!key) return std::nullopt;
         // Not while this node is behind: its block would fork the chain. Behind means a better block
         // it has and has yet to connect, not a better header: a leader can sign a header that claims
         // an acknowledgement (more anchors than any chain) and never send its block.
         if (Behind(chainman)) return fail("the node is still taking in the best chain");
         if (const auto last{FastBlocksHooks::LastPosSlot(tip, params)}; last && *last >= slot) return fail("the chain has a block of this slot or a later one");
         if (SlotTime(slot, params) <= tip->GetMedianTimePast()) return fail("the slot is not after the median time of the chain");
-        const FastState fast{GetFastState(chainman.ActiveChainstate().SideState().View())};
+        const sidechain::StoreView& view{chainman.ActiveChainstate().SideCache()};
+        const FastState fast{GetFastState(view)};
         ack = m_hooks.NextAck(*tip, fast, slot);
         if (!ack && fast.first_unanchored_slot >= 0 && slot - fast.first_unanchored_slot >= params.max_unanchored_slots) {
             return fail("no anchor for too long: blocks of stake wait for one");
         }
+        // The proofs this node knows that the chain has not punished yet.
+        const uint64_t anchors{fast.anchors + (ack ? 1 : 0)};
+        for (const auto& [offence, proof] : m_hooks.Evidence().All()) {
+            if (evidence.size() >= MAX_SECTION_EVIDENCE) break;
+            std::string reason;
+            if (m_hooks.CheckChainEvidence(proof, *tip, slot, view, anchors, reason)) evidence.push_back(proof);
+        }
         tip_hash = tip->GetBlockHash();
     }
     std::string build_error;
-    auto block{Build(slot, ack, build_error)};
+    auto block{Build(slot, ack, build_error, evidence)};
     // An acknowledgement the block cannot carry: the block without it.
     if (!block && ack) {
         LogInfo("FastBlocks: slot %d without the acknowledgement of %s: %s", slot, ack->ticket.Hash().ToString(), build_error);
         ack.reset();
-        block = Build(slot, ack, build_error);
+        block = Build(slot, ack, build_error, evidence);
     }
     if (!block) return fail(build_error);
     if (block->hashPrevBlock != tip_hash) return fail("the tip moved while the block was built");
@@ -300,11 +323,13 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
         return std::nullopt;
     }};
     auto invalid{check()};
-    // An acknowledgement that makes the block invalid (what the state checks against the record, say):
-    // the block without it, rather than no block. (Signed again: only one of the two leaves the node.)
-    if (invalid && ack) {
-        LogInfo("FastBlocks: slot %d without the acknowledgement of %s: %s", slot, ack->ticket.Hash().ToString(), *invalid);
+    // An acknowledgement or proofs that make the block invalid (what the state checks against the
+    // record, say): the block without them, rather than no block. (Signed again: only one of the two
+    // leaves the node.)
+    if (invalid && (ack || !evidence.empty())) {
+        LogInfo("FastBlocks: slot %d without the acknowledgement or the proofs: %s", slot, *invalid);
         ack.reset();
+        evidence.clear();
         block = Build(slot, ack, build_error);
         if (!block) return fail(build_error);
         if (block->hashPrevBlock != tip_hash) return fail("the tip moved while the block was built");

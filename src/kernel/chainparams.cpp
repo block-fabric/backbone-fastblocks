@@ -252,6 +252,12 @@ public:
         consensus.pos.max_validators = 100;
         consensus.pos.max_unanchored_slots = 120; // an hour: PoS blocks halt after an hour without anchors
         consensus.pos.stall_seconds = 1800;
+        // Staking (design section 13): 1 CHN at least, about two days to unbond.
+        consensus.pos.min_stake = 1 * COIN;
+        consensus.pos.unbonding_anchors = 2880;
+        consensus.pos.evidence_window_anchors = 1440;
+        consensus.pos.seed_lookahead_seconds = 1200;
+        consensus.pos.pot_reserve_anchors = 1440;
         // Bitcoin's heuristics (headers sync and block download timeouts, stale tips, verification
         // progress) count blocks by this: a block a slot. Version bits periods stay 2016 blocks.
         consensus.nPowTargetSpacing = consensus.pos.slot_seconds;
@@ -370,6 +376,14 @@ public:
         consensus.pos.max_validators = 32;
         consensus.pos.max_unanchored_slots = 120; // an hour
         consensus.pos.stall_seconds = 600;
+        consensus.pos.min_stake = COIN / 100;
+        consensus.pos.unbonding_anchors = 120;
+        consensus.pos.evidence_window_anchors = 60;
+        // An epoch (ten minutes): the seed block is mined after the stake of the epoch is fixed (median
+        // times lag the clock by some six minutes), and is on record by the epoch's start unless the
+        // mainchain found no block in the four minutes before it.
+        consensus.pos.seed_lookahead_seconds = 600;
+        consensus.pos.pot_reserve_anchors = 60;
         // Bitcoin's heuristics (headers sync and block download timeouts, stale tips, verification
         // progress) count blocks by this: a block a slot. Version bits periods stay 2016 blocks.
         consensus.nPowTargetSpacing = consensus.pos.slot_seconds;
@@ -493,6 +507,14 @@ public:
         consensus.pos.max_validators = 32;
         consensus.pos.max_unanchored_slots = 120; // an hour
         consensus.pos.stall_seconds = 600;
+        consensus.pos.min_stake = COIN / 100;
+        consensus.pos.unbonding_anchors = 120;
+        consensus.pos.evidence_window_anchors = 60;
+        // An epoch (ten minutes): the seed block is mined after the stake of the epoch is fixed (median
+        // times lag the clock by some six minutes), and is on record by the epoch's start unless the
+        // mainchain found no block in the four minutes before it.
+        consensus.pos.seed_lookahead_seconds = 600;
+        consensus.pos.pot_reserve_anchors = 60;
         // Bitcoin's heuristics (headers sync and block download timeouts, stale tips, verification
         // progress) count blocks by this: a block a slot. Version bits periods stay 2016 blocks.
         consensus.nPowTargetSpacing = consensus.pos.slot_seconds;
@@ -600,6 +622,13 @@ public:
             consensus.pos.stall_seconds = 30;
             consensus.pos.final_anchors = 1;
             consensus.pos.genesis_validators = opts.pos_validators;
+            consensus.pos.min_stake = COIN / 10000;
+            consensus.pos.unbonding_anchors = 20;
+            consensus.pos.evidence_window_anchors = 10;
+            // An hour: the median time of a regtest mainchain lags or leads the clock by minutes, as
+            // tests mine it; the seed is then known for every slot (-posseedlookahead to change it).
+            consensus.pos.seed_lookahead_seconds = opts.pos_seed_lookahead.value_or(3600);
+            consensus.pos.pot_reserve_anchors = 5;
         }
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;

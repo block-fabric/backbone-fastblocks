@@ -117,10 +117,21 @@ void initialize_pos()
 
 pos::FastBlocksHooks& Hooks() { return *Assert(pos::InstalledHooks()); }
 
+/**
+ * The leader of a slot with the genesis set, and the seed of its epoch when no mainchain block on
+ * record is old enough to seed it (a null hash): as the chains of these targets have it (the regtest
+ * seed lookahead is an hour, and their records start at the mock time).
+ */
+uint256 LeaderOf(int64_t slot)
+{
+    const Consensus::PosParams& params{Hooks().Params()};
+    const auto leader{Hooks().GenesisSet().Leader(slot, pos::ValidatorSet::Seed(pos::EpochOf(slot, params), uint256{}))};
+    return Hooks().GenesisSet().Validators()[*Assert(leader)].pubkey;
+}
+
 const CKey& LeaderKey(const std::vector<CKey>& keys, int64_t slot)
 {
-    const auto leader{Hooks().Validators().Leader(slot, Hooks().Params(), g_params->GetConsensus().hashGenesisBlock)};
-    const uint256 pubkey{Hooks().Validators().Validators()[*Assert(leader)].pubkey};
+    const uint256 pubkey{LeaderOf(slot)};
     for (const CKey& key : keys) {
         if (XOnly(key) == pubkey) return key;
     }
@@ -352,7 +363,6 @@ FUZZ_TARGET(pos_evidence, .init = initialize_pos)
     FuzzedDataProvider fdp{buffer.data(), buffer.size()};
     static const std::vector<CKey> keys{ValidatorKeys()};
     const Consensus::PosParams& params{Hooks().Params()};
-    const uint256 genesis{g_params->GetConsensus().hashGenesisBlock};
     pos::EvidencePool pool;
     LIMITED_WHILE(fdp.ConsumeBool(), 200)
     {
@@ -368,17 +378,20 @@ FUZZ_TARGET(pos_evidence, .init = initialize_pos)
         if (fdp.ConsumeBool()) b.nVersion &= ~pos::POS_BLOCK_BIT;
         const pos::DoubleProposal proof{.a = a, .b = b};
         std::string reason;
-        const auto offence{pos::CheckEvidence(proof, Hooks().Validators(), params, genesis, reason)};
+        // Against the leader of the first header's slot (a slot of 0 has none: a null key).
+        const int64_t proof_slot{pos::SlotOf(a.nTime, params)};
+        const uint256 leader{proof_slot > 0 ? LeaderOf(proof_slot) : uint256{}};
+        const auto offence{pos::CheckEvidence(proof, leader, params, reason)};
         // Whichever header comes first.
         std::string swapped_reason;
-        const auto swapped{pos::CheckEvidence({.a = b, .b = a}, Hooks().Validators(), params, genesis, swapped_reason)};
+        const auto swapped{pos::CheckEvidence({.a = b, .b = a}, leader, params, swapped_reason)};
         assert(offence.has_value() == swapped.has_value());
         if (offence) {
             assert(*offence == *swapped);
             assert(pos::IsPosHeader(a) && pos::IsPosHeader(b) && a.nTime == b.nTime && a.GetHash() != b.GetHash());
             assert(offence->slot == pos::SlotOf(a.nTime, params) && pos::SlotTime(offence->slot, params) == a.nTime);
             assert(pos::CheckBlockSig(a, offence->pubkey) && pos::CheckBlockSig(b, offence->pubkey));
-            assert(Hooks().Validators().Leader(offence->slot, params, genesis) == Hooks().Validators().Find(offence->pubkey));
+            assert(LeaderOf(offence->slot) == offence->pubkey);
             pos::DoubleProposal normal{proof};
             normal.Normalize();
             pos::DoubleProposal twice{normal};

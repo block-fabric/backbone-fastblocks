@@ -2,17 +2,20 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addresstype.h>
 #include <chain.h>
 #include <consensus/amount.h>
 #include <core_io.h>
 #include <kernel/chainparams.h>
 #include <kernel/coinstats.h>
+#include <key_io.h>
 #include <node/context.h>
 #include <pos/evidence.h>
 #include <pos/finality.h>
 #include <pos/forkchoice.h>
 #include <pos/hooks.h>
 #include <pos/producer.h>
+#include <pos/staking.h>
 #include <rpc/pos.h>
 #include <streams.h>
 #include <rpc/server.h>
@@ -48,25 +51,57 @@ uint256 ParsePubkey(const UniValue& value)
     return uint256{std::span<const unsigned char>{bytes}};
 }
 
-/** The slots of `epoch` each validator leads. */
-std::vector<int64_t> SlotsLed(const pos::FastBlocksHooks& hooks, int64_t epoch, const uint256& genesis)
+/** The validator set and the seed of an epoch, as the active chain and the record say now. */
+struct EpochSchedule {
+    std::shared_ptr<const pos::ValidatorSet> set;
+    std::optional<uint256> seed;
+
+    /** The leader of a slot of the epoch, if the set is known and active and the seed known. */
+    std::optional<size_t> Leader(int64_t slot) const
+    {
+        if (!set || !seed) return std::nullopt;
+        return set->Leader(slot, *seed);
+    }
+    std::optional<uint256> LeaderKey(int64_t slot) const
+    {
+        const auto index{Leader(slot)};
+        if (!index) return std::nullopt;
+        return set->Validators()[*index].pubkey;
+    }
+};
+
+EpochSchedule ScheduleOf(const pos::FastBlocksHooks& hooks, ChainstateManager& chainman, int64_t epoch)
+{
+    EpochSchedule schedule;
+    LOCK(::cs_main);
+    const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+    if (tip) schedule.set = hooks.SetFor(*tip, epoch);
+    if (chainman.m_mainchain) schedule.seed = pos::EpochSeed(epoch, hooks.Params(), *chainman.m_mainchain);
+    return schedule;
+}
+
+/** The slots of `epoch` each validator of its set leads. */
+std::vector<int64_t> SlotsLed(const pos::FastBlocksHooks& hooks, const EpochSchedule& schedule, int64_t epoch)
 {
     const Consensus::PosParams& params{hooks.Params()};
-    std::vector<int64_t> counts(hooks.Validators().Validators().size(), 0);
+    std::vector<int64_t> counts(schedule.set ? schedule.set->Validators().size() : 0, 0);
     for (int64_t slot{epoch * params.slots_per_epoch}; slot < (epoch + 1) * params.slots_per_epoch; ++slot) {
-        if (const auto leader{hooks.Validators().Leader(slot, params, genesis)}) ++counts[*leader];
+        if (const auto leader{schedule.Leader(slot)}) ++counts[*leader];
     }
     return counts;
 }
 
-/** The first slot from `from` on, within two epochs, that one of `keys` leads. */
-std::optional<int64_t> NextSlotLed(const pos::FastBlocksHooks& hooks, const std::vector<uint256>& keys, int64_t from, const uint256& genesis)
+/** The first slot from `from` on, within two epochs, that one of `keys` leads (as far as the schedules are known). */
+std::optional<int64_t> NextSlotLed(const pos::FastBlocksHooks& hooks, ChainstateManager& chainman, const std::vector<uint256>& keys, int64_t from)
 {
     const Consensus::PosParams& params{hooks.Params()};
+    std::map<int64_t, EpochSchedule> schedules;
     for (int64_t slot{from}; slot < from + 2 * params.slots_per_epoch; ++slot) {
-        const auto leader{hooks.Validators().Leader(slot, params, genesis)};
-        if (!leader) return std::nullopt;
-        if (std::find(keys.begin(), keys.end(), hooks.Validators().Validators()[*leader].pubkey) != keys.end()) return slot;
+        const int64_t epoch{pos::EpochOf(slot, params)};
+        auto found{schedules.find(epoch)};
+        if (found == schedules.end()) found = schedules.emplace(epoch, ScheduleOf(hooks, chainman, epoch)).first;
+        const auto leader{found->second.LeaderKey(slot)};
+        if (leader && std::find(keys.begin(), keys.end(), *leader) != keys.end()) return slot;
     }
     return std::nullopt;
 }
@@ -92,6 +127,28 @@ UniValue ProofToJSON(const pos::Offence& offence, const pos::DoubleProposal& pro
     return entry;
 }
 
+UniValue BondToJSON(const pos::ValidatorRecord& record, const Consensus::PosParams& params)
+{
+    UniValue bond(UniValue::VOBJ);
+    bond.pushKV("owner", record.owner.IsNull() ? std::string{} : EncodeDestination(WitnessV0KeyHash{record.owner}));
+    bond.pushKV("bonded", ValueFromAmount(record.bonded));
+    bond.pushKV("genesisstake", ValueFromAmount(record.genesis_stake));
+    bond.pushKV("unbonding", ValueFromAmount(record.Unbonding()));
+    UniValue unbonds(UniValue::VARR);
+    for (const pos::UnbondingEntry& entry : record.unbonding) {
+        UniValue item(UniValue::VOBJ);
+        item.pushKV("amount", ValueFromAmount(entry.amount));
+        item.pushKV("releaseanchor", entry.release_anchor);
+        unbonds.push_back(std::move(item));
+    }
+    bond.pushKV("unbonds", std::move(unbonds));
+    bond.pushKV("unbondsequence", static_cast<uint64_t>(record.unbond_seq));
+    bond.pushKV("eligible", record.Eligible(params));
+    bond.pushKV("jaileduntilepoch", record.jailed_until_epoch);
+    bond.pushKV("banned", record.tombstoned);
+    return bond;
+}
+
 RPCMethod getposinfo()
 {
     return RPCMethod{
@@ -100,12 +157,12 @@ RPCMethod getposinfo()
         {},
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
-            {RPCResult::Type::BOOL, "active", "Whether blocks of stake can be made on this chain (enough validators)"},
+            {RPCResult::Type::BOOL, "active", "Whether blocks of stake can be made in the current epoch (enough validators in its set)"},
             {RPCResult::Type::NUM, "slotseconds", "Length of a slot"},
             {RPCResult::Type::NUM, "slot", "The current slot, by this node's clock"},
             {RPCResult::Type::NUM, "epoch", "The current epoch"},
             {RPCResult::Type::STR_HEX, "leader", /*optional=*/true, "The x-only key of the leader of the current slot"},
-            {RPCResult::Type::ARR, "validators", "The validator set",
+            {RPCResult::Type::ARR, "validators", "The validator set of the current epoch",
             {
                 {RPCResult::Type::OBJ, "", "",
                 {
@@ -125,6 +182,16 @@ RPCMethod getposinfo()
             {
                 {RPCResult::Type::STR_AMOUNT, "accrued", "Put in the pot since the chain began"},
                 {RPCResult::Type::STR_AMOUNT, "paid", "Paid out of it"},
+                {RPCResult::Type::STR_AMOUNT, "reserve", "Penalties not paid out yet: each anchor pays a share of them with the pot"},
+            }},
+            {RPCResult::Type::OBJ, "staking", "Staking on the active chain",
+            {
+                {RPCResult::Type::STR_AMOUNT, "bonded", "Coins bonded"},
+                {RPCResult::Type::STR_AMOUNT, "unbonding", "Coins unbonded, not paid yet"},
+                {RPCResult::Type::STR_AMOUNT, "rewardsowed", "Rewards for proofs that leaders signed twice, owed to the blocks that carried them"},
+                {RPCResult::Type::STR_AMOUNT, "slashed", "Penalties since the chain began"},
+                {RPCResult::Type::STR_AMOUNT, "minstake", "The least a validator must bond to take part"},
+                {RPCResult::Type::NUM, "unbondinganchors", "Anchors after an unbond that it is paid"},
             }},
             {RPCResult::Type::STR_HEX, "chainkey", "The order of the active chain (nChainWork): anchors, last commitment height, height"},
             {RPCResult::Type::NUM, "tickets", "Anchor tickets this node knows"},
@@ -149,27 +216,31 @@ RPCMethod getposinfo()
     const Consensus::PosParams& params{hooks->Params()};
     const int64_t now{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
     const int64_t slot{pos::SlotOf(now, params)};
+    const EpochSchedule schedule{ScheduleOf(*hooks, chainman, pos::EpochOf(slot, params))};
+    const bool active{schedule.set && schedule.set->Active()};
     UniValue result(UniValue::VOBJ);
-    result.pushKV("active", hooks->Validators().Active());
+    result.pushKV("active", active);
     result.pushKV("slotseconds", params.slot_seconds);
     result.pushKV("slot", slot);
     result.pushKV("epoch", pos::EpochOf(slot, params));
-    if (const auto leader{hooks->Validators().Leader(slot, params, chainman.GetConsensus().hashGenesisBlock)}) {
-        result.pushKV("leader", HexStr(hooks->Validators().Validators()[*leader].pubkey));
-    }
+    if (const auto leader{schedule.LeaderKey(slot)}) result.pushKV("leader", HexStr(*leader));
     UniValue validators(UniValue::VARR);
-    for (const auto& validator : hooks->Validators().Validators()) {
-        UniValue entry(UniValue::VOBJ);
-        entry.pushKV("pubkey", HexStr(validator.pubkey));
-        entry.pushKV("stake", validator.stake);
-        validators.push_back(std::move(entry));
+    if (schedule.set) {
+        for (const auto& validator : schedule.set->Validators()) {
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("pubkey", HexStr(validator.pubkey));
+            entry.pushKV("stake", validator.stake);
+            validators.push_back(std::move(entry));
+        }
     }
     result.pushKV("validators", std::move(validators));
     pos::FastState fast;
+    pos::StakeState stake;
     arith_uint256 work;
     {
         LOCK(::cs_main);
         fast = pos::GetFastState(chainman.ActiveChainstate().SideState().View());
+        stake = pos::GetStakeState(chainman.ActiveChainstate().SideState().View());
         work = chainman.ActiveChain().Tip()->nChainWork;
     }
     result.pushKV("anchors", fast.anchors);
@@ -180,11 +251,20 @@ RPCMethod getposinfo()
     result.pushKV("lastposslot", fast.last_pos_slot);
     result.pushKV("firstunanchoredslot", fast.first_unanchored_slot);
     const auto main_tip{chainman.m_mainchain ? chainman.m_mainchain->GetBlock(chainman.m_mainchain->Height()) : std::nullopt};
-    result.pushKV("stalled", hooks->Stalled(fast, main_tip ? main_tip->time : now));
+    result.pushKV("stalled", hooks->Stalled(fast, main_tip ? main_tip->time : now, active));
     UniValue pot(UniValue::VOBJ);
     pot.pushKV("accrued", ValueFromAmount(fast.pot_accrued));
     pot.pushKV("paid", ValueFromAmount(fast.pot_paid));
+    pot.pushKV("reserve", ValueFromAmount(stake.pot_reserve));
     result.pushKV("pot", std::move(pot));
+    UniValue staking(UniValue::VOBJ);
+    staking.pushKV("bonded", ValueFromAmount(stake.bonded));
+    staking.pushKV("unbonding", ValueFromAmount(stake.unbonding));
+    staking.pushKV("rewardsowed", ValueFromAmount(stake.rewards_owed));
+    staking.pushKV("slashed", ValueFromAmount(stake.slashed));
+    staking.pushKV("minstake", ValueFromAmount(params.min_stake));
+    staking.pushKV("unbondinganchors", params.unbonding_anchors);
+    result.pushKV("staking", std::move(staking));
     result.pushKV("chainkey", work.GetHex());
     result.pushKV("tickets", hooks->Tickets().size());
     result.pushKV("evidence", hooks->Evidence().Size());
@@ -211,7 +291,7 @@ RPCMethod getvalidators()
 {
     return RPCMethod{
         "getvalidators",
-        "Returns the validator set of an epoch of FastBlocks' blocks of stake, and how many slots each validator leads in it.",
+        "Returns the validator set of an epoch of FastBlocks' blocks of stake, as the active chain fixes it, and how many slots each validator leads in it.",
         {
             {"epoch", RPCArg::Type::NUM, RPCArg::DefaultHint{"the current epoch"}, "The epoch"},
         },
@@ -219,6 +299,8 @@ RPCMethod getvalidators()
         {
             {RPCResult::Type::NUM, "epoch", "The epoch"},
             {RPCResult::Type::NUM, "firstslot", "Its first slot"},
+            {RPCResult::Type::BOOL, "known", "Whether the active chain fixes the set of this epoch yet (by an anchor before the epoch before it)"},
+            {RPCResult::Type::BOOL, "seedknown", "Whether the record of the mainchain has the block that seeds the epoch"},
             {RPCResult::Type::BOOL, "active", "Whether blocks of stake can be made (enough validators)"},
             {RPCResult::Type::NUM, "totalstake", "The stake of the set"},
             {RPCResult::Type::ARR, "validators", "In the order leaders are picked from (by key)",
@@ -240,17 +322,19 @@ RPCMethod getvalidators()
     const Consensus::PosParams& params{hooks.Params()};
     const int64_t epoch{request.params[0].isNull() ? pos::EpochOf(NowSlot(params), params) : request.params[0].getInt<int64_t>()};
     if (epoch < 0 || epoch > std::numeric_limits<uint32_t>::max()) throw JSONRPCError(RPC_INVALID_PARAMETER, "epoch out of range");
-    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
-    const auto slots{SlotsLed(hooks, epoch, genesis)};
+    const EpochSchedule schedule{ScheduleOf(hooks, chainman, epoch)};
+    const auto slots{SlotsLed(hooks, schedule, epoch)};
     const auto local{LocalKeys(hooks)};
     UniValue result(UniValue::VOBJ);
     result.pushKV("epoch", epoch);
     result.pushKV("firstslot", epoch * params.slots_per_epoch);
-    result.pushKV("active", hooks.Validators().Active());
-    result.pushKV("totalstake", hooks.Validators().TotalStake());
+    result.pushKV("known", schedule.set != nullptr);
+    result.pushKV("seedknown", schedule.seed.has_value());
+    result.pushKV("active", schedule.set && schedule.set->Active());
+    result.pushKV("totalstake", schedule.set ? schedule.set->TotalStake() : 0);
     UniValue validators(UniValue::VARR);
-    for (size_t i{0}; i < hooks.Validators().Validators().size(); ++i) {
-        const auto& validator{hooks.Validators().Validators()[i]};
+    for (size_t i{0}; schedule.set && i < schedule.set->Validators().size(); ++i) {
+        const auto& validator{schedule.set->Validators()[i]};
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("pubkey", HexStr(validator.pubkey));
         entry.pushKV("stake", validator.stake);
@@ -268,20 +352,39 @@ RPCMethod getvalidator()
 {
     return RPCMethod{
         "getvalidator",
-        "Returns what this node knows of a validator of FastBlocks: whether it is in the set, its stake, and the next slot it leads.",
+        "Returns what this node knows of a validator of FastBlocks: its bond, whether it is in the set of the current epoch, its stake, and the next slot it leads.",
         {
             {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The validator's x-only key"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
             {RPCResult::Type::STR_HEX, "pubkey", "x-only key"},
-            {RPCResult::Type::BOOL, "inset", "Whether it is in the validator set"},
+            {RPCResult::Type::BOOL, "inset", "Whether it is in the validator set of the current epoch"},
             {RPCResult::Type::NUM, "stake", /*optional=*/true, "Its weight in leader selection"},
             {RPCResult::Type::NUM, "index", /*optional=*/true, "Its position in the set"},
             {RPCResult::Type::NUM, "slots", /*optional=*/true, "Slots of the current epoch it leads"},
             {RPCResult::Type::NUM, "nextslot", /*optional=*/true, "The next slot it leads (within two epochs)"},
             {RPCResult::Type::BOOL, "local", "Whether this node holds its key"},
             {RPCResult::Type::NUM, "offences", "Proofs this node knows that it signed two blocks for one slot"},
+            {RPCResult::Type::OBJ, "bond", /*optional=*/true, "Its bond, in the state of the active chain",
+            {
+                {RPCResult::Type::STR, "owner", "The address that may unbond, and is paid what is unbonded (empty for a genesis validator that never bonded)"},
+                {RPCResult::Type::STR_AMOUNT, "bonded", "Coins bonded"},
+                {RPCResult::Type::STR_AMOUNT, "genesisstake", "The stake it starts with as a genesis validator (weight only)"},
+                {RPCResult::Type::STR_AMOUNT, "unbonding", "Coins unbonded, not paid yet"},
+                {RPCResult::Type::ARR, "unbonds", "Them, with the anchor they are paid at",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_AMOUNT, "amount", "The coins"},
+                        {RPCResult::Type::NUM, "releaseanchor", "Paid at the anchor with this count"},
+                    }},
+                }},
+                {RPCResult::Type::NUM, "unbondsequence", "The sequence its next unbond has"},
+                {RPCResult::Type::BOOL, "eligible", "Whether its stake lets it take part (not banned, enough bonded)"},
+                {RPCResult::Type::NUM, "jaileduntilepoch", "Left out of the sets made before this epoch (0: never jailed)"},
+                {RPCResult::Type::BOOL, "banned", "Signed two blocks for a slot: never in a set again"},
+            }},
         }},
         RPCExamples{HelpExampleCli("getvalidator", "\"<pubkey>\"")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -290,23 +393,25 @@ RPCMethod getvalidator()
     const pos::FastBlocksHooks& hooks{EnsureHooks()};
     const Consensus::PosParams& params{hooks.Params()};
     const uint256 pubkey{ParsePubkey(request.params[0])};
-    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
     const int64_t slot{NowSlot(params)};
     const auto local{LocalKeys(hooks)};
+    const EpochSchedule schedule{ScheduleOf(hooks, chainman, pos::EpochOf(slot, params))};
     UniValue result(UniValue::VOBJ);
     result.pushKV("pubkey", HexStr(pubkey));
-    const auto index{hooks.Validators().Find(pubkey)};
+    const auto index{schedule.set ? schedule.set->Find(pubkey) : std::nullopt};
     result.pushKV("inset", index.has_value());
     if (index) {
-        result.pushKV("stake", hooks.Validators().Validators()[*index].stake);
+        result.pushKV("stake", schedule.set->Validators()[*index].stake);
         result.pushKV("index", static_cast<uint64_t>(*index));
-        result.pushKV("slots", SlotsLed(hooks, pos::EpochOf(slot, params), genesis)[*index]);
-        if (const auto next{NextSlotLed(hooks, {pubkey}, slot + 1, genesis)}) result.pushKV("nextslot", *next);
+        result.pushKV("slots", SlotsLed(hooks, schedule, pos::EpochOf(slot, params))[*index]);
+        if (const auto next{NextSlotLed(hooks, chainman, {pubkey}, slot + 1)}) result.pushKV("nextslot", *next);
     }
     result.pushKV("local", std::find(local.begin(), local.end(), pubkey) != local.end());
     int64_t offences{0};
     for (const auto& [offence, _] : hooks.Evidence().All()) offences += offence.pubkey == pubkey;
     result.pushKV("offences", offences);
+    const auto record{WITH_LOCK(::cs_main, return pos::GetValidator(chainman.ActiveChainstate().SideState().View(), pubkey))};
+    if (record) result.pushKV("bond", BondToJSON(*record, params));
     return result;
 },
     };
@@ -329,7 +434,7 @@ RPCMethod getleaderschedule()
                 {
                     {RPCResult::Type::NUM, "slot", "The slot"},
                     {RPCResult::Type::NUM_TIME, "time", "When it starts, " + UNIX_EPOCH_TIME},
-                    {RPCResult::Type::STR_HEX, "leader", /*optional=*/true, "x-only key of its leader (none if blocks of stake cannot be made)"},
+                    {RPCResult::Type::STR_HEX, "leader", /*optional=*/true, "x-only key of its leader (none if blocks of stake cannot be made, or the set or the seed of the epoch is not known yet)"},
                 }},
             }},
         }},
@@ -341,13 +446,13 @@ RPCMethod getleaderschedule()
     const Consensus::PosParams& params{hooks.Params()};
     const int64_t epoch{request.params[0].isNull() ? pos::EpochOf(NowSlot(params), params) : request.params[0].getInt<int64_t>()};
     if (epoch < 0 || epoch > std::numeric_limits<uint32_t>::max()) throw JSONRPCError(RPC_INVALID_PARAMETER, "epoch out of range");
-    const uint256 genesis{chainman.GetConsensus().hashGenesisBlock};
+    const EpochSchedule schedule{ScheduleOf(hooks, chainman, epoch)};
     UniValue slots(UniValue::VARR);
     for (int64_t slot{epoch * params.slots_per_epoch}; slot < (epoch + 1) * params.slots_per_epoch; ++slot) {
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("slot", slot);
         entry.pushKV("time", pos::SlotTime(slot, params));
-        if (const auto leader{hooks.Validators().Leader(slot, params, genesis)}) entry.pushKV("leader", HexStr(hooks.Validators().Validators()[*leader].pubkey));
+        if (const auto leader{schedule.LeaderKey(slot)}) entry.pushKV("leader", HexStr(*leader));
         slots.push_back(std::move(entry));
     }
     UniValue result(UniValue::VOBJ);
@@ -620,11 +725,12 @@ RPCMethod getstakinginfo()
     result.pushKV("enabled", producer && producer->Enabled());
     result.pushKV("producererror", hooks.ProducerError());
     const auto keys{LocalKeys(hooks)};
+    const EpochSchedule schedule{ScheduleOf(hooks, chainman, pos::EpochOf(slot, params))};
     UniValue entries(UniValue::VARR);
     int64_t stake{0};
     for (const uint256& key : keys) {
-        const auto index{hooks.Validators().Find(key)};
-        const int64_t key_stake{index ? hooks.Validators().Validators()[*index].stake : 0};
+        const auto index{schedule.set ? schedule.set->Find(key) : std::nullopt};
+        const int64_t key_stake{index ? schedule.set->Validators()[*index].stake : 0};
         stake += key_stake;
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("pubkey", HexStr(key));
@@ -634,7 +740,7 @@ RPCMethod getstakinginfo()
     }
     result.pushKV("keys", std::move(entries));
     result.pushKV("stake", stake);
-    result.pushKV("totalstake", hooks.Validators().TotalStake());
+    result.pushKV("totalstake", schedule.set ? schedule.set->TotalStake() : 0);
     const pos::Producer::Status status{producer ? producer->GetStatus() : pos::Producer::Status{}};
     result.pushKV("produced", status.produced);
     result.pushKV("acknowledgements", status.acknowledgements);
@@ -643,10 +749,45 @@ RPCMethod getstakinginfo()
     result.pushKV("lastsignedslot", producer ? producer->LastSignedSlot() : -1);
     result.pushKV("error", status.error);
     result.pushKV("slot", slot);
-    if (const auto next{NextSlotLed(hooks, keys, slot + 1, chainman.GetConsensus().hashGenesisBlock)}) {
+    if (const auto next{NextSlotLed(hooks, chainman, keys, slot + 1)}) {
         result.pushKV("nextslot", *next);
         result.pushKV("nexttime", pos::SlotTime(*next, params));
     }
+    return result;
+},
+    };
+}
+
+RPCMethod signbondpop()
+{
+    return RPCMethod{
+        "signbondpop",
+        "Signs, with a validator key of this node's block producer (-validatorkeyfile), the proof of possession that a bond to it owned by\n"
+        "an address needs (createbond on the owner's wallet): no one can bond a key that is not theirs.",
+        {
+            {"owner", RPCArg::Type::STR, RPCArg::Optional::NO, "The P2WPKH address that owns the bond"},
+            {"pubkey", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"this node's first validator key"}, "The validator's x-only key"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR_HEX, "pubkey", "The validator's x-only key"},
+            {RPCResult::Type::STR_HEX, "pop", "The proof of possession, for createbond"},
+        }},
+        RPCExamples{HelpExampleCli("signbondpop", "\"<address>\"")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const pos::FastBlocksHooks& hooks{EnsureHooks()};
+    const pos::Producer* producer{hooks.GetProducer()};
+    if (!producer) throw JSONRPCError(RPC_MISC_ERROR, "This node has no validator keys (-validatorkeyfile)");
+    const CTxDestination dest{DecodeDestination(request.params[0].get_str())};
+    const WitnessV0KeyHash* owner{std::get_if<WitnessV0KeyHash>(&dest)};
+    if (!owner) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The owner must be a P2WPKH address of this chain");
+    const uint256 pubkey{request.params[1].isNull() ? producer->Keys().at(0) : ParsePubkey(request.params[1])};
+    const auto pop{producer->SignBondPop(pubkey, uint160{*owner})};
+    if (!pop) throw JSONRPCError(RPC_INVALID_PARAMETER, "This node does not hold that validator key");
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("pubkey", HexStr(pubkey));
+    result.pushKV("pop", HexStr(*pop));
     return result;
 },
     };
@@ -667,6 +808,14 @@ std::vector<RPCResult> PosBlockFields()
             {RPCResult::Type::STR_HEX, "payee", "The script the pot is paid to"},
             {RPCResult::Type::NUM, "mainheight", "Mainchain height of the commitment"},
         }},
+        {RPCResult::Type::ARR, "evidence", /*optional=*/true, "FastBlocks: the proofs that leaders signed twice a block of stake carries",
+        {
+            {RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "slot", "The slot signed twice"},
+                {RPCResult::Type::ARR, "hashes", "The two blocks", {{RPCResult::Type::STR_HEX, "", ""}}},
+            }},
+        }},
         {RPCResult::Type::OBJ, "finality", /*optional=*/true, "FastBlocks: how final the block is (on the active chain only)",
         {
             {RPCResult::Type::STR, "status", "\"soft\", \"anchored\" or \"final\""},
@@ -685,8 +834,23 @@ void PushPosBlockInfo(const ChainstateManager& chainman, const CBlock& block, co
     if (is_pos) {
         const int64_t slot{pos::SlotOf(block.nTime, params)};
         result.pushKV("slot", slot);
-        if (const auto leader{hooks->Validators().Leader(slot, params, chainman.GetConsensus().hashGenesisBlock)}) {
-            result.pushKV("proposer", HexStr(hooks->Validators().Validators()[*leader].pubkey));
+        if (index.pprev) {
+            const auto leader{WITH_LOCK(::cs_main, return hooks->LeaderOf(*index.pprev, slot))};
+            if (leader.status == pos::FastBlocksHooks::LeaderStatus::OK) result.pushKV("proposer", HexStr(leader.pubkey));
+        }
+        pos::PosSections evidence;
+        if (pos::PosSections::Decode(block.vSections, evidence) && !evidence.evidence.empty()) {
+            UniValue proofs(UniValue::VARR);
+            for (const pos::DoubleProposal& proof : evidence.evidence) {
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("slot", pos::SlotOf(proof.a.nTime, params));
+                UniValue hashes(UniValue::VARR);
+                hashes.push_back(proof.a.GetHash().GetHex());
+                hashes.push_back(proof.b.GetHash().GetHex());
+                entry.pushKV("hashes", std::move(hashes));
+                proofs.push_back(std::move(entry));
+            }
+            result.pushKV("evidence", std::move(proofs));
         }
         pos::PosSections sections;
         if (pos::PosSections::Decode(block.vSections, sections) && sections.ack) {
@@ -729,7 +893,11 @@ std::vector<RPCResult> PegBalanceFields()
             {RPCResult::Type::STR_AMOUNT, "utxos", "Spendable coins (the UTXO set)"},
             {RPCResult::Type::STR_AMOUNT, "withdrawals", "Coins burned by withdrawals waiting or in a bundle (amounts and mainchain fees)"},
             {RPCResult::Type::STR_AMOUNT, "pot", "The fee pot: accrued less paid"},
-            {RPCResult::Type::STR_AMOUNT, "payouts", "Payouts owed and not paid yet (deposits, refunds, the pot)"},
+            {RPCResult::Type::STR_AMOUNT, "bonded", "Coins bonded by validators"},
+            {RPCResult::Type::STR_AMOUNT, "unbonding", "Coins unbonded, not paid yet"},
+            {RPCResult::Type::STR_AMOUNT, "reserve", "Penalties not paid out yet (with the pot, at anchors)"},
+            {RPCResult::Type::STR_AMOUNT, "rewards", "Rewards for proofs, owed to the blocks that carried them"},
+            {RPCResult::Type::STR_AMOUNT, "payouts", "Payouts owed and not paid yet (deposits, refunds, the pot, unbonds, rewards)"},
             {RPCResult::Type::STR_AMOUNT, "total", "Their sum: the escrow after the block mainheight, less fees left unclaimed and coins burned"},
         }},
     };
@@ -739,6 +907,7 @@ void PushPegBalance(ChainstateManager& chainman, UniValue& result)
 {
     if (!pos::InstalledHooks()) return;
     CAmount utxos{0}, withdrawals{0}, pot{0}, payouts{0};
+    pos::StakeState stake;
     int main_height;
     uint256 tip;
     {
@@ -759,6 +928,7 @@ void PushPegBalance(ChainstateManager& chainman, UniValue& result)
         for (const CTxOut& out : side.TxQueue()) payouts += out.nValue;
         const pos::FastState fast{pos::GetFastState(chainstate.SideState().View())};
         pot = fast.pot_accrued - fast.pot_paid;
+        stake = pos::GetStakeState(chainstate.SideState().View());
         main_height = side.MainHeight();
     }
     UniValue balance(UniValue::VOBJ);
@@ -767,8 +937,12 @@ void PushPegBalance(ChainstateManager& chainman, UniValue& result)
     balance.pushKV("utxos", ValueFromAmount(utxos));
     balance.pushKV("withdrawals", ValueFromAmount(withdrawals));
     balance.pushKV("pot", ValueFromAmount(pot));
+    balance.pushKV("bonded", ValueFromAmount(stake.bonded));
+    balance.pushKV("unbonding", ValueFromAmount(stake.unbonding));
+    balance.pushKV("reserve", ValueFromAmount(stake.pot_reserve));
+    balance.pushKV("rewards", ValueFromAmount(stake.rewards_owed));
     balance.pushKV("payouts", ValueFromAmount(payouts));
-    balance.pushKV("total", ValueFromAmount(utxos + withdrawals + pot + payouts));
+    balance.pushKV("total", ValueFromAmount(utxos + withdrawals + pot + stake.bonded + stake.unbonding + stake.pot_reserve + stake.rewards_owed + payouts));
     result.pushKV("pegbalance", std::move(balance));
 }
 
@@ -784,6 +958,7 @@ void RegisterPosRPCCommands(CRPCTable& t)
         {"sidechain", &listevidence},
         {"sidechain", &setstaking},
         {"sidechain", &getstakinginfo},
+        {"sidechain", &signbondpop},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

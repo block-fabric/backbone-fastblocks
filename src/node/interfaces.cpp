@@ -52,6 +52,8 @@
 #include <policy/rbf.h>
 #include <pos/finality.h>
 #include <pos/hooks.h>
+#include <pos/producer.h>
+#include <pos/staking.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <rpc/blockchain.h>
@@ -851,6 +853,41 @@ public:
         LOCK(::cs_main);
         anchors.anchored_heights = pos::AnchoredHeights(*hooks, *chainman().ActiveChain().Tip(), anchors.final_anchors);
         return anchors;
+    }
+    std::optional<Staking> getStaking() override
+    {
+        const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
+        if (!hooks) return std::nullopt;
+        const Consensus::PosParams& params{hooks->Params()};
+        const int64_t slot{pos::SlotOf(TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()), params)};
+        const auto leader{hooks->ActiveLeaderOf(slot)};
+        Staking staking;
+        staking.min_stake = params.min_stake;
+        LOCK(::cs_main);
+        const sidechain::StoreView& view{chainman().ActiveChainstate().SideCache()};
+        staking.anchors = pos::GetFastState(view).anchors;
+        pos::ForEachValidator(view, [&](const uint256& pubkey, const pos::ValidatorRecord& record) {
+            Bond bond;
+            bond.pubkey = pubkey;
+            bond.owner = record.owner;
+            bond.bonded = record.bonded;
+            bond.genesis_stake = record.genesis_stake;
+            for (const pos::UnbondingEntry& entry : record.unbonding) bond.unbonds.emplace_back(entry.amount, entry.release_anchor);
+            bond.unbond_seq = record.unbond_seq;
+            bond.eligible = record.Eligible(params);
+            bond.banned = record.tombstoned;
+            bond.jailed_until_epoch = record.jailed_until_epoch;
+            bond.in_set = leader.set && leader.set->Find(pubkey).has_value();
+            staking.bonds.push_back(std::move(bond));
+            return true;
+        });
+        return staking;
+    }
+    std::optional<std::array<unsigned char, 64>> signBondPop(const uint256& pubkey, const uint160& owner) override
+    {
+        const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
+        if (!hooks || !hooks->GetProducer()) return std::nullopt;
+        return hooks->GetProducer()->SignBondPop(pubkey, owner);
     }
     bool shutdownRequested() override { return ShutdownRequested(m_node); }
     void initMessage(const std::string& message) override { ::uiInterface.InitMessage(message); }

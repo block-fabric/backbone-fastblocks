@@ -14,6 +14,7 @@
 #include <sync.h>
 #include <uint256.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -73,6 +74,8 @@ public:
     int64_t LastSignedSlot() const;
     /** The x-only keys of this node's validators. */
     std::vector<uint256> Keys() const;
+    /** The proof of possession of one of this node's validator keys for a bond owned by `owner`; nothing if the key is not this node's. */
+    std::optional<std::array<unsigned char, 64>> SignBondPop(const uint256& pubkey, const uint160& owner) const;
     const CScript& Payout() const { return m_payout; }
 
     /**
@@ -84,8 +87,8 @@ public:
 
     /** The producer's share of fees `fees`, in integers: floor(fees * bps / 10000). */
     static int64_t ProducerShare(int64_t fees, int64_t bps);
-    /** Build the block of `slot` on the tip, with `ack` or not, the fees split; not signed. */
-    std::optional<CBlock> Build(int64_t slot, const std::optional<AnchorAck>& ack, std::string& error) const;
+    /** Build the block of `slot` on the tip, with `ack` or not, and the proofs `evidence`, the fees split; not signed. */
+    std::optional<CBlock> Build(int64_t slot, const std::optional<AnchorAck>& ack, std::string& error, const std::vector<DoubleProposal>& evidence = {}) const;
     /** Sign a block with `key` (no slashing protection: for the producer, and tests). */
     static bool Sign(CBlock& block, const CKey& key);
 

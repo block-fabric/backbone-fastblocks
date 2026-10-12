@@ -5,6 +5,7 @@
 #ifndef BITCOIN_POS_PARAMS_H
 #define BITCOIN_POS_PARAMS_H
 
+#include <serialize.h>
 #include <uint256.h>
 
 #include <cstdint>
@@ -16,6 +17,7 @@ namespace Consensus {
 struct PosValidator {
     uint256 pubkey;
     int64_t stake{1};
+    SERIALIZE_METHODS(PosValidator, obj) { READWRITE(obj.pubkey, obj.stake); }
     friend bool operator==(const PosValidator&, const PosValidator&) = default;
 };
 
@@ -50,11 +52,43 @@ struct PosParams {
     int64_t max_future_seconds{2};
     //! Not consensus: wallets call a block final once this many anchors cover it.
     int final_anchors{6};
-    //! The fixed validator set the chain starts with (phase 2 of the design: no bonding yet).
+    /**
+     * The validators the chain starts with, a bootstrap (regtest's -posvalidators): in the set until
+     * jailed or banned, with their stake as weight on top of what they bond. None on the main and test
+     * networks, which start merged mined only, until enough stake is bonded (doc/fastblocks.md, "Staking").
+     */
     std::vector<PosValidator> genesis_validators;
 
-    /** Whether PoS blocks can be valid on this network. */
-    bool Active() const { return !genesis_validators.empty() && genesis_validators.size() >= min_active_validators; }
+    //
+    // Staking (doc/fastblocks.md, "Staking"). Amounts in satoshis.
+    //
+
+    //! A validator takes part only with at least this much bonded (a genesis validator whatever it bonds).
+    int64_t min_stake{100'000'000};
+    //! Unbonded coins are paid this many anchors after the unbond (about two days on the main network).
+    int64_t unbonding_anchors{2880};
+    /**
+     * A proof that a validator signed twice is valid in a block whose chain has at most this many
+     * anchors more than the one that fixed the validator set of the offence's epoch.
+     */
+    int64_t evidence_window_anchors{1440};
+    /**
+     * The leader seed of an epoch is the hash of the highest mainchain block whose median time is at
+     * least this long before the epoch starts.
+     */
+    int64_t seed_lookahead_seconds{1200};
+    //! Signing two blocks for one slot costs this share of the stake (bonded and unbonding), in basis points.
+    int64_t slash_bps{1000};
+    //! The block that carries the proof is paid 1/reporter_share_divisor of the penalty; the rest goes to the pot's reserve.
+    int64_t reporter_share_divisor{8};
+    //! A validator that made less than this share of the blocks it led in an epoch (basis points) ...
+    int64_t liveness_min_bps{5000};
+    //! ... having led at least this many slots ...
+    int64_t liveness_min_assigned{10};
+    //! ... is left out of the validator sets for this many epochs more (jailed; no coins are lost).
+    int64_t jail_epochs{1};
+    //! Each anchor pays 1/pot_reserve_anchors of the pot's reserve (penalties) with the pot.
+    int64_t pot_reserve_anchors{1440};
 };
 
 } // namespace Consensus

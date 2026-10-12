@@ -137,6 +137,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
             options.pos_validators.push_back({.pubkey = uint256{std::span<const unsigned char>{*bytes}}, .stake = *stake});
         }
     }
+    if (const auto lookahead{args.GetIntArg("-posseedlookahead")}) {
+        if (*lookahead < 0 || *lookahead > 365 * 24 * 60 * 60) throw std::runtime_error("Invalid -posseedlookahead");
+        options.pos_seed_lookahead = *lookahead;
+    }
     for (const std::string& arg : args.GetArgs("-testdrivechainparam")) {
         const auto found{arg.find('@')};
         const auto value{found == std::string::npos ? std::nullopt : ToIntegral<int32_t>(arg.substr(found + 1))};

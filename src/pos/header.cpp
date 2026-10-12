@@ -34,17 +34,18 @@ uint256 AnchorTicket::Hash() const
 }
 
 namespace {
-//! First byte of non-empty sections: an acknowledgement follows.
+//! First byte of non-empty sections: whether an acknowledgement follows. The proofs come after.
+constexpr uint8_t SECTION_NO_ACK{0};
 constexpr uint8_t SECTION_ACK{1};
 } // namespace
 
 std::vector<unsigned char> PosSections::Encode() const
 {
-    if (!ack) return {};
+    if (!ack && evidence.empty()) return {};
     DataStream s{};
-    // The acknowledgement, then the evidence (none yet: its count).
-    s << SECTION_ACK << *ack;
-    WriteCompactSize(s, 0);
+    s << (ack ? SECTION_ACK : SECTION_NO_ACK);
+    if (ack) s << *ack;
+    s << evidence;
     return {UCharCast(s.data()), UCharCast(s.data()) + s.size()};
 }
 
@@ -56,14 +57,17 @@ bool PosSections::Decode(std::span<const unsigned char> bytes, PosSections& sect
         SpanReader s{bytes};
         uint8_t kind;
         s >> kind;
-        // Sections with nothing in them are no bytes at all, so that the header commits to null.
-        if (kind != SECTION_ACK) return false;
-        AnchorAck ack;
-        s >> ack;
-        // Evidence comes with slashing (a later phase of the design): none is valid yet.
-        if (ReadCompactSize(s) != 0) return false;
+        if (kind != SECTION_ACK && kind != SECTION_NO_ACK) return false;
+        PosSections read;
+        if (kind == SECTION_ACK) s >> read.ack.emplace();
+        const uint64_t count{ReadCompactSize(s)};
+        if (count > MAX_SECTION_EVIDENCE) return false;
+        read.evidence.resize(count);
+        for (DoubleProposal& proof : read.evidence) s >> proof;
         if (!s.empty()) return false;
-        sections.ack = std::move(ack);
+        // Sections with nothing in them are no bytes at all, so that the header commits to null.
+        if (!read.ack && read.evidence.empty()) return false;
+        sections = std::move(read);
         return true;
     } catch (const std::ios_base::failure&) {
         return false;

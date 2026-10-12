@@ -22,6 +22,7 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <array>
 #include <ios>
 
 namespace pos {
@@ -33,6 +34,9 @@ const sidechain::Cell<FastState> FAST_STATE{0x55, FastState{}};
 const sidechain::Table<uint32_t, int64_t> POT_ACCRUED{0x56};
 
 FastBlocksHooks* g_installed{nullptr};
+
+//! Validator sets of anchors a node keeps in memory, at most.
+constexpr size_t MAX_KNOWN_SETS{4096};
 
 bool Fail(std::string& reject_reason, const char* reason)
 {
@@ -71,7 +75,8 @@ int64_t PotAccruedAt(const sidechain::StoreView& view, int32_t height)
 FastBlocksHooks::FastBlocksHooks(const CChainParams& params)
     : m_chain_params{params},
       m_params{params.GetConsensus().pos},
-      m_validators{params.GetConsensus().pos},
+      m_genesis_set{params.GetConsensus().pos},
+      m_staking{params.GetConsensus().pos, params.GetConsensus().hashGenesisBlock},
       m_pos_bits{PosBits(params.GetConsensus().powLimit)}
 {
 }
@@ -93,29 +98,43 @@ std::optional<int64_t> FastBlocksHooks::LastPosSlot(const CBlockIndex* index, co
 
 bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const
 {
+    AssertLockHeld(::cs_main);
     const auto invalid{[&](const char* reason, const char* debug) { return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, reason, debug); }};
-    if (!m_validators.Active()) return invalid("bad-pos-inactive", "no blocks of stake on this chain: too few validators");
     if (header.nBits != m_pos_bits) return invalid("bad-pos-bits", "a block of stake has the chain's proof-of-work limit as nBits");
     const int64_t time{header.nTime};
     if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) {
         return invalid("bad-pos-time", "a block of stake has the time its slot starts");
     }
     const int64_t slot{SlotOf(time, m_params)};
-    // The signature before anything that reads the chain, or keeps the header to try again later: only
-    // a leader makes the node look further.
-    const auto leader{m_validators.Leader(slot, m_params, m_chain_params.GetConsensus().hashGenesisBlock)};
-    if (!leader || !CheckBlockSig(header, m_validators.Validators()[*leader].pubkey)) {
-        return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
+    // The signature before anything that reads more of the chain, or keeps the header to try again
+    // later: only a leader makes the node look further. The leader is that of the validator set of the
+    // slot's epoch, which an anchor before the epoch before it made, and of the epoch's seed, which the
+    // record of the mainchain gives.
+    const SlotLeader leader{LeaderOf(prev, slot)};
+    switch (leader.status) {
+    case LeaderStatus::INACTIVE:
+        return invalid("bad-pos-inactive", "no blocks of stake in this epoch: too few validators");
+    case LeaderStatus::SEED_UNKNOWN:
+        return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-seed-unknown", "the mainchain block that seeds the epoch is not on record yet");
+    case LeaderStatus::SET_UNKNOWN:
+        // The set of an anchor of a branch this node has not connected: the block is checked when it
+        // is (AfterBlock), as that anchor is then.
+        break;
+    case LeaderStatus::OK:
+        if (!CheckBlockSig(header, leader.pubkey)) return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
+        break;
     }
     if (header.Time() > NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}) {
         return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-time-future", "the slot of the block of stake has not started");
     }
     // A second header the leader signed for this slot is the proof that it signed twice, whatever
     // else is wrong with it.
-    if (const auto proof{m_evidence.NoteSigned(header, slot)}) {
-        std::string reason;
-        if (const auto offence{CheckEvidence(*proof, m_validators, m_params, m_chain_params.GetConsensus().hashGenesisBlock, reason)}) {
-            if (m_evidence.Add(*offence, *proof)) LogWarning("FastBlocks: validator %s signed two blocks for slot %d", HexStr(offence->pubkey), offence->slot);
+    if (leader.status == LeaderStatus::OK) {
+        if (const auto proof{m_evidence.NoteSigned(header, slot)}) {
+            std::string reason;
+            if (const auto offence{CheckEvidence(*proof, leader.pubkey, m_params, reason)}) {
+                if (m_evidence.Add(*offence, *proof)) LogWarning("FastBlocks: validator %s signed two blocks for slot %d", HexStr(offence->pubkey), offence->slot);
+            }
         }
     }
     if (const auto last{LastPosSlot(&prev, m_params)}; last && slot <= *last) {
@@ -158,6 +177,11 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
     if (pots > 1) return invalid("bad-pos-pot-multiple", "one fee pot output at most");
     PosSections sections;
     if (!PosSections::Decode(block.vSections, sections)) return invalid("bad-pos-sections", "the sections of a block of stake do not read");
+    // The form of its proofs (the chain checks the rest: AfterBlock).
+    for (const DoubleProposal& proof : sections.evidence) {
+        std::string reason;
+        if (!CheckEvidenceForm(proof, m_params, reason)) return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, reason, "a proof that a leader signed twice does not have the form of one");
+    }
     if (!sections.ack) {
         if (block.nNonce != 0) return invalid("bad-pos-ack-nonce", "a block with no acknowledgement has nNonce 0");
         return true;
@@ -170,24 +194,34 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
     if (!IsValidPayee(ack.ticket.payee)) return invalid("bad-pos-ticket-payee", "a ticket pays the pot to a standard script of 80 bytes or less");
     // Noted (to find the blocks that rest on a commitment the mainchain drops) only if the leader of
     // its slot signed it: anyone can make a block that reads, and enough of them would push the
-    // acknowledgements that count out of memory. (The header rules turn the others away.)
+    // acknowledgements that count out of memory. (The header rules turn the others away. A block whose
+    // leader this node cannot tell yet is noted when it is connected: AfterBlock.)
     const int64_t time{block.nTime};
-    if (time > m_params.genesis_time && (time - m_params.genesis_time) % m_params.slot_seconds == 0) {
-        const auto leader{m_validators.Leader(SlotOf(time, m_params), m_params, m_chain_params.GetConsensus().hashGenesisBlock)};
-        if (leader && CheckBlockSig(block, m_validators.Validators()[*leader].pubkey)) NoteAck(block.GetHash(), ack);
+    if (time > m_params.genesis_time && (time - m_params.genesis_time) % m_params.slot_seconds == 0 && Chainman()) {
+        LOCK(::cs_main);
+        if (const CBlockIndex* prev{Chainman()->m_blockman.LookupBlockIndex(block.hashPrevBlock)}) {
+            const SlotLeader leader{LeaderOf(*prev, SlotOf(time, m_params))};
+            if (leader.status == LeaderStatus::OK && CheckBlockSig(block, leader.pubkey)) NoteAck(block.GetHash(), ack);
+        }
     }
     return true;
 }
 
 uint256 FastBlocksHooks::SectionsHash(std::span<const unsigned char> sections) const { return pos::SectionsHash(sections); }
 
-int64_t FastBlocksHooks::MaxFutureBlockTime() const { return m_validators.Active() ? MAX_FUTURE_BLOCK_TIME_POS : ChainHooks::MaxFutureBlockTime(); }
+int64_t FastBlocksHooks::MaxFutureBlockTime() const
+{
+    // While the network has blocks of stake: from the start (genesis validators), or once the node saw an
+    // active set made from bonds.
+    return m_genesis_set.Active() || m_staking_seen.load() ? MAX_FUTURE_BLOCK_TIME_POS : ChainHooks::MaxFutureBlockTime();
+}
 
 bool FastBlocksHooks::IsWaitReason(const std::string& reject_reason) const
 {
     // A BMM block the mainchain has not committed to yet; a block of stake whose slot has not started
     // by this node's clock, or that acknowledges a commitment not on this node's record yet.
-    return reject_reason == "bmm-unknown" || reject_reason == "pos-time-future" || reject_reason == "pos-ack-unknown";
+    // Or whose epoch's seed is not on record yet.
+    return reject_reason == "bmm-unknown" || reject_reason == "pos-time-future" || reject_reason == "pos-ack-unknown" || reject_reason == "pos-seed-unknown";
 }
 
 std::optional<int64_t> FastBlocksHooks::WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const
@@ -200,6 +234,7 @@ std::optional<int64_t> FastBlocksHooks::WaitingReady(const CBlockHeader& header,
     const auto ready{[&](const CBlockHeader& waiting) {
         if (!IsPosHeader(waiting)) return record.CommittedHeight(waiting.GetHash()).has_value();
         if (waiting.Time() > NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}) return false;
+        if (!EpochSeed(EpochOf(SlotOf(waiting.nTime, m_params), m_params), m_params, record)) return false;
         return waiting.nNonce == 0 || record.BmmAt(static_cast<int>(waiting.nNonce)).has_value();
     }};
     const CBlockHeader* current{&header};
@@ -402,7 +437,6 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
     });
     for (const uint32_t at : paid_entries) POT_ACCRUED.Erase(out, at);
     fast.pot_paid = accrued;
-    if (pay > 0) owed_tx.emplace_back(pay, payee);
 
     ++fast.anchors;
     fast.last_main_height = main_height;
@@ -411,12 +445,31 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
     fast.anchor_point = block.GetHash();
     fast.anchor_point_height = height;
     FAST_STATE.Put(out, fast);
+
+    // Staking: unbonded coins and rewards for proofs paid, a share of the penalties with the pot,
+    // validators that missed their slots jailed, and the validator set of this anchor made. (A BMM
+    // block's time may be ahead of the clock, by two hours at most: its epoch at the earliest, then.)
+    const int64_t slot{SlotOf(block.nTime, m_params)};
+    const bool pos_block{IsPosHeader(block) || !block.vSections.empty()};
+    const int64_t earliest{pos_block ? slot : std::max<int64_t>(0, slot - MAX_FUTURE_BLOCK_TIME / m_params.slot_seconds)};
+    std::vector<CTxOut> staking_owed;
+    const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, slot, EpochOf(earliest, m_params), staking_owed)};
+    if (staked.set_active) m_staking_seen = true;
+    const int64_t paid_out{pay + staked.release};
+    if (paid_out > 0) owed_tx.emplace_back(paid_out, payee);
+    owed_tx.insert(owed_tx.end(), staking_owed.begin(), staking_owed.end());
     return true;
 }
 
-bool FastBlocksHooks::Stalled(const FastState& fast, int64_t main_time) const
+bool FastBlocksHooks::ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool, std::vector<CTxOut>&, std::string& reject_reason) const
 {
-    if (!m_validators.Active()) return true;
+    // Bonds and unbonds: an unbond is paid unbonding_anchors after the anchors of the chain so far.
+    return m_staking.ApplyTx(state.Writable(), tx, height, FAST_STATE.Get(state.View()).anchors, reject_reason);
+}
+
+bool FastBlocksHooks::Stalled(const FastState& fast, int64_t main_time, bool pos_active) const
+{
+    if (!pos_active) return true;
     const int64_t last{fast.last_pos_slot >= 0 ? SlotTime(fast.last_pos_slot, m_params) : m_params.genesis_time};
     return main_time - last >= m_params.stall_seconds;
 }
@@ -429,7 +482,23 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
     sidechain::StoreOverlay& out{state.Writable()};
     FastState fast{FAST_STATE.Get(state.View())};
     const CTransaction& coinbase{*block.vtx.at(0)};
+    LOCK(::cs_main);
+    const CBlockIndex* prev{chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+    if (!prev) return Fail(reject_reason, "bad-pos-context");
+    const int64_t slot{SlotOf(block.nTime, m_params)};
     if (IsPosHeader(block)) {
+        // Signed by the leader of its slot, as this chain and the record say now: the header may have
+        // come before the node knew the set of its epoch (CheckHeader), and the record may have moved
+        // the seed since.
+        const SlotLeader leader{LeaderOf(*prev, slot, &state.View())};
+        switch (leader.status) {
+        case LeaderStatus::INACTIVE: return Fail(reject_reason, "bad-pos-inactive");
+        case LeaderStatus::SEED_UNKNOWN: return Fail(reject_reason, "pos-seed-unknown");
+        case LeaderStatus::SET_UNKNOWN: return Fail(reject_reason, "bad-pos-set-unknown");
+        case LeaderStatus::OK: break;
+        }
+        if (!CheckBlockSig(block, leader.pubkey)) return Fail(reject_reason, "bad-pos-sig");
+
         // The fee split: what the producer keeps (all of the coinbase but the payouts and the pot) is at
         // most producer_share_bps of it and the pot together. Fees it leaves unclaimed are lost.
         CAmount total{0}, pot{0};
@@ -450,11 +519,9 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
 
         // PoS blocks stop when no anchor covers them for too long: the first one no anchor covers
         // starts the count. An acknowledgement covers what is at or below the block it anchors.
-        const int64_t slot{SlotOf(block.nTime, m_params)};
         if (step) {
             int64_t first{slot};
-            LOCK(::cs_main);
-            for (const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock)}; index && index->nHeight > fast.last_anchored_height; index = index->pprev) {
+            for (const CBlockIndex* index{prev}; index && index->nHeight > fast.last_anchored_height; index = index->pprev) {
                 if (index->m_ext) first = SlotOf(index->nTime, m_params);
             }
             fast.first_unanchored_slot = first;
@@ -462,20 +529,232 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
             fast.first_unanchored_slot = slot;
         }
         if (slot - fast.first_unanchored_slot >= m_params.max_unanchored_slots) return Fail(reject_reason, "bad-pos-unanchored");
+
+        // Liveness: the block's leader made it; the leaders of the slots since the last block of stake
+        // (an epoch of them at most) made none.
+        std::vector<std::pair<int64_t, uint256>> missed;
+        std::map<int64_t, SlotLeader> epochs;
+        for (int64_t at{std::max(fast.last_pos_slot + 1, slot - m_params.slots_per_epoch)}; at < slot; ++at) {
+            const int64_t epoch{EpochOf(at, m_params)};
+            auto found{epochs.find(epoch)};
+            if (found == epochs.end()) found = epochs.emplace(epoch, LeaderOf(*prev, epoch * m_params.slots_per_epoch, &state.View())).first;
+            const SlotLeader& schedule{found->second};
+            if (schedule.status != LeaderStatus::OK) continue;
+            if (const auto index{schedule.set->Leader(at, schedule.seed)}) missed.emplace_back(at, schedule.set->Validators()[*index].pubkey);
+        }
+        m_staking.NoteLiveness(out, slot, leader.pubkey, missed);
         fast.last_pos_slot = slot;
+
+        // Proofs that leaders signed twice: punished, and the block paid for them.
+        PosSections sections;
+        if (!PosSections::Decode(block.vSections, sections)) return Fail(reject_reason, "bad-pos-sections");
+        for (const DoubleProposal& proof : sections.evidence) {
+            const auto offence{CheckChainEvidence(proof, *prev, slot, state.View(), fast.anchors, reject_reason)};
+            if (!offence) return false;
+            if (!m_staking.Punish(out, *offence, coinbase.vout.at(0).scriptPubKey, fast.anchors, reject_reason)) return false;
+            LogDebug(BCLog::VALIDATION, "FastBlocks: validator %s punished for signing two blocks at slot %d\n", HexStr(offence->pubkey), offence->slot);
+        }
+        if (sections.ack) NoteAck(block.GetHash(), *sections.ack);
     } else {
-        // A BMM block carries transactions only when the PoS blocks stalled: as of the mainchain block
-        // before its commitment, none for stall_seconds.
-        if (block.vtx.size() > 1 && m_validators.Active()) {
+        // A BMM block carries transactions only when the PoS blocks stalled: no active validator set
+        // for its epoch, or, as of the mainchain block before its commitment, none for stall_seconds.
+        if (block.vtx.size() > 1) {
+            const auto set{SetFor(*prev, EpochOf(slot, m_params), &state.View())};
+            const bool pos_active{!set || set->Active()};
             // (A BMM block's commitment is on record, so is the block before.)
             const auto main{step && chainman->m_mainchain ? chainman->m_mainchain->GetBlock(step->main_height) : std::nullopt};
-            if (!main || !Stalled(fast, main->time)) return Fail(reject_reason, "bad-pos-bmm-not-stalled");
+            if (pos_active && (!main || !Stalled(fast, main->time, pos_active))) return Fail(reject_reason, "bad-pos-bmm-not-stalled");
         }
         // It anchors everything below it.
         fast.first_unanchored_slot = -1;
     }
     FAST_STATE.Put(out, fast);
     return true;
+}
+
+std::shared_ptr<const ValidatorSet> FastBlocksHooks::AnchorSetOf(const uint256& anchor, const sidechain::StoreView& view, uint64_t* set_anchors) const
+{
+    {
+        LOCK(m_sets_mutex);
+        if (const auto found{m_known_sets.find(anchor)}; found != m_known_sets.end()) {
+            if (set_anchors) *set_anchors = found->second.anchors;
+            return found->second.set;
+        }
+    }
+    const auto entry{GetAnchorSet(view, anchor)};
+    if (!entry) return nullptr;
+    const auto validators{GetSetVersion(view, entry->version)};
+    if (!validators) return nullptr;
+    auto set{std::make_shared<const ValidatorSet>(*validators, m_params)};
+    if (set_anchors) *set_anchors = entry->anchors;
+    // Kept in memory, for the headers of branches that are not active (bounded: the oldest go first).
+    LOCK(m_sets_mutex);
+    if (m_known_sets.emplace(anchor, KnownSet{.set = set, .anchors = entry->anchors}).second) {
+        m_known_order.push_back(anchor);
+        while (m_known_order.size() > MAX_KNOWN_SETS) {
+            m_known_sets.erase(m_known_order.front());
+            m_known_order.pop_front();
+        }
+    }
+    return set;
+}
+
+std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view, uint64_t* set_anchors) const
+{
+    AssertLockHeld(::cs_main);
+    // The newest anchor at or below prev whose slot is before the epoch before: the stake was fixed an
+    // epoch before the seed of the epoch exists.
+    const int64_t boundary{(epoch - 1) * m_params.slots_per_epoch};
+    for (const CBlockIndex* index{&prev}; index; index = index->pprev) {
+        if (index->nHeight == 0) {
+            if (set_anchors) *set_anchors = 0;
+            return std::shared_ptr<const ValidatorSet>{std::shared_ptr<const ValidatorSet>{}, &m_genesis_set};
+        }
+        const bool anchor{!index->m_ext || index->nNonce != 0};
+        if (!anchor || SlotOf(index->nTime, m_params) >= boundary) continue;
+        if (view) return AnchorSetOf(index->GetBlockHash(), *view, set_anchors);
+        ChainstateManager* chainman{Chainman()};
+        if (!chainman) return nullptr;
+        return AnchorSetOf(index->GetBlockHash(), chainman->ActiveChainstate().SideCache(), set_anchors);
+    }
+    return nullptr;
+}
+
+FastBlocksHooks::SlotLeader FastBlocksHooks::LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view) const
+{
+    AssertLockHeld(::cs_main);
+    SlotLeader leader;
+    const int64_t epoch{EpochOf(slot, m_params)};
+    leader.set = SetFor(prev, epoch, view, &leader.set_anchors);
+    if (!leader.set) {
+        leader.status = LeaderStatus::SET_UNKNOWN;
+        return leader;
+    }
+    if (!leader.set->Active()) {
+        leader.status = LeaderStatus::INACTIVE;
+        return leader;
+    }
+    const ChainstateManager* chainman{Chainman()};
+    const auto seed{chainman && chainman->m_mainchain ? EpochSeed(epoch, m_params, *chainman->m_mainchain) : std::nullopt};
+    if (!seed) {
+        leader.status = LeaderStatus::SEED_UNKNOWN;
+        return leader;
+    }
+    leader.seed = *seed;
+    const auto index{leader.set->Leader(slot, *seed)};
+    if (!index) {
+        leader.status = LeaderStatus::INACTIVE;
+        return leader;
+    }
+    leader.pubkey = leader.set->Validators()[*index].pubkey;
+    leader.status = LeaderStatus::OK;
+    return leader;
+}
+
+FastBlocksHooks::SlotLeader FastBlocksHooks::ActiveLeaderOf(int64_t slot) const
+{
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman) return {};
+    LOCK(::cs_main);
+    const CBlockIndex* tip{chainman->ActiveChain().Tip()};
+    if (!tip) return {};
+    return LeaderOf(*tip, slot);
+}
+
+bool FastBlocksHooks::PosActiveNow() const
+{
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman) return m_genesis_set.Active();
+    const int64_t slot{SlotOf(TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()), m_params)};
+    LOCK(::cs_main);
+    const CBlockIndex* tip{chainman->ActiveChain().Tip()};
+    if (!tip) return m_genesis_set.Active();
+    const auto set{SetFor(*tip, EpochOf(slot, m_params))};
+    return set && set->Active();
+}
+
+std::optional<Offence> FastBlocksHooks::CheckChainEvidence(const DoubleProposal& proof, const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view,
+                                                           uint64_t anchors, std::string& reason) const
+{
+    AssertLockHeld(::cs_main);
+    const auto fail{[&](const char* why) -> std::optional<Offence> {
+        reason = why;
+        return std::nullopt;
+    }};
+    if (!CheckEvidenceForm(proof, m_params, reason)) return std::nullopt;
+    const int64_t offence_slot{SlotOf(proof.a.nTime, m_params)};
+    if (offence_slot > slot) return fail("bad-pos-evidence-late");
+    // The leader of the slot on this chain.
+    const SlotLeader leader{LeaderOf(prev, offence_slot, &view)};
+    switch (leader.status) {
+    case LeaderStatus::SEED_UNKNOWN: return fail("pos-seed-unknown");
+    case LeaderStatus::SET_UNKNOWN: return fail("bad-pos-evidence-old");
+    case LeaderStatus::INACTIVE: return fail("bad-pos-evidence-sig");
+    case LeaderStatus::OK: break;
+    }
+    const auto offence{CheckEvidence(proof, leader.pubkey, m_params, reason)};
+    if (!offence) return std::nullopt;
+    // Within the window: while the stake it signed with is still bonded or unbonding.
+    if (anchors > leader.set_anchors + static_cast<uint64_t>(m_params.evidence_window_anchors)) return fail("bad-pos-evidence-old");
+    if (OffencePunished(view, offence->pubkey, offence->slot)) return fail("bad-pos-evidence-known");
+    return offence;
+}
+
+void FastBlocksHooks::CheckSeeds() const
+{
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman || !chainman->m_mainchain) return;
+    const uint256 main_tip{chainman->m_mainchain->TipHash()};
+    {
+        LOCK(m_sets_mutex);
+        if (m_seeds_checked_for == main_tip) return;
+        m_seeds_checked_for = main_tip;
+    }
+    // Whether the record agrees with the leader of a block of stake (the set of its epoch is that of
+    // the chain below it, which the record does not change).
+    const auto agrees{[&](const CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        const SlotLeader leader{LeaderOf(*index.pprev, SlotOf(index.nTime, m_params))};
+        if (leader.status == LeaderStatus::SET_UNKNOWN) return true;
+        return leader.status == LeaderStatus::OK && CheckBlockSig(index.GetBlockHeader(), leader.pubkey);
+    }};
+    CBlockIndex* lowest{nullptr};
+    std::vector<CBlockIndex*> again;
+    {
+        LOCK(::cs_main);
+        // The newest blocks of the active chain: a mainchain reorg reaches the seeds of the last epochs only.
+        CBlockIndex* index{chainman->ActiveChain().Tip()};
+        for (int64_t i{0}; index && index->nHeight > 0 && i < 2 * m_params.slots_per_epoch + m_params.max_unanchored_slots; ++i, index = index->pprev) {
+            if (index->m_ext && !agrees(*index)) lowest = index;
+        }
+        LOCK(m_sets_mutex);
+        for (auto it{m_seed_failed.begin()}; it != m_seed_failed.end();) {
+            CBlockIndex* failed{chainman->m_blockman.LookupBlockIndex(*it)};
+            if (!failed || !(failed->nStatus & BLOCK_FAILED_VALID)) {
+                it = m_seed_failed.erase(it);
+            } else if (failed->pprev && agrees(*failed)) {
+                again.push_back(failed);
+                it = m_seed_failed.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (lowest) {
+        LogInfo("FastBlocks: the record moved the seed of the epoch of block %s: it and the blocks after it are taken back", lowest->GetBlockHash().ToString());
+        WITH_LOCK(m_sets_mutex, m_seed_failed.insert(lowest->GetBlockHash()));
+        BlockValidationState state;
+        chainman->ActiveChainstate().InvalidateBlock(state, lowest, /*by_record=*/true);
+    }
+    if (!again.empty()) {
+        LOCK(::cs_main);
+        for (CBlockIndex* failed : again) {
+            if (chainman->ActiveChainstate().ReconsiderRecordFailure(failed)) LogInfo("FastBlocks: the record gives the seed of block %s back", failed->GetBlockHash().ToString());
+        }
+    }
+    if (lowest || !again.empty()) {
+        BlockValidationState state;
+        chainman->ActiveChainstate().ActivateBestChain(state);
+    }
 }
 
 const CBlockIndex* FastBlocksHooks::TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot) const
@@ -666,7 +945,7 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
         // Relayed only if it is a proof (one this node does not know yet). One that is not (two
         // signature checks for nothing) is the peer's fault: the validator set is the chain's.
         std::string reason;
-        if (!AddEvidence(proof, reason, peer)) misbehaving = "invalid evidence: " + reason;
+        if (!AddEvidence(proof, reason, peer) && reason != "pos-evidence-unknown") misbehaving = "invalid evidence: " + reason;
         return true;
     }
     return false;
@@ -674,8 +953,29 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
 
 std::optional<Offence> FastBlocksHooks::AddEvidence(const DoubleProposal& proof, std::string& reason, std::optional<int64_t> except) const
 {
-    const auto offence{CheckEvidence(proof, m_validators, m_params, m_chain_params.GetConsensus().hashGenesisBlock, reason)};
-    if (!offence) return std::nullopt;
+    if (!CheckEvidenceForm(proof, m_params, reason)) return std::nullopt;
+    // The leader of the slot: as the chain below either header says, or the active chain.
+    std::optional<Offence> offence;
+    bool unknown{false};
+    if (ChainstateManager* chainman{Chainman()}) {
+        LOCK(::cs_main);
+        const int64_t slot{SlotOf(proof.a.nTime, m_params)};
+        const std::array<const CBlockIndex*, 3> prevs{chainman->m_blockman.LookupBlockIndex(proof.a.hashPrevBlock), chainman->m_blockman.LookupBlockIndex(proof.b.hashPrevBlock),
+                                                      chainman->ActiveChain().Tip()};
+        for (const CBlockIndex* prev : prevs) {
+            if (!prev) continue;
+            const SlotLeader leader{LeaderOf(*prev, slot)};
+            if (leader.status == LeaderStatus::SET_UNKNOWN || leader.status == LeaderStatus::SEED_UNKNOWN) unknown = true;
+            if (leader.status != LeaderStatus::OK) continue;
+            offence = CheckEvidence(proof, leader.pubkey, m_params, reason);
+            if (offence) break;
+        }
+    }
+    if (!offence) {
+        // Not the peer's fault if this node cannot tell the leader yet.
+        reason = unknown ? "pos-evidence-unknown" : "bad-pos-evidence-sig";
+        return std::nullopt;
+    }
     if (!m_evidence.Add(*offence, proof)) return offence;
     LogWarning("FastBlocks: validator %s signed two blocks for slot %d", HexStr(offence->pubkey), offence->slot);
     m_evidence.MarkRelayed(*offence);
@@ -741,9 +1041,11 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
     ChainstateManager* chainman{Chainman()};
     if (!chainman || !chainman->m_mainchain) return false;
     // Proofs of leaders that signed twice, found by watching headers; and the tickets of the newest
-    // commitments, for a node that does not have them.
+    // commitments, for a node that does not have them. Blocks of stake whose epoch's seed the record
+    // moved are taken back.
     RelayNewEvidence();
     AskMissingTickets();
+    CheckSeeds();
     const sidechain::Mainchain& record{*chainman->m_mainchain};
     const sidechain::Follower::Mining mining{follower.GetMining()};
     const int main_height{record.Height()};
@@ -758,8 +1060,9 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
         tip = chainman->ActiveChain().Tip();
         fast = FAST_STATE.Get(chainman->ActiveChainstate().SideState().View());
     }
-    // No PoS blocks for a while (or none at all on this chain): merged mined blocks, as the template's.
-    if (Stalled(fast, main_block->time)) return false;
+    // No PoS blocks for a while (or none at all on this chain, or no active validator set): merged mined
+    // blocks, as the template's.
+    if (Stalled(fast, main_block->time, PosActiveNow())) return false;
     // Otherwise anchors: a ticket per mainchain block, for the merged miner of this node.
     if (!mining.enabled) return true;
     {

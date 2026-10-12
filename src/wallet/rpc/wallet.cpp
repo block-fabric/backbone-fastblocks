@@ -1113,6 +1113,9 @@ RPCMethod sendtoaddress();
 RPCMethod getdepositaddress();
 RPCMethod createwithdrawal();
 RPCMethod refundwithdrawal();
+RPCMethod createbond();
+RPCMethod createunbond();
+RPCMethod listbonds();
 RPCMethod sendmany();
 RPCMethod fundrawtransaction();
 RPCMethod bumpfee();
@@ -1188,6 +1191,9 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &getdepositaddress},
         {"wallet", &createwithdrawal},
         {"wallet", &refundwithdrawal},
+        {"wallet", &createbond},
+        {"wallet", &createunbond},
+        {"wallet", &listbonds},
         {"wallet", &setlabel},
         {"wallet", &setwalletflag},
         {"wallet", &signmessage},

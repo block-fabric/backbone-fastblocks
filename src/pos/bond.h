@@ -1,0 +1,66 @@
+// Copyright (c) 2026 The Chains developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BITCOIN_POS_BOND_H
+#define BITCOIN_POS_BOND_H
+
+#include <consensus/amount.h>
+#include <primitives/transaction.h>
+#include <script/script.h>
+#include <uint256.h>
+
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+/**
+ * The script formats of staking (doc/fastblocks.md, "Staking"), apart from its rules (pos/staking.h)
+ * because wallets need them too. Each is an OP_RETURN output with one push that starts with a tag.
+ */
+namespace pos {
+
+//! BOND output: OP_RETURN with BOND_TAG | validator x-only key (32) | owner key hash (20) | proof of possession (64).
+inline constexpr unsigned char BOND_TAG[4]{0xDB, 'S', 'T', 'K'};
+//! UNBOND output (value 0): OP_RETURN with UNBOND_TAG | validator key (32) | amount (8) | sequence (4) | owner signature (65).
+inline constexpr unsigned char UNBOND_TAG[4]{0xDC, 'U', 'N', 'B'};
+
+/** A bond, as read from an output. */
+struct Bond {
+    uint256 pubkey;
+    //! The key that may unbond, and is paid what is unbonded (P2WPKH).
+    uint160 owner;
+    //! BIP340 signature by the validator key of BondPopHash(owner, genesis): no one bonds a key not theirs.
+    std::array<unsigned char, 64> pop{};
+    CAmount amount{0};
+};
+
+/** An unbond, as read from an output. */
+struct Unbond {
+    uint256 pubkey;
+    CAmount amount{0};
+    //! The validator's unbond_seq: an unbond counts once.
+    uint32_t sequence{0};
+    //! Signature of UnbondMessage by the owner key, in the format of signed messages.
+    std::vector<unsigned char> signature;
+};
+
+CScript BondScript(const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop);
+CScript UnbondScript(const Unbond& unbond);
+/** Whether a script claims to be a bond (or an unbond), well formed or not. */
+bool IsBondScript(const CScript& script);
+bool IsUnbondScript(const CScript& script);
+/** The bond of an output; nothing if it is not one or does not read. */
+std::optional<Bond> ParseBond(const CTxOut& out);
+std::optional<Unbond> ParseUnbond(const CTxOut& out);
+/** What the validator key signs to bond for `owner` on the chain of `genesis_hash`. */
+uint256 BondPopHash(const uint160& owner, const uint256& genesis_hash);
+bool CheckBondPop(const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop, const uint256& genesis_hash);
+/** The message the owner signs to unbond. */
+std::string UnbondMessage(const uint256& pubkey, CAmount amount, uint32_t sequence, const uint256& genesis_hash);
+
+} // namespace pos
+
+#endif // BITCOIN_POS_BOND_H

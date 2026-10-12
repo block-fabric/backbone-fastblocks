@@ -164,6 +164,7 @@ public:
         std::vector<std::pair<std::string, int>> drivechain_params{};
         //! FastBlocks: the fixed validator set of a regtest sidechain (-posvalidators).
         std::vector<Consensus::PosValidator> pos_validators{};
+        std::optional<int64_t> pos_seed_lookahead{};
     };
 
     struct MainNetOptions {

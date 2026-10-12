@@ -22,8 +22,6 @@
 
 namespace pos {
 
-class ValidatorSet;
-
 //! The P2P message that relays proofs that a leader signed two blocks for one slot.
 inline constexpr const char* MSG_EVIDENCE{"fbevidence"};
 //! Proofs a node keeps, at most: those of the oldest slots go first.
@@ -41,6 +39,10 @@ struct DoubleProposal {
     CBlockHeader b;
 
     SERIALIZE_METHODS(DoubleProposal, obj) { READWRITE(obj.a, obj.b); }
+    friend bool operator==(const DoubleProposal& x, const DoubleProposal& y)
+    {
+        return x.a.GetHash() == y.a.GetHash() && x.a.ext == y.a.ext && x.b.GetHash() == y.b.GetHash() && x.b.ext == y.b.ext;
+    }
 
     void Normalize();
     /** The slot of the first header. */
@@ -55,14 +57,19 @@ struct Offence {
 };
 
 /**
- * Check a proof against the validator set (context free: the set is the chain's).
+ * Check the form of a proof: two different headers of blocks of stake, of one slot, at its start.
  * Reasons: bad-pos-evidence-kind (not two headers of blocks of stake), bad-pos-evidence-slot (not
- * the start of one slot, both), bad-pos-evidence-same (one header twice), bad-pos-evidence-sig (not
- * both signed by the slot's leader).
+ * the start of one slot, both), bad-pos-evidence-same (one header twice).
+ */
+bool CheckEvidenceForm(const DoubleProposal& proof, const Consensus::PosParams& params, std::string& reason);
+
+/**
+ * Check a proof against the leader of its slot, `pubkey` (which the caller finds from the chain: the
+ * validator set and seed of the slot's epoch). Reasons: those of CheckEvidenceForm, and
+ * bad-pos-evidence-sig (not both signed by `pubkey`).
  * @return the offence; nothing, with `reason` set, if the proof is not one
  */
-std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const ValidatorSet& validators, const Consensus::PosParams& params,
-                                     const uint256& genesis_hash, std::string& reason);
+std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256& pubkey, const Consensus::PosParams& params, std::string& reason);
 
 /**
  * The proofs a node knows, one per offence, and the headers it saw signed, to make proofs of its

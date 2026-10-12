@@ -20,6 +20,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -322,6 +323,31 @@ public:
         std::vector<int> anchored_heights;
     };
     virtual std::optional<Anchors> getAnchors() { return std::nullopt; }
+
+    //! FastBlocks: the validators in the state of the active chain (bonds), and the staking parameters.
+    struct Bond {
+        uint256 pubkey;
+        //! The key hash that may unbond (P2WPKH); null for a genesis validator that never bonded.
+        uint160 owner;
+        CAmount bonded{0};
+        CAmount genesis_stake{0};
+        //! Unbonded, not paid yet: amount and the anchor it is paid at.
+        std::vector<std::pair<CAmount, uint64_t>> unbonds;
+        uint32_t unbond_seq{0};
+        bool eligible{false};
+        bool banned{false};
+        int64_t jailed_until_epoch{0};
+        //! Whether it is in the validator set of the current epoch.
+        bool in_set{false};
+    };
+    struct Staking {
+        CAmount min_stake{0};
+        uint64_t anchors{0};
+        std::vector<Bond> bonds;
+    };
+    virtual std::optional<Staking> getStaking() { return std::nullopt; }
+    //! FastBlocks: the proof of possession of a validator key this node's block producer holds, for a bond owned by `owner`.
+    virtual std::optional<std::array<unsigned char, 64>> signBondPop(const uint256& pubkey, const uint160& owner) { return std::nullopt; }
 
     //! Check if shutdown requested.
     virtual bool shutdownRequested() = 0;

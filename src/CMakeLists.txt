@@ -118,6 +118,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   compressor.cpp
   core_io.cpp
   sidechain/script.cpp
+  pos/bond.cpp
   drivechain/sidechain.cpp
   deploymentinfo.cpp
   external_signer.cpp
@@ -230,6 +231,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   pos/producer.cpp
   pos/protection.cpp
   pos/schedule.cpp
+  pos/staking.cpp
   sidechain/mainchain.cpp
   sidechain/mainclient.cpp
   sidechain/state.cpp
