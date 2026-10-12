@@ -461,7 +461,8 @@ bool State::ApplyTxSteps(const CTransaction& tx, int height, const Consensus::Si
             Remove(refund->withdrawal);
         }
     }
-    return true;
+    // The rules of the sidechain's own (none in the template).
+    return Hooks().ApplyTx(*this, tx, height, peg_step, payouts, reject_reason);
 }
 
 bool State::ConnectBlock(const CBlock& block, int height, const Consensus::SidechainParams& params, const Mainchain& mainchain,

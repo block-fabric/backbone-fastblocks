@@ -809,6 +809,16 @@ bool MemPoolAccept::DrivechainChecks(Workspace& ws)
                 }
             }
         }
+        // The rules of the sidechain's own, as the next block would apply them (none in the template),
+        // on an overlay that is dropped.
+        sidechain::StoreOverlay scratch{side.View(), /*journal=*/false};
+        sidechain::State scratch_state{scratch};
+        std::vector<CTxOut> payouts;
+        std::string reject_reason;
+        const int next_height{m_active_chainstate.m_chain.Height() + 1};
+        if (!sidechain::Hooks().ApplyTx(scratch_state, tx, next_height, /*peg_step=*/false, payouts, reject_reason)) {
+            return ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, reject_reason);
+        }
     }
 
     // The sidechains whose escrow this transaction touches.

@@ -144,6 +144,29 @@ struct OwedHooks : sidechain::ChainHooks {
     }
 };
 
+/**
+ * Hooks with transaction rules of their own: an output with the script OP_3 breaks them; one with
+ * OP_4 is noted under a table byte of their own (by its value) and owes its value back to OP_TRUE.
+ */
+const sidechain::Table<uint32_t, int64_t> NOTED_TABLE{0xF1};
+
+struct TxRulesHooks : sidechain::ChainHooks {
+    bool ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool, std::vector<CTxOut>& payouts, std::string& reject_reason) const override
+    {
+        for (const CTxOut& out : tx.vout) {
+            if (out.scriptPubKey == (CScript() << OP_4)) {
+                NOTED_TABLE.Put(state.Writable(), static_cast<uint32_t>(out.nValue), height);
+                payouts.emplace_back(out.nValue, CScript() << OP_TRUE);
+            }
+            if (out.scriptPubKey == (CScript() << OP_3)) {
+                reject_reason = "bad-test-output";
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
 /** Hooks that let blocks be at most a minute ahead of the clock. */
 struct NearTimeHooks : sidechain::ChainHooks {
     int64_t MaxFutureBlockTime() const override { return 60; }
@@ -311,6 +334,8 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     BOOST_CHECK(hooks.BeforePegStep(side, block, 1, *step, Params().GetConsensus().sidechain, owed_tx, reason));
     BOOST_CHECK(owed_tx.empty());
     BOOST_CHECK(hooks.AfterBlock(side, block, 1, step, /*minted=*/0, Params().GetConsensus().sidechain, reason));
+    BOOST_CHECK(hooks.ApplyTx(side, Tx({CTxOut{5, CScript() << OP_3}}), 1, /*peg_step=*/true, owed_tx, reason));
+    BOOST_CHECK(owed_tx.empty());
     BOOST_CHECK(store.Changes().empty());
 
     // Proof of work for every header.
@@ -609,6 +634,31 @@ BOOST_AUTO_TEST_CASE(template_refunds_anywhere)
     std::string reason;
     BOOST_CHECK(!state.ApplyTx(Tx({CTxOut{0, sidechain::RefundScript(request)}}), 1, params, payouts, reason, /*main_pending=*/false, /*peg_step=*/false));
     BOOST_CHECK_EQUAL(reason, "bad-sc-refund-unknown");
+}
+
+BOOST_AUTO_TEST_CASE(own_tx_rules)
+{
+    // The rules of a sidechain's own for a transaction come after the template's, all or nothing: a
+    // transaction that breaks them leaves neither its withdrawal nor anything they wrote, nor payouts.
+    InstallHooks installed{std::make_unique<TxRulesHooks>()};
+    const Consensus::SidechainParams& params{Params().GetConsensus().sidechain};
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay store{empty, /*journal=*/true};
+    sidechain::State state{store};
+    std::vector<CTxOut> payouts{CTxOut{1, CScript() << OP_2}};
+    std::string reason;
+    const CTransaction bad{Tx({WithdrawalOut(params.min_withdrawal + 1000), CTxOut{9, CScript() << OP_4}, CTxOut{0, CScript() << OP_3}})};
+    BOOST_CHECK(!state.ApplyTx(bad, 5, params, payouts, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-test-output");
+    BOOST_CHECK(store.Changes().empty());
+    BOOST_CHECK_EQUAL(payouts.size(), 1U);
+    // One that keeps them: its withdrawal, what they wrote, and what they owe.
+    const CTransaction good{Tx({WithdrawalOut(params.min_withdrawal + 1000), CTxOut{9, CScript() << OP_4}}, 0x78)};
+    BOOST_CHECK_MESSAGE(state.ApplyTx(good, 5, params, payouts, reason), reason);
+    BOOST_CHECK(state.GetWithdrawal(COutPoint{good.GetHash(), 0}));
+    BOOST_CHECK(NOTED_TABLE.Get(state.View(), 9) == std::optional<int64_t>{5});
+    BOOST_REQUIRE_EQUAL(payouts.size(), 2U);
+    BOOST_CHECK(payouts[1] == CTxOut(9, CScript() << OP_TRUE));
 }
 
 BOOST_AUTO_TEST_CASE(own_peg_actions)
