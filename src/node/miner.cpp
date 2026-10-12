@@ -337,6 +337,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         // As many of the payouts owed as a block may pay; the rest wait for the next block.
         side_outputs = side.TakePayouts(std::move(side_outputs), std::move(side_tx_outputs), peg_step ? sidechain::MAX_PAYOUTS_PER_BLOCK : 0);
         if (bundle_hash) side_outputs.emplace_back(0, sidechain::BundleCommitScript(*bundle_hash));
+        // A merged mined block: outputs of the sidechain's own (none in the template).
+        if (m_sidechain.peg == SidechainAssembly::Peg::BMM) {
+            const auto own{sidechain::Hooks().MergeMinedOutputs(side.View(), *pindexPrev, pblock->nTime)};
+            side_outputs.insert(side_outputs.end(), own.begin(), own.end());
+        }
         m_chainstate.ReleaseSideCursor();
     }
 

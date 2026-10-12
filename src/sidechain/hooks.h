@@ -46,6 +46,7 @@ namespace sidechain {
 class Follower;
 class Mainchain;
 class State;
+class StoreView;
 
 /** The kinds of blocks a chain can have. */
 enum class BlockKind : uint8_t {
@@ -54,6 +55,16 @@ enum class BlockKind : uint8_t {
     //! A block of a kind of the sidechain's own: its header is checked by ChainHooks::CheckHeader,
     //! and it has no proof of work.
     PLUGIN = 1,
+};
+
+/** What another extension than that of the header the node has is (ChainHooks::CheckOtherExtension). */
+enum class OtherExtension : uint8_t {
+    //! Not valid: the block is a mutated one.
+    INVALID,
+    //! As valid as the node's (another valid signature of the same block): the same block.
+    EQUIVALENT,
+    //! The node cannot tell yet.
+    UNKNOWN,
 };
 
 /**
@@ -104,6 +115,16 @@ public:
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
     virtual uint256 SectionsHash(std::span<const unsigned char> sections) const;
+    /**
+     * A block (or compact block) for an extended header the node has, `index`, with another extension:
+     * the block hash covers neither signature. By default INVALID: a mutated block (AcceptBlock,
+     * "bad-blk-extension"), which Bitcoin punishes. A chain whose signatures a signer can make twice
+     * for one block says EQUIVALENT when the other one is as valid: the block is then taken with the
+     * extension the node has (it keeps that one), the peer is not punished. UNKNOWN: the node cannot
+     * tell yet; the block is not taken ("blk-extension-unknown"), the peer not punished. Called with
+     * cs_main held.
+     */
+    virtual OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const;
     /**
      * How far ahead of the node's clock a block's time may be, in seconds (ContextualCheckBlockHeader,
      * "time-too-new", a header that may come later). By default Bitcoin's MAX_FUTURE_BLOCK_TIME. A chain
@@ -204,6 +225,15 @@ public:
     //
     // Block production and services
     //
+
+    /**
+     * Outputs of the sidechain's own that a block assembled with the template's peg actions (a merged
+     * mined block) puts in its coinbase, after the payouts and the bundle commitment: proofs its rules
+     * take, say. `view`: the state with the block as assembled so far; `prev` its parent and `time`
+     * its time. The rules check them as any other output of the coinbase. By default none. Called
+     * with cs_main held, by block assembly only.
+     */
+    virtual std::vector<CTxOut> MergeMinedOutputs(const StoreView& view, const CBlockIndex& prev, int64_t time) const;
 
     /**
      * Called by the Follower each round, once the record is up to date, in place of its own merged
