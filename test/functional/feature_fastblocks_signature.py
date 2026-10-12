@@ -8,7 +8,14 @@ A node that has the header of a block of stake turns away a block with that hash
 signature (another key's, or none) as a mutated block, whether it comes whole or as a compact
 block, without taking the header for invalid; the block its leader signed is taken after, and
 stays so through a -reindex.
+
+The producer signs deterministically (BIP340 with all-zero auxiliary randomness). Another valid
+signature of the leader over a block (made with other randomness) is the same block: a node that has
+the header with one takes the block with the other, keeps its own, and disconnects nobody; two nodes
+that hold the two stay together.
 """
+
+import os
 
 from decimal import Decimal
 
@@ -146,9 +153,46 @@ class FastBlocksSignatureTest(SidechainTest):
         assert_equal(n1.getblock(target, 0), honest.serialize().hex())
         assert_equal(n1.getblockheader(target)["confirmations"] > 0, True)
 
-        self.log.info("The nodes agree again")
+        self.log.info("The producer signs deterministically: BIP340 with all-zero auxiliary randomness")
+        height = n1.getblockheader(target)["height"]
+        self.wait_until(lambda: n0.getblockcount() >= height + 2, timeout=60)
+        honest2 = PosBlock(n0.getblock(n0.getblockhash(height + 1), 0))
+        honest3 = PosBlock(n0.getblock(n0.getblockhash(height + 2), 0))
+        for block in (honest, honest2, honest3):
+            assert_equal(bytes(block.header[112:176]), sign_schnorr(KEYS[0], TaggedHash("hpos/block", hash256(bytes(block.header[:112])))))
+
+        def resigned(block):
+            """The block with another valid signature of its leader: other auxiliary randomness."""
+            again = self.with_signature(block, sign_schnorr(KEYS[0], TaggedHash("hpos/block", hash256(bytes(block.header[:112]))), aux=os.urandom(32)))
+            assert again.header[112:176] != block.header[112:176]
+            return again
+        other2, other3 = resigned(honest2), resigned(honest3)
+
+        self.log.info("Another valid signature of the leader: the same block, taken, the node's own kept, no peer punished")
+        n1.submitheader(bytes(other2.header).hex())
+        peer = n1.add_p2p_connection(P2PInterface())
+        peer.send_and_ping(RawBlock(honest2.serialize()))
+        self.wait_until(lambda: n1.getbestblockhash() == honest2.hash, timeout=30)
+        assert_equal(n1.getblock(honest2.hash, 0), other2.serialize().hex())
+        # Again, as a compact block, and submitted: a duplicate, nothing changes, the peer stays.
+        peer.send_and_ping(msg_sendcmpct(announce=False, version=2))
+        peer.send_and_ping(RawCompactBlock(compact_block(honest2)))
+        peer.send_and_ping(RawBlock(honest2.serialize()))
+        assert peer.is_connected
+        assert_equal(n1.submitblock(honest2.serialize().hex()), "duplicate")
+        assert_equal(n1.getblock(honest2.hash, 0), other2.serialize().hex())
+        n1.disconnect_p2ps()
+
+        self.log.info("Two nodes holding two valid signatures of one block: no disconnect, no split")
+        n1.submitheader(bytes(other3.header).hex())
         self.connect_nodes(0, 1)
         self.wait_until(lambda: n0.getbestblockhash() == n1.getbestblockhash(), timeout=60)
+        assert_equal(n1.getblock(honest3.hash, 0), other3.serialize().hex())
+        assert_equal(n0.getblock(honest3.hash, 0), honest3.serialize().hex())
+        tip = n0.getblockcount()
+        self.wait_until(lambda: n0.getblockcount() >= tip + 3 and n0.getbestblockhash() == n1.getbestblockhash(), timeout=60)
+        assert_equal(len(n0.getpeerinfo()), 1)
+        assert_equal(len(n1.getpeerinfo()), 1)
 
 
 if __name__ == "__main__":

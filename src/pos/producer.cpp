@@ -262,7 +262,11 @@ std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAc
 
 bool Producer::Sign(CBlock& block, const CKey& key)
 {
-    return key.SignSchnorr(BlockSigHash(block), block.ext.sig, /*merkle_root=*/nullptr, GetRandHash());
+    // Deterministic: BIP340 with the auxiliary randomness all zero, so that the nonce depends on the
+    // key and the message alone (BIP340's own derivation). A block signed twice gets the same
+    // signature, and no peer holds a copy with another one. (The auxiliary randomness only guards the
+    // nonce against side channels on the signing machine; a validator key signs nothing else.)
+    return key.SignSchnorr(BlockSigHash(block), block.ext.sig, /*merkle_root=*/nullptr, uint256::ZERO);
 }
 
 std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)

@@ -160,6 +160,12 @@ public:
     bool PardonRecordFailures() const override { return true; }
     std::optional<int64_t> WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const override;
     uint256 SectionsHash(std::span<const unsigned char> sections) const override;
+    /**
+     * Another signature of the slot's leader over a block of stake the node has the header of is the
+     * same block: EQUIVALENT if both verify (the node keeps its own), UNKNOWN if the node cannot tell
+     * the leader yet, or did not check the one it has; INVALID otherwise.
+     */
+    sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override;
     int64_t MaxFutureBlockTime() const override;
 
     bool CustomChainOrder() const override { return true; }

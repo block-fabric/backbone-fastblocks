@@ -209,6 +209,28 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
 
 uint256 FastBlocksHooks::SectionsHash(std::span<const unsigned char> sections) const { return pos::SectionsHash(sections); }
 
+sidechain::OtherExtension FastBlocksHooks::CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    // (The block hash covers hashSections: only the signature can differ.)
+    if (!IsPosHeader(header) || !index.m_ext || !index.pprev || header.ext.hashSections != index.m_ext->hashSections) return sidechain::OtherExtension::INVALID;
+    const SlotLeader leader{LeaderOf(*index.pprev, SlotOf(header.nTime, m_params))};
+    switch (leader.status) {
+    case LeaderStatus::SET_UNKNOWN:
+    case LeaderStatus::SEED_UNKNOWN:
+        return sidechain::OtherExtension::UNKNOWN;
+    case LeaderStatus::INACTIVE:
+        return sidechain::OtherExtension::INVALID;
+    case LeaderStatus::OK:
+        break;
+    }
+    if (!CheckBlockSig(header, leader.pubkey)) return sidechain::OtherExtension::INVALID;
+    // A valid signature, and the node's own (taken before it knew the leader) is not known to be: the
+    // node cannot tell which block is the one to keep. No fault of the peer's.
+    if (!CheckBlockSig(index.GetBlockHeader(), leader.pubkey)) return sidechain::OtherExtension::UNKNOWN;
+    return sidechain::OtherExtension::EQUIVALENT;
+}
+
 int64_t FastBlocksHooks::MaxFutureBlockTime() const
 {
     // While the network has blocks of stake: from the start (genesis validators), or once the node saw an

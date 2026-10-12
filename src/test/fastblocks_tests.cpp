@@ -2748,4 +2748,69 @@ BOOST_AUTO_TEST_CASE(penalty_from_unbonding)
     BOOST_CHECK_EQUAL(stake.rewards_owed + stake.pot_reserve, 1000);
 }
 
+BOOST_FIXTURE_TEST_CASE(deterministic_signatures, FastBlocksSetup)
+{
+    // The producer signs a block the same way every time (BIP340, all-zero auxiliary randomness). A
+    // block with another valid signature of its leader (made with other randomness) is the same block:
+    // a node that has the header with one takes the block with the other, keeps its own, and the chain
+    // goes on (no mutated block, no peer punished, no split). Another key's signature stays a mutated block.
+    StartPos();
+    Take(PosBlock(1));
+    const CBlock honest{PosBlock(2)};
+    const int64_t slot{pos::SlotOf(honest.nTime, Pos())};
+    const CKey& leader{Leader(slot)};
+    CBlock again{honest};
+    again.ext.sig.fill(0);
+    BOOST_REQUIRE(pos::Producer::Sign(again, leader));
+    BOOST_CHECK(again.ext.sig == honest.ext.sig);
+    std::array<unsigned char, 64> zero_aux;
+    BOOST_REQUIRE(leader.SignSchnorr(pos::BlockSigHash(honest), zero_aux, nullptr, uint256::ZERO));
+    BOOST_CHECK(zero_aux == honest.ext.sig);
+
+    CBlock other{honest};
+    BOOST_REQUIRE(leader.SignSchnorr(pos::BlockSigHash(honest), other.ext.sig, nullptr, GetRandHash()));
+    BOOST_REQUIRE(other.ext.sig != honest.ext.sig && other.GetHash() == honest.GetHash());
+    BOOST_REQUIRE(pos::CheckBlockSig(other, XOnly(leader)));
+    CBlock swapped{honest};
+    BOOST_REQUIRE(pos::Producer::Sign(swapped, NotLeader(slot)));
+
+    // The node has the header with the other signature.
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(Chainman().ProcessNewBlockHeaders({{other}}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    const CBlockIndex* index{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index && index->m_ext->sig == other.ext.sig);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().CheckOtherExtension(honest, *index)) == sidechain::OtherExtension::EQUIVALENT);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().CheckOtherExtension(swapped, *index)) == sidechain::OtherExtension::INVALID);
+    // Another key's: a mutated block, as before.
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return Chainman().AcceptBlock(std::make_shared<const CBlock>(swapped), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+    }
+    // The producer's: taken, stored with the signature of the header the node had.
+    {
+        BlockValidationState state;
+        bool new_block{false};
+        BOOST_CHECK(WITH_LOCK(::cs_main, return Chainman().AcceptBlock(std::make_shared<const CBlock>(honest), state, nullptr, true, nullptr, &new_block, true)));
+        BOOST_CHECK(state.IsValid());
+        BOOST_CHECK(new_block);
+    }
+    Submit(honest);
+    BOOST_CHECK(Tip() == index);
+    BOOST_CHECK_EQUAL(Reason(honest), "");
+    CBlock read;
+    BOOST_REQUIRE(Chainman().m_blockman.ReadBlock(read, *index));
+    BOOST_CHECK(read.ext.sig == other.ext.sig);
+    // Either again: a duplicate, no failure.
+    for (const CBlock& block : {honest, other}) {
+        BlockValidationState state;
+        BOOST_CHECK(WITH_LOCK(::cs_main, return Chainman().AcceptBlock(std::make_shared<const CBlock>(block), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK(state.IsValid());
+    }
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !(index->nStatus & BLOCK_FAILED_VALID)));
+    // No proof that the leader signed twice: one block, one hash.
+    BOOST_CHECK(Hooks().Evidence().All().empty());
+    Take(PosBlock(3));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

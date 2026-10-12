@@ -70,7 +70,8 @@ until jailed or banned, with their stake as weight on top of what they bond.
 **PoS block**: an extended block of the template (`BLOCK_EXTENSION_BIT`). The
 header carries `hashSections` and a BIP340 signature by the leader of the slot
 over `TaggedHash("hpos/block", hash)`; the hash covers the 80 bytes and
-`hashSections`, not the signature. In the 80 bytes: `nTime` is the start of
+`hashSections`, not the signature. The producer signs deterministically (BIP340
+with all-zero auxiliary randomness): one block, one signature. In the 80 bytes: `nTime` is the start of
 the slot, `nBits` the chain's proof-of-work limit (a constant), and `nNonce`
 the mainchain height of the anchor the block acknowledges (0 if none). The
 sections hold the acknowledgement, if any.
@@ -139,7 +140,7 @@ Block (`CheckBlock`):
 | `nNonce` is the acknowledged height, 0 without one | `bad-pos-ack-nonce` |
 | Ticket version 1 | `bad-pos-ticket-version` |
 | The payee is a standard script of 80 bytes or less, not data | `bad-pos-ticket-payee` |
-| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed) | `bad-blk-extension` |
+| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; one the node cannot check yet (it cannot tell the leader, or did not check its own) is not taken, and not punished either (`blk-extension-unknown`) | `bad-blk-extension` |
 
 Acknowledgement (state):
 
@@ -403,8 +404,13 @@ Every FastBlocks functional test checks this on every node after every step
   each slot one of them leads, the node builds a PoS block on its best chain,
   with the acknowledgement of the first committed ticket it can carry, notes
   the slot in `validator_protection.dat` (synced to disk before signing),
-  signs and relays the block. It never signs at or below a slot it signed
-  before, and refuses to start if another node holds the key file's lock. It
+  signs and relays the block. It signs deterministically: BIP340 with the
+  auxiliary randomness all zero, so that the nonce comes from the key and the
+  message alone (BIP340's own derivation, as RFC 6979 does for ECDSA). A block
+  signed twice gets the same signature: no peer holds a copy of a block with
+  another one. (The auxiliary randomness guards the nonce against side
+  channels on the signing machine; a validator key signs nothing else.) It
+  never signs at or below a slot it signed before, and refuses to start if another node holds the key file's lock. It
   makes no block while it has a block of more work than its tip to connect; a
   header of more work alone does not stop it (a leader can sign a header that
   claims an acknowledgement and keep its block).
@@ -506,7 +512,7 @@ after every step:
 | `feature_fastblocks.py` | Validators, anchors, the fee split and pot, a withdrawal, slashing protection, BMM blocks with transactions when stalled |
 | `feature_fastblocks_rpc.py` | RPCs, the wallet's finality, tickets and evidence over P2P, a late observer |
 | `feature_fastblocks_partition.py` | A leader that signs twice; a partition with an anchor on each side (the earlier one wins); an anchor of a branch the validators left; IBD |
-| `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex` |
+| `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex`; the producer's signatures are deterministic; another valid signature of the leader is the same block (taken, the node's own kept, no peer disconnected; two nodes holding the two stay in sync) |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; an unbond paid unbonding_anchors anchors later |
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
@@ -600,6 +606,20 @@ Found and left as they are (decisions):
   (two epochs at most); each further proof costs 10 % of what is left.
 - The reporter's reward goes to the block that carries the proof: an offender
   that leads a slot after its offence gets 1/8 of its penalty back.
+
+## The decisions of 2026-10-12
+
+Each with a regression test (unit tests in `fastblocks_tests.cpp`, and the
+functional tests named).
+
+- Deterministic leader signatures (above): a leader could sign one block twice
+  with different random nonces, and a node that had the header with one
+  disconnected the peers that sent the block with the other
+  (`bad-blk-extension`). Now the producer signs each block one way, and
+  another valid signature of the leader over a block is the same block: the
+  node keeps its own, punishes nobody, and does not split
+  (`deterministic_signatures`, `feature_fastblocks_signature.py`).
+<!-- decisions-2026-10-12 -->
 
 ## Deviations from the design (phase 5)
 

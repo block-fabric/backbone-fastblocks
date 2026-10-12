@@ -92,7 +92,10 @@ public:
     static int64_t ProducerShare(int64_t fees, int64_t bps);
     /** Build the block of `slot` on the tip, with `ack` or not, and the proofs `evidence`, the fees split; not signed. */
     std::optional<CBlock> Build(int64_t slot, const std::optional<AnchorAck>& ack, std::string& error, const std::vector<DoubleProposal>& evidence = {}) const;
-    /** Sign a block with `key` (no slashing protection: for the producer, and tests). */
+    /**
+     * Sign a block with `key` (no slashing protection: for the producer, and tests), deterministically:
+     * BIP340 with all-zero auxiliary randomness. The same block always gets the same signature.
+     */
     static bool Sign(CBlock& block, const CKey& key);
 
     /**
