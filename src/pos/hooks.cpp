@@ -342,8 +342,10 @@ bool FastBlocksHooks::GetPegStep(const CBlock& block, const sidechain::Mainchain
     const CBlockIndex* anchored{WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ack.ticket.anchored))};
     if (!anchored) return Fail(reject_reason, "bad-pos-ack-anchored");
     // As if the block followed the mainchain up to the block before the commitment, with the bundle
-    // built from the block anchored: its withdrawals, its hash as the nonce.
-    step = sidechain::PegStep{.main_height = ack.main_height - 1, .nonce = anchored->GetBlockHash(), .max_withdrawal_height = anchored->nHeight};
+    // built from the block anchored: its withdrawals, its hash as the nonce, its height as the lock
+    // time and as the height a bundle failure counts from (design 4.3.4: every block that
+    // acknowledges the same anchor builds the same bundle, whatever its own height).
+    step = sidechain::PegStep{.main_height = ack.main_height - 1, .nonce = anchored->GetBlockHash(), .max_withdrawal_height = anchored->nHeight, .peg_height = anchored->nHeight};
     return true;
 }
 

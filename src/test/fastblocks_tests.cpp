@@ -1634,4 +1634,80 @@ BOOST_FIXTURE_TEST_CASE(swapped_signature, FastBlocksSetup)
     Take(PosBlock(3));
 }
 
+BOOST_FIXTURE_TEST_CASE(bundle_fixed_by_anchored_block, FastBlocksSetup)
+{
+    // Design 4.3.4: the bundle is the anchored block P's -- its withdrawals, its hash as the nonce,
+    // its height as the lock time -- whatever the height of the block Q that acknowledges the
+    // anchor: two branches that acknowledge the same one build the same bundle.
+    COutPoint coin;
+    const CTxOut spent{Fund(COIN, coin)};
+    StartPos();
+    const CMutableTransaction withdrawal{Spend(coin, spent, {CTxOut{COIN / 2, sidechain::WithdrawalScript(1000, key.GetPubKey().GetID(), script)},
+                                                             CTxOut{COIN / 2 - TX_FEE, script}})};
+    Accept(withdrawal);
+    Take(PosBlock(1));
+    Take(PosBlock(2));
+    const CBlockIndex* anchored{Tip()};
+    const pos::AnchorAck ack{Anchor(Ticket(anchored->GetBlockHash(), script))};
+    const auto bundle_of{[&](const CBlock& block) {
+        std::optional<uint256> found;
+        for (const CTxOut& out : block.vtx[0]->vout) {
+            if (const auto hash{sidechain::ParseBundleCommitScript(out.scriptPubKey)}) found = hash;
+        }
+        return found;
+    }};
+    // Branch 1: Q right on P.
+    const CBlock q1{PosBlock(3, ack)};
+    const auto bundle1{bundle_of(q1)};
+    BOOST_REQUIRE(bundle1);
+    Take(q1);
+    {
+        LOCK(::cs_main);
+        const auto pending{Chain().SideState().Bundle()};
+        BOOST_REQUIRE(pending);
+        BOOST_CHECK(pending->hash == *bundle1);
+        BOOST_CHECK_EQUAL(pending->height, anchored->nHeight);
+        BOOST_CHECK(pending->nonce == anchored->GetBlockHash());
+        BOOST_CHECK_EQUAL(Assert(Chain().SideState().BundleTx())->nLockTime, static_cast<uint32_t>(anchored->nHeight));
+    }
+    // The step the chain's rules give Q: P's height for the peg actions.
+    {
+        std::optional<sidechain::PegStep> step;
+        std::string reason;
+        BOOST_REQUIRE_MESSAGE(Hooks().GetPegStep(q1, Record(), step, reason), reason);
+        BOOST_REQUIRE(step);
+        BOOST_CHECK(step->peg_height == std::optional<int32_t>{anchored->nHeight});
+        BOOST_CHECK(step->max_withdrawal_height == std::optional<int32_t>{anchored->nHeight});
+    }
+    // Branch 2: a block of stake between P and Q.
+    CBlockIndex* q1_index{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(q1.GetHash()))};
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, q1_index));
+    }
+    BOOST_REQUIRE(Tip() == anchored);
+    Take(PosBlock(4));
+    const CBlock q2{PosBlock(5, ack)};
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Chain().m_chain.Height()) + 1, anchored->nHeight + 2);
+    BOOST_CHECK(bundle_of(q2) == bundle1);
+    // A Q that commits to the bundle built at its own height (as before) is refused.
+    {
+        const int q2_height{anchored->nHeight + 2};
+        const auto own{WITH_LOCK(::cs_main, return Chain().SideState().NextBundle(q2_height, anchored->GetBlockHash(), Chainman().GetConsensus().sidechain, nullptr, anchored->nHeight))};
+        BOOST_REQUIRE(own);
+        BOOST_CHECK_EQUAL(own->nLockTime, static_cast<uint32_t>(q2_height));
+        BOOST_REQUIRE(own->GetHash().ToUint256() != *bundle1);
+        CBlock own_height{q2};
+        SetCoinbase(own_height, [&](CMutableTransaction& coinbase) {
+            for (CTxOut& out : coinbase.vout) {
+                if (sidechain::ParseBundleCommitScript(out.scriptPubKey)) out.scriptPubKey = sidechain::BundleCommitScript(own->GetHash().ToUint256());
+            }
+        });
+        Resign(own_height);
+        BOOST_CHECK_EQUAL(Check(own_height), "bad-sc-bundle-hash");
+    }
+    Take(q2);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Chain().SideState().Bundle()->hash) == *bundle1);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

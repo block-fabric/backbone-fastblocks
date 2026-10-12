@@ -74,7 +74,11 @@ mainchain commits to `h* = TaggedHash("hpos/ticket", ticket)` through
 **Acknowledgement**: `{ticket, main height H}` in a PoS block Q. Q takes the
 peg actions there, as a BMM block does: the fee pot to the payee, deposits and
 bundle outcomes up to H − 1, a bundle of the withdrawals at or below P with P
-as its nonce, refunds, payouts.
+as its nonce and P's height as its lock time, refunds, payouts. The peg actions
+count at P's height (template hook `PegStep::peg_height`): a bundle failure Q
+sees is noted at P's height, and the retry delay counts from it. So every block
+that acknowledges the same anchor builds the same bundle, whatever its own
+height (design §4.3.4).
 
 **BMM block**: the template's. It anchors its parent, takes the peg actions,
 and its first coinbase output's script is paid the pot. It carries
@@ -370,6 +374,9 @@ What the audit of this round changed (each with a test):
   (`bad-blk-extension`): a node could otherwise store, and serve, a block
   of stake with another or no signature (template: `AcceptBlock`, compact
   blocks; a block stored so before is read with its header's signature).
+- The bundle is fixed by P: its lock time and the height a failure counts
+  from are P's (template hook `PegStep::peg_height`), not those of the
+  acknowledging block.
 
 ## Deviations from the design (phase 5)
 

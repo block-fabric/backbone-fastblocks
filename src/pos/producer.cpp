@@ -195,7 +195,8 @@ std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAc
         }
         sections.ack = ack;
         assembly.peg = node::SidechainAssembly::Peg::STEP;
-        assembly.step = sidechain::PegStep{.main_height = ack->main_height - 1, .nonce = anchored->GetBlockHash(), .max_withdrawal_height = anchored->nHeight};
+        // The bundle is P's (design 4.3.4): its withdrawals, its hash as the nonce, its height as the lock time.
+        assembly.step = sidechain::PegStep{.main_height = ack->main_height - 1, .nonce = anchored->GetBlockHash(), .max_withdrawal_height = anchored->nHeight, .peg_height = anchored->nHeight};
         assembly.sections = sections.Encode();
     } else {
         assembly.peg = node::SidechainAssembly::Peg::NONE;
