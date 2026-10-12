@@ -5,6 +5,7 @@
 #ifndef BITCOIN_POS_FINALITY_H
 #define BITCOIN_POS_FINALITY_H
 
+#include <kernel/cs_main.h>
 #include <sync.h>
 
 #include <cstddef>
