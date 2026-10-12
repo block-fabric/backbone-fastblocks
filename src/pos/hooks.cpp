@@ -101,13 +101,14 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
         return invalid("bad-pos-time", "a block of stake has the time its slot starts");
     }
     const int64_t slot{SlotOf(time, m_params)};
-    if (header.Time() > NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}) {
-        return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-time-future", "the slot of the block of stake has not started");
-    }
-    // The signature before anything that reads the chain: only a leader makes the node look further.
+    // The signature before anything that reads the chain, or keeps the header to try again later: only
+    // a leader makes the node look further.
     const auto leader{m_validators.Leader(slot, m_params, m_chain_params.GetConsensus().hashGenesisBlock)};
     if (!leader || !CheckBlockSig(header, m_validators.Validators()[*leader].pubkey)) {
         return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
+    }
+    if (header.Time() > NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}) {
+        return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-time-future", "the slot of the block of stake has not started");
     }
     // A second header the leader signed for this slot is the proof that it signed twice, whatever
     // else is wrong with it.

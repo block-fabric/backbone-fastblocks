@@ -90,8 +90,8 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | `nBits` is the proof-of-work limit | `bad-pos-bits` |
 | `nTime` is the start of a slot after the first block | `bad-pos-time` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
+| Signed by the slot's leader (checked before any rule that reads the chain, or lets the header wait) | `bad-pos-sig` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later | `pos-time-future` |
-| Signed by the slot's leader | `bad-pos-sig` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
 | An acknowledged height has a commitment on record; may come later | `pos-ack-unknown` |
 

@@ -546,6 +546,10 @@ BOOST_FIXTURE_TEST_CASE(header_rules, FastBlocksSetup)
         CBlock block{PosBlock(2)};
         Mock(block.nTime - Pos().max_future_seconds - 1);
         BOOST_CHECK_EQUAL(Check(block), "pos-time-future");
+        // Kept to try again later only if its leader signed it: not a header anyone can make.
+        CBlock unsigned_block{block};
+        unsigned_block.ext.sig[0] ^= 1;
+        BOOST_CHECK_EQUAL(Check(unsigned_block), "bad-pos-sig");
         Mock(block.nTime - Pos().max_future_seconds);
         BOOST_CHECK_EQUAL(Check(block), "");
     }
