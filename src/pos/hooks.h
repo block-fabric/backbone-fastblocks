@@ -42,6 +42,13 @@ inline constexpr size_t MAX_TICKETS{1000};
 inline constexpr size_t MAX_NOTED_ACKS{20000};
 //! Tickets the mainchain has not committed to that a node takes from one peer per mainchain block, at most.
 inline constexpr size_t MAX_PEER_TICKETS{8};
+/**
+ * How far ahead of the node's clock a block may be, in seconds, while blocks of stake are on (Bitcoin's
+ * two hours otherwise). BMM blocks with times far ahead would push the median time past ahead, and
+ * blocks of stake, whose time is that of their slot, must come after it: a bidder who wins a few BMM
+ * auctions in a row could stop them for two hours.
+ */
+inline constexpr int64_t MAX_FUTURE_BLOCK_TIME_POS{10 * 60};
 
 /**
  * What the state of the chain says about anchors, the fee pot and PoS blocks, after a block: one
@@ -102,6 +109,7 @@ public:
     bool IsWaitReason(const std::string& reject_reason) const override;
     std::optional<int64_t> WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const override;
     uint256 SectionsHash(std::span<const unsigned char> sections) const override;
+    int64_t MaxFutureBlockTime() const override;
 
     bool CustomChainOrder() const override { return true; }
     arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const override;

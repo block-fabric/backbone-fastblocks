@@ -180,6 +180,8 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
 
 uint256 FastBlocksHooks::SectionsHash(std::span<const unsigned char> sections) const { return pos::SectionsHash(sections); }
 
+int64_t FastBlocksHooks::MaxFutureBlockTime() const { return m_validators.Active() ? MAX_FUTURE_BLOCK_TIME_POS : ChainHooks::MaxFutureBlockTime(); }
+
 bool FastBlocksHooks::IsWaitReason(const std::string& reject_reason) const
 {
     // A BMM block the mainchain has not committed to yet; a block of stake whose slot has not started

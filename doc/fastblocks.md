@@ -90,6 +90,12 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
 | An acknowledged height has a commitment on record; may come later | `pos-ack-unknown` |
 
+While the network has validators, any block (a BMM block too) may be at most
+10 minutes ahead of the node's clock (`time-too-new`, Bitcoin's rule with two
+hours): BMM blocks far ahead would push the median time past, which a block of
+stake's slot must come after, ahead. Without validators, two hours, as the
+template.
+
 A header that may come later (`pos-time-future`, `pos-ack-unknown`, and
 `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
 headers, with the headers a peer sent after it; each is taken in once it and
@@ -204,7 +210,10 @@ the validators of the epoch and the newest anchors.
 
 `nChainWork` is `anchors · 2^96 + (2^32 − 1 − last commitment height) · 2^64 +
 height`: more anchors wins; with as many, the chain whose last anchor the
-mainchain committed to first; then the longer. An anchor always wins over any
+mainchain committed to first; then the longer. A BMM block's commitment height
+is the record's: when a reorg of the mainchain moves it, the follower takes the
+block back and checks it again, and its key (and that of every block on it) is
+computed anew. An anchor always wins over any
 number of PoS blocks. Two chains with the same anchors and the same last
 commitment share that anchor, so comparing heights is comparing PoS blocks
 since it.

@@ -1365,4 +1365,62 @@ BOOST_FIXTURE_TEST_CASE(false_evidence_misbehaves, FastBlocksSetup)
     BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
 }
 
+BOOST_FIXTURE_TEST_CASE(bmm_time_ahead, FastBlocksSetup)
+{
+    // A BMM block may be at most MAX_FUTURE_BLOCK_TIME_POS ahead of the clock while blocks of stake are
+    // on (not two hours): a run of them two hours ahead would push the median time past, which blocks
+    // of stake must come after, two hours ahead.
+    BOOST_CHECK_EQUAL(Hooks().MaxFutureBlockTime(), pos::MAX_FUTURE_BLOCK_TIME_POS);
+    StartPos();
+    const auto header_reason{[&](int64_t ahead) {
+        CBlock block{BmmBlock(/*use_mempool=*/false)};
+        block.nTime = static_cast<uint32_t>(GetTime() + ahead);
+        FinishBmm(block);
+        Commit(block.GetHash());
+        BlockValidationState state;
+        if (Chainman().ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state)) return std::string{};
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE);
+        return state.GetRejectReason();
+    }};
+    BOOST_CHECK_EQUAL(header_reason(pos::MAX_FUTURE_BLOCK_TIME_POS + 1), "time-too-new");
+    BOOST_CHECK_EQUAL(header_reason(pos::MAX_FUTURE_BLOCK_TIME_POS), "");
+}
+
+BOOST_FIXTURE_TEST_CASE(bmm_time_ahead_without_validators, NoValidatorsSetup)
+{
+    // Without blocks of stake the chain is the template's: two hours.
+    BOOST_CHECK_EQUAL(Hooks().MaxFutureBlockTime(), MAX_FUTURE_BLOCK_TIME);
+}
+
+BOOST_FIXTURE_TEST_CASE(moved_commitment, FastBlocksSetup)
+{
+    // The order of chains counts a BMM block as an anchor committed at the height its commitment has
+    // on the record. A reorg of the mainchain that moves the commitment to another height (the
+    // follower takes the block back and checks it again) moves it in the key too: else nodes that saw
+    // it before the reorg and nodes that saw it after would order chains differently.
+    StartPos();
+    Take(PosBlock(1));
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    MineBmm(bmm);
+    const int committed_at{Record().Height()};
+    BOOST_CHECK_EQUAL(Key().last_anchor_height, static_cast<uint32_t>(committed_at));
+    // The mainchain drops the block that committed to it, and commits to it again one block later.
+    Record().Truncate(committed_at - 1);
+    Main();
+    Commit(bmm.GetHash());
+    BOOST_REQUIRE_EQUAL(Record().Height(), committed_at + 1);
+    CBlockIndex* index{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(bmm.GetHash()))};
+    BlockValidationState state;
+    BOOST_REQUIRE(Chain().InvalidateBlock(state, index, /*by_record=*/true));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chain().ReconsiderRecordFailure(index)));
+    BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    BOOST_REQUIRE(Tip() == index);
+    BOOST_CHECK_EQUAL(Key().last_anchor_height, static_cast<uint32_t>(committed_at + 1));
+    // As a node that never saw it at the old height computes it.
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().ChainWork(index->pprev, index->GetBlockHeader())) == index->nChainWork);
+    // And blocks on it follow.
+    Take(PosBlock(2));
+    BOOST_CHECK_EQUAL(Key().last_anchor_height, static_cast<uint32_t>(committed_at + 1));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
