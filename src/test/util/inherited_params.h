@@ -20,6 +20,9 @@ inline Consensus::Params WithInheritedRules(Consensus::Params params)
     params.sidechain.enabled = false;
     params.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     params.fPowNoRetargeting = false;
+    // FastBlocks counts a block a slot (30 s); the mainchain's blocks come every minute.
+    params.nPowTargetSpacing = 60;
+    params.nPowTargetTimespan = 2016 * params.nPowTargetSpacing;
     return params;
 }
 
