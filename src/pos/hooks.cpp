@@ -452,8 +452,12 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
     const int64_t slot{SlotOf(block.nTime, m_params)};
     const bool pos_block{IsPosHeader(block) || !block.vSections.empty()};
     const int64_t earliest{pos_block ? slot : std::max<int64_t>(0, slot - MAX_FUTURE_BLOCK_TIME / m_params.slot_seconds)};
+    // The anchor's slot, for the epochs whose set it makes (SetFor): not before the median time of the
+    // mainchain block that committed to it (AnchorSlot), which whoever makes the block cannot set back.
+    int64_t anchor_slot{slot};
+    if (const auto main{chainman->m_mainchain ? chainman->m_mainchain->GetBlock(main_height) : std::nullopt}) anchor_slot = std::max(anchor_slot, SlotOf(main->time, m_params));
     std::vector<CTxOut> staking_owed;
-    const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, slot, EpochOf(earliest, m_params), staking_owed)};
+    const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, anchor_slot, EpochOf(earliest, m_params), staking_owed)};
     if (staked.set_active) m_staking_seen = true;
     const int64_t paid_out{pay + staked.release};
     if (paid_out > 0) owed_tx.emplace_back(paid_out, payee);
@@ -614,6 +618,17 @@ std::shared_ptr<const ValidatorSet> FastBlocksHooks::AnchorSetOf(const uint256& 
     return set;
 }
 
+int64_t FastBlocksHooks::AnchorSlot(const CBlockIndex& anchor) const
+{
+    int64_t time{anchor.nTime};
+    if (const ChainstateManager* chainman{Chainman()}; chainman && chainman->m_mainchain) {
+        const sidechain::Mainchain& record{*chainman->m_mainchain};
+        const auto height{anchor.m_ext ? std::optional<int>{static_cast<int>(anchor.nNonce)} : record.BmmHeight(anchor.GetBlockHash())};
+        if (const auto main{height ? record.GetBlock(*height) : std::nullopt}) time = std::max<int64_t>(time, main->time);
+    }
+    return SlotOf(time, m_params);
+}
+
 std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view, uint64_t* set_anchors) const
 {
     AssertLockHeld(::cs_main);
@@ -626,7 +641,7 @@ std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& p
             return std::shared_ptr<const ValidatorSet>{std::shared_ptr<const ValidatorSet>{}, &m_genesis_set};
         }
         const bool anchor{!index->m_ext || index->nNonce != 0};
-        if (!anchor || SlotOf(index->nTime, m_params) >= boundary) continue;
+        if (!anchor || SlotOf(index->nTime, m_params) >= boundary || AnchorSlot(*index) >= boundary) continue;
         if (view) return AnchorSetOf(index->GetBlockHash(), *view, set_anchors, /*from_state=*/true);
         ChainstateManager* chainman{Chainman()};
         if (!chainman) return nullptr;

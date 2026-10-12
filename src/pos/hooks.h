@@ -118,8 +118,16 @@ public:
         uint256 seed;
     };
     /**
+     * The slot of an anchor, for the epochs whose set it makes: of its time, or of the median time of
+     * the mainchain block that committed to it (from the record) if that is later. A block's time can
+     * be set back as far as the median time of the chain before it, which a merged miner that makes
+     * every block after a stall controls: as the slot of an anchor, it would let one fix the set of an
+     * epoch whose seed is known already (stake grinding). Called with cs_main held.
+     */
+    int64_t AnchorSlot(const CBlockIndex& anchor) const;
+    /**
      * The validator set of `epoch` for a block on top of `prev`: the one the newest anchor at or below
-     * `prev` whose slot is before the epoch before `epoch` made (none: the genesis set). nullptr if this
+     * `prev` whose slot (AnchorSlot) is before the epoch before `epoch` made (none: the genesis set). nullptr if this
      * node does not know it: the anchor is on a branch whose blocks it has not connected. `view`: the
      * state of the chain of `prev`, to read the set from (that state alone); none: the sets this node
      * read before, or else the active chain's state (for headers). Called with cs_main held.

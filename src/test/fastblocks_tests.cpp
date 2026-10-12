@@ -2660,4 +2660,35 @@ BOOST_FIXTURE_TEST_CASE(seed_moved_state_connected_again, SeedSetup)
     BOOST_CHECK(liveness() == original);
 }
 
+BOOST_FIXTURE_TEST_CASE(anchor_slot_from_the_commitment, FastBlocksSetup)
+{
+    // A BMM block whose time is set back (as far as the median time of the chain allows: after a
+    // stall, to before an epoch whose seed is known already) does not make the set of the epochs
+    // after its time, but of those after the median time of the mainchain block that committed to it.
+    // Otherwise whoever makes it could bond, see the seed, and then fix the set (stake grinding).
+    StartPos();
+    Take(PosBlock(1));
+    const int64_t spe{Pos().slots_per_epoch};
+    const int64_t later{Slot(static_cast<int>(3 * spe))};
+    CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    bmm.nTime = WITH_LOCK(::cs_main, return Tip()->GetMedianTimePast()) + 1;
+    FinishBmm(bmm);
+    MineBmm(bmm);
+    const auto entry{pos::GetAnchorSet(ActiveView(), bmm.GetHash())};
+    BOOST_REQUIRE(entry);
+    BOOST_CHECK_EQUAL(entry->slot, later);
+    BOOST_CHECK_EQUAL(entry->anchors, 2U);
+    // The epoch whose set an anchor of the block's time would make: the earlier anchor's set.
+    const int64_t epoch{pos::EpochOf(pos::SlotOf(bmm.nTime, Pos()), Pos()) + 2};
+    BOOST_REQUIRE(pos::EpochOf(later, Pos()) >= epoch - 1);
+    uint64_t set_anchors{0};
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), epoch, nullptr, &set_anchors)));
+    BOOST_CHECK_EQUAL(set_anchors, 1U);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), epoch, &ActiveView(), &set_anchors)));
+    BOOST_CHECK_EQUAL(set_anchors, 1U);
+    // Its own: from the epoch after the next of its commitment.
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), pos::EpochOf(later, Pos()) + 2, nullptr, &set_anchors)));
+    BOOST_CHECK_EQUAL(set_anchors, 2U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
