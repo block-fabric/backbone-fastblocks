@@ -11,13 +11,18 @@
 //  - pos_evidence: a proof is an offence exactly when two different headers of one slot are signed
 //    by its leader, whichever comes first, and the pool of proofs stays bounded;
 //  - pos_state: a chain of blocks of stake, acknowledgements, BMM blocks, deposits, payments and
-//    withdrawals, built by the producer and the template from fuzzed choices: the state agrees with
-//    the chain key, the coins of the chain are the deposits (pegbalance), and taking blocks back and
-//    connecting them again comes back to the same state.
+//    withdrawals, bonds, unbonds and leaders that sign twice (and the proofs that punish them), built
+//    by the producer and the template from fuzzed choices: the state agrees with the chain key, the
+//    totals of staking with its validators, the coins of the chain are the deposits (pegbalance), and
+//    taking blocks back and connecting them again comes back to the same state.
+//  - pos_staking: the staking rules alone on a state (bonds, unbonds, peg steps, liveness, penalties)
+//    with fuzzed parameters: every coin bonded is bonded, unbonding, in the reserve, owed to a
+//    reporter or paid out; the totals agree with the validators; the journal takes each step back.
 
 #include <addresstype.h>
 #include <chain.h>
 #include <chainparams.h>
+#include <common/signmessage.h>
 #include <consensus/amount.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
@@ -35,6 +40,7 @@
 #include <pos/producer.h>
 #include <pos/protection.h>
 #include <pos/schedule.h>
+#include <pos/staking.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -87,6 +93,21 @@ uint256 XOnly(const CKey& key)
 {
     const XOnlyPubKey xonly{key.GetPubKey()};
     return uint256{std::span<const unsigned char>{xonly.begin(), xonly.end()}};
+}
+
+/** Keys that are no genesis validators: they take part by bonding. */
+std::vector<CKey> BondingKeys()
+{
+    std::vector<CKey> keys;
+    for (uint8_t i{1}; i <= 2; ++i) {
+        std::vector<unsigned char> secret(32, 0);
+        secret[0] = 0x22;
+        secret[31] = i;
+        CKey key;
+        key.Set(secret.begin(), secret.end(), /*fCompressedIn=*/true);
+        keys.push_back(key);
+    }
+    return keys;
 }
 
 //! The x-only keys of ValidatorKeys (known before any secp256k1 context exists).
@@ -428,7 +449,11 @@ struct FastChain {
     std::unique_ptr<const CChainParams> params{FastParams()};
     std::unique_ptr<TestingSetup> setup;
     std::unique_ptr<pos::Producer> producer;
-    std::vector<CKey> keys{ValidatorKeys()};
+    std::vector<CKey> keys{[] {
+        auto all{ValidatorKeys()};
+        for (const CKey& k : BondingKeys()) all.push_back(k);
+        return all;
+    }()};
     CKey key;
     CScript script;
     int64_t slot{0};
@@ -549,7 +574,120 @@ struct FastChain {
         std::map<COutPoint, Coin> spent_coins{{outpoint, Coin{spent, 1, /*fCoinBaseIn=*/false}}};
         std::map<int, bilingual_str> errors;
         if (!SignTransaction(tx, &keystore, spent_coins, SignOptions{.sighash_type = SIGHASH_ALL}, errors)) return;
-        WITH_LOCK(::cs_main, Chainman().ProcessTransaction(MakeTransactionRef(tx)));
+        (void)WITH_LOCK(::cs_main, return Chainman().ProcessTransaction(MakeTransactionRef(tx)));
+    }
+
+    /** A transaction spending a coin of `key`, with these outputs (taking their value from it) and the change; nothing if no coin pays for it. */
+    std::optional<CMutableTransaction> Spend(FuzzedDataProvider& fdp, std::vector<CTxOut> outputs)
+    {
+        if (coins.empty()) return std::nullopt;
+        auto it{coins.begin()};
+        std::advance(it, fdp.ConsumeIntegralInRange<size_t>(0, coins.size() - 1));
+        const auto [outpoint, spent]{*it};
+        const CAmount fee{10000};
+        CAmount left{spent.nValue - fee};
+        for (const CTxOut& o : outputs) left -= o.nValue;
+        if (left < 0) return std::nullopt;
+        CMutableTransaction tx;
+        tx.vin.emplace_back(outpoint);
+        tx.vout = std::move(outputs);
+        if (left > 0) tx.vout.emplace_back(left, script);
+        FillableSigningProvider keystore;
+        keystore.AddKey(key);
+        std::map<COutPoint, Coin> spent_coins{{outpoint, Coin{spent, 1, /*fCoinBaseIn=*/false}}};
+        std::map<int, bilingual_str> errors;
+        if (!SignTransaction(tx, &keystore, spent_coins, SignOptions{.sighash_type = SIGHASH_ALL}, errors)) return std::nullopt;
+        return tx;
+    }
+
+    uint256 Genesis() { return Chainman().GetConsensus().hashGenesisBlock; }
+
+    /** A bond of a fuzzed amount to one of the keys, owned by `key` (or, rarely, signed by the wrong key). */
+    void Bond(FuzzedDataProvider& fdp)
+    {
+        const CKey& validator{keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)]};
+        const uint160 owner{key.GetPubKey().GetID()};
+        std::array<unsigned char, 64> pop;
+        const CKey& signer{fdp.ConsumeIntegralInRange<int>(0, 15) == 0 ? keys[0] : validator};
+        if (!signer.SignSchnorr(pos::BondPopHash(owner, Genesis()), pop, nullptr, uint256{})) return;
+        const CAmount amount{fdp.ConsumeIntegralInRange<CAmount>(1, 2 * Hooks().Params().min_stake + 1000)};
+        if (const auto tx{Spend(fdp, {CTxOut{amount, pos::BondScript(XOnly(validator), owner, pop)}})}) {
+            (void)WITH_LOCK(::cs_main, return Chainman().ProcessTransaction(MakeTransactionRef(*tx)));
+        }
+    }
+
+    /** An unbond of part or all of what a key has bonded (or a fuzzed amount, or sequence). */
+    void Unbond(FuzzedDataProvider& fdp)
+    {
+        const CKey& validator{keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)]};
+        const auto record{WITH_LOCK(::cs_main, return pos::GetValidator(Chain().SideCache(), XOnly(validator)))};
+        if (!record || record->bonded <= 0) return;
+        pos::Unbond unbond;
+        unbond.pubkey = XOnly(validator);
+        switch (fdp.ConsumeIntegralInRange<int>(0, 3)) {
+        case 0: unbond.amount = record->bonded; break;
+        case 1: unbond.amount = std::max<CAmount>(1, record->bonded - Hooks().Params().min_stake); break;
+        default: unbond.amount = fdp.ConsumeIntegralInRange<CAmount>(1, record->bonded + 1);
+        }
+        unbond.sequence = record->unbond_seq + (fdp.ConsumeIntegralInRange<int>(0, 15) == 0);
+        if (!key.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, Genesis())), unbond.signature)) return;
+        if (const auto tx{Spend(fdp, {CTxOut{0, pos::UnbondScript(unbond)}})}) {
+            (void)WITH_LOCK(::cs_main, return Chainman().ProcessTransaction(MakeTransactionRef(*tx)));
+        }
+    }
+
+    /**
+     * The leader of a later slot signs two blocks for it: one is taken (or not), and the proof is
+     * known, for the producer to put in a block.
+     */
+    void SignTwice(FuzzedDataProvider& fdp, int skip)
+    {
+        slot += skip;
+        SetMockTime(std::chrono::seconds{pos::SlotTime(slot, Hooks().Params())});
+        const auto leader{Hooks().ActiveLeaderOf(slot)};
+        if (leader.status != pos::FastBlocksHooks::LeaderStatus::OK) return;
+        const CKey* signer{nullptr};
+        for (const CKey& k : keys) {
+            if (XOnly(k) == leader.pubkey) signer = &k;
+        }
+        if (!signer) return;
+        std::string error;
+        auto first{producer->Build(slot, std::nullopt, error)};
+        if (!first) return;
+        CBlock second{*first};
+        CMutableTransaction coinbase{*second.vtx[0]};
+        coinbase.vout.emplace_back(0, CScript() << OP_RETURN << fdp.ConsumeIntegral<uint8_t>());
+        second.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        node::RegenerateCommitments(second, Chainman());
+        if (!pos::Producer::Sign(*first, *signer) || !pos::Producer::Sign(second, *signer)) return;
+        if (fdp.ConsumeBool()) Submit(*first);
+        std::string reason;
+        Hooks().AddEvidence({.a = *first, .b = second}, reason);
+    }
+
+    /** The totals of staking agree with its validators and its queue of unbonds; none is negative. */
+    void CheckStake()
+    {
+        LOCK(::cs_main);
+        const sidechain::StoreView& view{Chain().SideCache()};
+        const pos::StakeState stake{pos::GetStakeState(view)};
+        assert(stake.bonded >= 0 && stake.unbonding >= 0 && stake.pot_reserve >= 0 && stake.rewards_owed >= 0 && stake.slashed >= 0);
+        CAmount bonded{0}, unbonding{0}, queued{0};
+        pos::ForEachValidator(view, [&](const uint256&, const pos::ValidatorRecord& record) {
+            assert(record.bonded >= 0);
+            for (const pos::UnbondingEntry& entry : record.unbonding) assert(entry.amount > 0);
+            assert(!record.tombstoned || record.bonded == 0);
+            bonded += record.bonded;
+            unbonding += record.Unbonding();
+            return true;
+        });
+        pos::ForEachUnbonding(view, [&](uint64_t, const uint256&, CAmount amount) {
+            assert(amount > 0);
+            queued += amount;
+            return true;
+        });
+        assert(bonded == stake.bonded);
+        assert(unbonding == stake.unbonding && queued == stake.unbonding);
     }
 
     /** The coins of the chain against the deposits the state acted on (no fee is left unclaimed here). */
@@ -570,6 +708,9 @@ struct FastChain {
         const pos::FastState fast{pos::GetFastState(Chain().SideState().View())};
         assert(0 <= fast.pot_paid && fast.pot_paid <= fast.pot_accrued);
         total += fast.pot_accrued - fast.pot_paid;
+        // Staking: coins bonded, unbonding, penalties in the reserve, rewards owed.
+        const pos::StakeState stake{pos::GetStakeState(Chain().SideState().View())};
+        total += stake.bonded + stake.unbonding + stake.pot_reserve + stake.rewards_owed;
         CAmount deposited{0};
         for (int h{0}; h <= side.MainHeight(); ++h) {
             const auto block{Record().GetBlock(h)};
@@ -604,11 +745,28 @@ FUZZ_TARGET(pos_state)
     SeedRandomStateForTest(SeedRand::ZEROS);
     FuzzedDataProvider fdp{buffer.data(), buffer.size()};
     FastChain chain;
-    // A BMM block first, so that the chain has an anchor point.
+    // A BMM block first, so that the chain has an anchor point; it pays a deposit to the key, for
+    // payments, bonds and unbonds.
+    chain.Main([&](sidechain::MainBlock& block) {
+        sidechain::MainDeposit deposit;
+        deposit.destination = EncodeDestination(WitnessV0KeyHash{chain.key.GetPubKey()});
+        deposit.amount = 10 * COIN;
+        deposit.txid = uint256{0xde};
+        block.deposits.push_back(deposit);
+    });
     chain.Bmm(/*use_mempool=*/false);
-    LIMITED_WHILE(fdp.ConsumeBool(), 40)
+    LIMITED_WHILE(fdp.ConsumeBool(), 60)
     {
-        switch (fdp.ConsumeIntegralInRange<int>(0, 7)) {
+        switch (fdp.ConsumeIntegralInRange<int>(0, 10)) {
+        case 8:
+            chain.Bond(fdp);
+            break;
+        case 9:
+            chain.Unbond(fdp);
+            break;
+        case 10:
+            chain.SignTwice(fdp, fdp.ConsumeIntegralInRange<int>(1, 4));
+            break;
         case 0:
         case 1:
             // A block of stake, at a later slot (with the acknowledgement of a committed ticket, if one is due).
@@ -662,6 +820,201 @@ FUZZ_TARGET(pos_state)
         }
         }
         chain.CheckKey();
+        chain.CheckStake();
     }
     chain.CheckPegBalance();
+}
+
+namespace {
+void initialize_staking()
+{
+    static const auto testing_setup{MakeNoLogFileContext<>()};
+}
+} // namespace
+
+FUZZ_TARGET(pos_staking, .init = initialize_staking)
+{
+    FuzzedDataProvider fdp{buffer.data(), buffer.size()};
+    // Small parameters, fuzzed within what the networks could set.
+    Consensus::PosParams params;
+    params.slots_per_epoch = fdp.ConsumeIntegralInRange<int64_t>(1, 8);
+    params.min_active_validators = fdp.ConsumeIntegralInRange<uint32_t>(0, 3);
+    params.max_validators = fdp.ConsumeIntegralInRange<uint32_t>(0, 4);
+    params.min_stake = fdp.ConsumeIntegralInRange<int64_t>(1, 1000);
+    params.unbonding_anchors = fdp.ConsumeIntegralInRange<int64_t>(1, 8);
+    params.evidence_window_anchors = fdp.ConsumeIntegralInRange<int64_t>(0, params.unbonding_anchors - 1);
+    params.slash_bps = fdp.ConsumeIntegralInRange<int64_t>(0, 10000);
+    params.reporter_share_divisor = fdp.ConsumeIntegralInRange<int64_t>(0, 16);
+    params.liveness_min_bps = fdp.ConsumeIntegralInRange<int64_t>(0, 10000);
+    params.liveness_min_assigned = fdp.ConsumeIntegralInRange<int64_t>(0, 5);
+    params.jail_epochs = fdp.ConsumeIntegralInRange<int64_t>(0, 3);
+    params.pot_reserve_anchors = fdp.ConsumeIntegralInRange<int64_t>(0, 5);
+    static const std::vector<CKey> keys{[] {
+        auto all{ValidatorKeys()};
+        for (const CKey& k : BondingKeys()) all.push_back(k);
+        return all;
+    }()};
+    // Owners: two keys.
+    static const std::vector<CKey> owners{[] {
+        std::vector<CKey> all;
+        for (uint8_t i{1}; i <= 2; ++i) {
+            std::vector<unsigned char> secret(32, 0x33);
+            secret[31] = i;
+            CKey key;
+            key.Set(secret.begin(), secret.end(), /*fCompressedIn=*/true);
+            all.push_back(key);
+        }
+        return all;
+    }()};
+    const int genesis_count{fdp.ConsumeIntegralInRange<int>(0, 2)};
+    for (int i{0}; i < genesis_count; ++i) params.genesis_validators.push_back({.pubkey = XOnly(keys[i]), .stake = fdp.ConsumeIntegralInRange<int64_t>(1, 100)});
+    const uint256 genesis{1};
+    const pos::Staking staking{params, genesis};
+
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay state{empty, /*journal=*/true};
+    // Coins that came into staking (bonds) and that went out (payouts, the reserve's shares).
+    CAmount in{0}, out{0};
+    uint64_t anchors{0};
+    int64_t slot{0};
+    const auto check{[&]() {
+        const pos::StakeState stake{pos::GetStakeState(state)};
+        assert(stake.bonded >= 0 && stake.unbonding >= 0 && stake.pot_reserve >= 0 && stake.rewards_owed >= 0 && stake.slashed >= 0);
+        assert(in == out + stake.bonded + stake.unbonding + stake.pot_reserve + stake.rewards_owed);
+        CAmount bonded{0}, unbonding{0}, queued{0};
+        pos::ForEachValidator(state, [&](const uint256&, const pos::ValidatorRecord& record) {
+            assert(record.bonded >= 0);
+            assert(!record.tombstoned || (record.bonded == 0 && !record.Eligible(params)));
+            for (const pos::UnbondingEntry& entry : record.unbonding) assert(entry.amount > 0);
+            bonded += record.bonded;
+            unbonding += record.Unbonding();
+            return true;
+        });
+        pos::ForEachUnbonding(state, [&](uint64_t release, const uint256&, CAmount amount) {
+            assert(amount > 0 && release > anchors);
+            queued += amount;
+            return true;
+        });
+        assert(bonded == stake.bonded && unbonding == stake.unbonding && queued == stake.unbonding);
+        // A set: at most max_validators, none banned or jailed, the largest weights.
+        const int64_t epoch{pos::EpochOf(slot, params)};
+        const pos::ValidatorSet set{staking.MakeSet(state, epoch)};
+        assert(set.Validators().size() <= params.max_validators);
+        for (const Consensus::PosValidator& validator : set.Validators()) {
+            const auto record{pos::GetValidator(state, validator.pubkey)};
+            assert(record && record->Eligible(params) && record->jailed_until_epoch <= epoch && record->Weight() == validator.stake);
+        }
+    }};
+    LIMITED_WHILE(fdp.ConsumeBool(), 200)
+    {
+        const uint256 before{sidechain::StoreHash(state)};
+        const CAmount in_before{in}, out_before{out};
+        const uint64_t anchors_before{anchors};
+        // Each step on an overlay of its own, kept if it keeps the rules (as the state does).
+        sidechain::StoreOverlay step{static_cast<const sidechain::StoreView&>(state)};
+        bool kept{true};
+        switch (fdp.ConsumeIntegralInRange<int>(0, 4)) {
+        case 0: {
+            // A transaction of bonds and unbonds.
+            CMutableTransaction tx;
+            CAmount bonding{0};
+            LIMITED_WHILE(fdp.ConsumeBool(), 3)
+            {
+                const CKey& validator{keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)]};
+                const CKey& owner{owners[fdp.ConsumeIntegralInRange<size_t>(0, owners.size() - 1)]};
+                if (fdp.ConsumeBool()) {
+                    const uint160 owner_hash{owner.GetPubKey().GetID()};
+                    std::array<unsigned char, 64> pop;
+                    const CKey& signer{fdp.ConsumeIntegralInRange<int>(0, 15) == 0 ? keys[0] : validator};
+                    assert(signer.SignSchnorr(pos::BondPopHash(owner_hash, genesis), pop, nullptr, uint256{}));
+                    const CAmount amount{fdp.ConsumeBool() ? fdp.ConsumeIntegralInRange<CAmount>(-1, 3 * params.min_stake) : fdp.ConsumeIntegral<CAmount>()};
+                    tx.vout.emplace_back(amount, pos::BondScript(XOnly(validator), owner_hash, pop));
+                    bonding += amount > 0 && MoneyRange(amount) ? amount : 0;
+                } else {
+                    const auto record{pos::GetValidator(step, XOnly(validator))};
+                    pos::Unbond unbond;
+                    unbond.pubkey = XOnly(validator);
+                    unbond.amount = fdp.ConsumeBool() && record ? record->bonded : fdp.ConsumeIntegralInRange<CAmount>(0, 3 * params.min_stake);
+                    unbond.sequence = (record ? record->unbond_seq : 0) + fdp.ConsumeIntegralInRange<uint32_t>(0, 1);
+                    assert(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, genesis)), unbond.signature));
+                    tx.vout.emplace_back(fdp.ConsumeIntegralInRange<int>(0, 15) == 0 ? 1 : 0, pos::UnbondScript(unbond));
+                }
+            }
+            std::string reason;
+            kept = staking.ApplyTx(step, CTransaction{tx}, fdp.ConsumeIntegralInRange<int>(0, 1000), anchors, reason);
+            assert(kept || !reason.empty());
+            // (A bond counted, if the transaction is: one that does not read or count fails it.)
+            if (kept) in += bonding;
+            break;
+        }
+        case 1: {
+            // An anchor's peg step.
+            ++anchors;
+            slot += fdp.ConsumeIntegralInRange<int64_t>(0, 3 * params.slots_per_epoch);
+            const int64_t epoch{std::max<int64_t>(0, pos::EpochOf(slot, params) - fdp.ConsumeIntegralInRange<int64_t>(0, 1))};
+            std::vector<CTxOut> owed;
+            const auto result{staking.PegStep(step, ArithToUint256(arith_uint256{anchors}), anchors, slot, epoch, owed)};
+            assert(result.release >= 0);
+            out += result.release;
+            for (const CTxOut& o : owed) {
+                assert(o.nValue >= 0);
+                out += o.nValue;
+            }
+            const auto entry{pos::GetAnchorSet(step, ArithToUint256(arith_uint256{anchors}))};
+            assert(entry && entry->anchors == anchors && pos::GetSetVersion(step, entry->version));
+            break;
+        }
+        case 2: {
+            // A block of stake, and the slots it skipped.
+            slot += fdp.ConsumeIntegralInRange<int64_t>(1, 4);
+            std::vector<std::pair<int64_t, uint256>> missed;
+            LIMITED_WHILE(fdp.ConsumeBool(), 4) missed.emplace_back(slot - fdp.ConsumeIntegralInRange<int64_t>(1, 4), XOnly(keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)]));
+            staking.NoteLiveness(step, slot, XOnly(keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)]), missed);
+            break;
+        }
+        case 3: {
+            // A proof that a validator signed twice for a slot.
+            const pos::Offence offence{.pubkey = XOnly(keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)]), .slot = fdp.ConsumeIntegralInRange<int64_t>(0, slot + 1)};
+            const auto record{pos::GetValidator(step, offence.pubkey)};
+            const CAmount stake{record ? record->bonded + record->Unbonding() : 0};
+            const bool known{pos::OffencePunished(step, offence.pubkey, offence.slot)};
+            std::string reason;
+            kept = staking.Punish(step, offence, CScript() << OP_TRUE, anchors, reason);
+            assert(kept == !known);
+            if (kept) {
+                const auto after{pos::GetValidator(step, offence.pubkey)};
+                assert(after && after->tombstoned && after->bonded == 0);
+                // slash_bps of the stake, the rest kept (unbonding).
+                assert(after->Unbonding() == stake - staking.Penalty(stake));
+                assert(pos::OffencePunished(step, offence.pubkey, offence.slot));
+            }
+            break;
+        }
+        default:
+            // A set made at some epoch (check, below).
+            slot += fdp.ConsumeIntegralInRange<int64_t>(0, params.slots_per_epoch);
+            break;
+        }
+        if (!kept) {
+            in = in_before;
+            out = out_before;
+            anchors = anchors_before;
+            continue;
+        }
+        step.MergeInto(state);
+        check();
+        // Now and then, the step taken back by the journal.
+        if (fdp.ConsumeIntegralInRange<int>(0, 7) == 0) {
+            state.Revert(state.TakeUndo());
+            // (The revert's own changes are no step to take back.)
+            (void)state.TakeUndo();
+            assert(sidechain::StoreHash(state) == before);
+            in = in_before;
+            out = out_before;
+            anchors = anchors_before;
+        } else {
+            (void)state.TakeUndo();
+        }
+    }
+    check();
 }
