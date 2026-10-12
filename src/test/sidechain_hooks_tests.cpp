@@ -716,6 +716,17 @@ BOOST_FIXTURE_TEST_CASE(chain_work_recomputed, SidechainSetup)
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == index_b);
 
+    // With a chain order of its own, the header of the most work may be lower than the tip: the
+    // verification progress is guessed all the same (Bitcoin's code assumes otherwise).
+    {
+        LOCK(::cs_main);
+        CBlockIndex* const best{chainman.m_best_header};
+        chainman.m_best_header = index_a;
+        const double progress{chainman.GuessVerificationProgress(index_b)};
+        BOOST_CHECK(progress >= 0.0 && progress <= 1.0);
+        chainman.m_best_header = best;
+    }
+
     // With Bitcoin's order the work is the parent's and the header's, whatever was before.
     sidechain::SetHooks(nullptr);
     BOOST_REQUIRE(chainstate.InvalidateBlock(state, index_a, /*by_record=*/true));
