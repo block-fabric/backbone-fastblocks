@@ -59,7 +59,7 @@ bool ChainHooks::GetPegStep(const CBlock& block, const Mainchain& mainchain, std
         reject_reason = "bmm-unknown";
         return false;
     }
-    step = PegStep{.main_height = *bmm_height - 1, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt};
+    step = PegStep{.main_height = *bmm_height - 1, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt, .peg_height = std::nullopt};
     return true;
 }
 
@@ -104,6 +104,12 @@ bool CheckSections(const CBlock& block)
     if (!block.IsExtended()) return true;
     const uint256 expected{block.vSections.empty() ? uint256{} : Hooks().SectionsHash(block.vSections)};
     return block.ext.hashSections == expected;
+}
+
+bool SameExtension(const CBlockHeader& header, const CBlockIndex& index)
+{
+    if (!header.IsExtended()) return !index.m_ext;
+    return index.m_ext && *index.m_ext == header.ext;
 }
 
 } // namespace sidechain

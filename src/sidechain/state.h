@@ -101,7 +101,7 @@ struct PendingBundle {
     uint256 hash;
     //! The withdrawals the bundle pays, in the order of its outputs.
     std::vector<COutPoint> withdrawals;
-    //! Height of the block that committed to the bundle.
+    //! Height of the block that committed to the bundle (the one its peg actions counted as at: PegStep::peg_height).
     int32_t height{0};
     //! Hash of the block before that one, which the bundle carries so that its hash cannot be known in advance.
     uint256 nonce;
@@ -180,7 +180,8 @@ public:
                                        std::vector<CTxOut>& payouts, std::string& reject_reason);
     /**
      * The bundle a block at `height`, on top of the block `prev`, may commit to: empty if no bundle can
-     * be made now. A bundle of another branch pending on the mainchain does not hold it back.
+     * be made now. A bundle of another branch pending on the mainchain does not hold it back. (`height`
+     * is the one the peg actions count as at: PegStep::peg_height if the block's step sets it.)
      */
     std::optional<CMutableTransaction> NextBundle(int height, const uint256& prev, const Consensus::SidechainParams& params, std::vector<COutPoint>* withdrawals = nullptr,
                                                   std::optional<int32_t> max_withdrawal_height = std::nullopt) const;

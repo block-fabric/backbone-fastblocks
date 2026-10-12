@@ -4830,6 +4830,14 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     if (!accepted_header)
         return false;
 
+    // The extension of an extended header carries what the block hash does not cover (a signature):
+    // a block for a header the node has must carry the extension that header came with, the one its
+    // rules checked. Another one is a mutated block, never a reason to take the header for invalid.
+    if (!sidechain::SameExtension(block, *pindex)) {
+        LogDebug(BCLog::VALIDATION, "%s: block %s does not carry the extension of its header\n", __func__, pindex->GetBlockHash().ToString());
+        return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-blk-extension", "the extension is not that of the header the node has");
+    }
+
     // Check all requested blocks that we do not already have for validity and
     // save them to disk. Skip processing of unrequested blocks as an anti-DoS
     // measure, unless the blocks have more work than the active chain tip, and

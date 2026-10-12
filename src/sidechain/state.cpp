@@ -510,7 +510,9 @@ bool State::ConnectBlock(const CBlock& block, int height, const Consensus::Sidec
 bool State::ApplyPegStep(const CBlock& block, int height, const PegStep& step, const Consensus::SidechainParams& params, const Mainchain& mainchain,
                          std::vector<CTxOut>& payouts, bool& main_pending, std::string& reject_reason)
 {
-    if (!ApplyMainEvents(step.main_height, mainchain, height, params, payouts, reject_reason)) return false;
+    // The height the peg actions count as at: the block's, unless the step says otherwise (PegStep::peg_height).
+    const int peg_height{step.peg_height.value_or(height)};
+    if (!ApplyMainEvents(step.main_height, mainchain, peg_height, params, payouts, reject_reason)) return false;
     main_pending = MainPending(mainchain, params);
 
     // A new bundle takes the withdrawals that were waiting before this block.
@@ -532,7 +534,7 @@ bool State::ApplyPegStep(const CBlock& block, int height, const PegStep& step, c
             reject_reason = "bad-sc-bundle-closed";
             return false;
         }
-        if (!StartBundle(*commitment, height, step.nonce, params, reject_reason, step.max_withdrawal_height)) return false;
+        if (!StartBundle(*commitment, peg_height, step.nonce, params, reject_reason, step.max_withdrawal_height)) return false;
     }
     return true;
 }

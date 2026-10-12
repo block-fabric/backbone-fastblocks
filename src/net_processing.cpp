@@ -4919,6 +4919,17 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             LogBlockHeader(*pindex, pfrom, /*via_compact_block=*/true);
         }
 
+        // An extended header the node has, with another extension (a signature the block hash does
+        // not cover): the block it makes would be a mutated one (AcceptBlock). It is not
+        // reconstructed; the block comes whole, from this peer or another one. (BIP 152 lets peers
+        // relay compact blocks before they validate them: no punishment.)
+        if (!sidechain::SameExtension(cmpctblock.header, *pindex)) {
+            LogDebug(BCLog::CMPCTBLOCK, "%s sent us a compact block for %s without the extension of its header\n", pfrom.LogPeer(), blockhash.ToString());
+            LOCK(cs_main);
+            RemoveBlockRequest(blockhash, pfrom.GetId());
+            return;
+        }
+
         bool fProcessBLOCKTXN = false;
 
         // If we end up treating this as a plain headers message, call that as well

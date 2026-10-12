@@ -67,6 +67,13 @@ struct PegStep {
     uint256 nonce;
     //! If set, a bundle the block starts takes only withdrawals made at this height or below.
     std::optional<int32_t> max_withdrawal_height;
+    /**
+     * If set, the height the peg actions count as at, in place of the block's: the lock time of a
+     * bundle the block starts, and the height of a bundle failure it sees, from which the retry delay
+     * counts. A block that takes the peg actions for another one (its nonce) sets it to that one's
+     * height, so that every block taking them for the same one builds the same bundle.
+     */
+    std::optional<int32_t> peg_height;
     friend bool operator==(const PegStep&, const PegStep&) = default;
 };
 
@@ -215,6 +222,12 @@ std::unique_ptr<ChainHooks> SetHooks(std::unique_ptr<ChainHooks> hooks);
 bool CheckHeaderWork(const CBlockHeader& header, const Consensus::Params& params);
 /** Whether an extended block's sections are those its header commits to (always so for others). */
 bool CheckSections(const CBlock& block);
+/**
+ * Whether a header carries the extension of the block index of its hash (always so for a header that
+ * is not extended, as is the index then). The block hash does not cover the extension's signature:
+ * a block for a header the node has with another one is a mutated block (AcceptBlock).
+ */
+bool SameExtension(const CBlockHeader& header, const CBlockIndex& index);
 
 } // namespace sidechain
 

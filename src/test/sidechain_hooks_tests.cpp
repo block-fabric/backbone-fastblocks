@@ -26,6 +26,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -161,6 +162,41 @@ struct BonusHooks : sidechain::ChainHooks {
     }
 };
 
+/**
+ * Hooks whose extended blocks are of the sidechain's own kind, take no peg actions, and are valid if
+ * their "signature" (which the block hash does not cover) is that of the test's signer: all fives.
+ */
+struct SignedHooks : sidechain::ChainHooks {
+    bool BlockExtensions() const override { return true; }
+    sidechain::BlockKind Kind(const CBlockHeader& header) const override { return header.IsExtended() ? sidechain::BlockKind::PLUGIN : sidechain::BlockKind::BMM; }
+    bool CheckHeader(const CBlockHeader& header, const CBlockIndex&, const ChainstateManager&, BlockValidationState& state) const override
+    {
+        std::array<unsigned char, 64> signed_sig;
+        signed_sig.fill(5);
+        if (header.ext.sig != signed_sig) return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-test-sig");
+        return true;
+    }
+    bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& step, std::string& reject_reason) const override
+    {
+        if (!block.IsExtended()) return ChainHooks::GetPegStep(block, mainchain, step, reject_reason);
+        step.reset();
+        return true;
+    }
+};
+
+/** Hooks whose extended blocks take the peg actions of the step the test sets. */
+struct StepHooks : sidechain::ChainHooks {
+    mutable sidechain::PegStep step;
+    bool BlockExtensions() const override { return true; }
+    sidechain::BlockKind Kind(const CBlockHeader& header) const override { return header.IsExtended() ? sidechain::BlockKind::PLUGIN : sidechain::BlockKind::BMM; }
+    bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& out, std::string& reject_reason) const override
+    {
+        if (!block.IsExtended()) return ChainHooks::GetPegStep(block, mainchain, out, reject_reason);
+        out = step;
+        return true;
+    }
+};
+
 /** A chain that is a sidechain in slot 3, with a record of its mainchain the test writes. */
 struct SidechainSetup : public TestingSetup {
     SidechainSetup() : TestingSetup{ChainType::REGTEST, {.extra_args = {"-sidechainslot=3"}}} {}
@@ -264,7 +300,7 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     AppendMain(mainchain, 101, block.GetHash());
     BOOST_CHECK(hooks.GetPegStep(block, mainchain, step, reason));
     BOOST_REQUIRE(step);
-    BOOST_CHECK(*step == (sidechain::PegStep{.main_height = 0, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt}));
+    BOOST_CHECK(*step == (sidechain::PegStep{.main_height = 0, .nonce = block.hashPrevBlock, .max_withdrawal_height = std::nullopt, .peg_height = std::nullopt}));
     BOOST_CHECK(hooks.WaitingReady(block, mainchain) == std::optional<int64_t>{1});
 
     // The sidechain's own peg actions and notes: none.
@@ -638,7 +674,7 @@ BOOST_FIXTURE_TEST_CASE(assembly_takes_own_peg_actions, SidechainSetup)
     // A block with the peg actions of a given step, and sections.
     node::SidechainAssembly assembly;
     assembly.peg = node::SidechainAssembly::Peg::STEP;
-    assembly.step = sidechain::PegStep{.main_height = 0, .nonce = tip, .max_withdrawal_height = std::nullopt};
+    assembly.step = sidechain::PegStep{.main_height = 0, .nonce = tip, .max_withdrawal_height = std::nullopt, .peg_height = std::nullopt};
     assembly.sections = {1, 2, 3};
     {
         const auto block_template{node::BlockAssembler{chainstate, m_node.mempool.get(), options, assembly}.CreateNewBlock()};
@@ -732,6 +768,171 @@ BOOST_FIXTURE_TEST_CASE(chain_work_recomputed, SidechainSetup)
     BOOST_REQUIRE(chainstate.InvalidateBlock(state, index_a, /*by_record=*/true));
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.ReconsiderRecordFailure(index_a)));
     BOOST_CHECK(index_a->nChainWork == base + 11);
+}
+
+BOOST_FIXTURE_TEST_CASE(block_extension_mismatch, SidechainSetup)
+{
+    // The block hash does not cover an extended header's signature: a block for a header the node
+    // has must carry the extension of that header, or it is a mutated block -- turned away without
+    // taking the header for invalid, so that the block with the right one is taken after.
+    InstallHooks installed{std::make_unique<SignedHooks>()};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3f};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    CBlock honest{Build()};
+    honest.nVersion |= BLOCK_EXTENSION_BIT;
+    honest.ext.hashSections.SetNull();
+    honest.ext.sig.fill(5);
+    BOOST_REQUIRE(honest.IsExtended());
+    CBlock swapped{honest};
+    swapped.ext.sig.fill(6);
+    CBlock zeroed{honest};
+    zeroed.ext.sig.fill(0);
+    BOOST_REQUIRE(swapped.GetHash() == honest.GetHash() && zeroed.GetHash() == honest.GetHash());
+
+    // Without the header, a block with another signature fails the header's rules, and leaves no index.
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(swapped), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-test-sig");
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash())));
+    }
+    // The header comes first, then blocks with its hash and another signature, or none.
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{honest}}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    CBlockIndex* index{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index && index->m_ext && *index->m_ext == honest.ext);
+    BOOST_CHECK(sidechain::SameExtension(honest, *index));
+    BOOST_CHECK(!sidechain::SameExtension(swapped, *index));
+    for (const CBlock& bad : {swapped, zeroed}) {
+        BlockValidationState state;
+        bool new_block{true};
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(bad), state, nullptr, true, nullptr, &new_block, true)));
+        BOOST_CHECK(!new_block);
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-blk-extension");
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+        BOOST_CHECK(!chainman.ProcessNewBlock(std::make_shared<const CBlock>(bad), /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
+        BOOST_CHECK(!new_block);
+        LOCK(::cs_main);
+        BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK(*index->m_ext == honest.ext);
+    }
+    // The block with the header's signature is taken, and stored with it.
+    bool new_block{false};
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(honest), /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
+    BOOST_CHECK(new_block);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == index);
+    CBlock read;
+    BOOST_REQUIRE(chainman.m_blockman.ReadBlock(read, *index));
+    BOOST_CHECK(read.ext == honest.ext);
+    // Once it is stored, a block with another signature is still a mutated one.
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(swapped), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+        BOOST_CHECK(WITH_LOCK(::cs_main, return index->IsValid(BLOCK_VALID_SCRIPTS)));
+    }
+
+    // A block stored with another signature (as a node could, before this rule) is read with the
+    // signature of its header: the one the node checked.
+    {
+        LOCK(::cs_main);
+        const FlatFilePos pos{chainman.m_blockman.WriteBlock(swapped, index->nHeight)};
+        BOOST_REQUIRE(!pos.IsNull());
+        CBlock raw;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlock(raw, pos, honest.GetHash()));
+        BOOST_CHECK(raw.ext == swapped.ext);
+        const uint256 hash{honest.GetHash()};
+        CBlockIndex stored{honest};
+        stored.phashBlock = &hash;
+        stored.nStatus = BLOCK_HAVE_DATA;
+        stored.nFile = pos.nFile;
+        stored.nDataPos = pos.nPos;
+        CBlock fixed;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlock(fixed, stored));
+        BOOST_CHECK(fixed.ext == honest.ext);
+        BOOST_CHECK(fixed.vtx.size() == honest.vtx.size() && fixed.GetHash() == hash);
+    }
+
+    // Blocks without the extension are not touched by the rule.
+    sidechain::SetHooks(nullptr);
+    BOOST_CHECK(sidechain::SameExtension(Header(false), CBlockIndex{Header(false)}));
+}
+
+BOOST_AUTO_TEST_CASE(peg_height)
+{
+    // A step may say at what height the peg actions count: the bundle's lock time and the height of a
+    // failure (the retry delay) then depend on it, not on the height of the block that takes them.
+    auto owned{std::make_unique<StepHooks>()};
+    StepHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    Consensus::SidechainParams params;
+    params.bundle_retry_delay = 3;
+    sidechain::Mainchain mainchain;
+    AppendMain(mainchain, 100);
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay base{empty, /*journal=*/false};
+    std::vector<CTxOut> payouts;
+    std::string reason;
+    {
+        sidechain::State state{base};
+        BOOST_REQUIRE_MESSAGE(state.ApplyTx(Tx({WithdrawalOut(COIN)}, 1), 1, params, payouts, reason), reason);
+    }
+    hooks.step = sidechain::PegStep{.main_height = 0, .nonce = uint256{0xa}, .max_withdrawal_height = 1, .peg_height = 2};
+    const auto expected{sidechain::State{base}.NextBundle(2, uint256{0xa}, params, nullptr, 1)};
+    BOOST_REQUIRE(expected);
+    BOOST_CHECK_EQUAL(expected->nLockTime, 2U);
+    const uint256 bundle_hash{expected->GetHash().ToUint256()};
+    // Blocks at different heights that take the same step build the same bundle.
+    for (const int height : {5, 9}) {
+        sidechain::StoreOverlay store{base, /*journal=*/true};
+        sidechain::State state{store};
+        CAmount minted{-1};
+        BOOST_CHECK_MESSAGE(state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(bundle_hash)}}), height, params, mainchain, minted, reason), reason);
+        BOOST_REQUIRE(state.Bundle());
+        BOOST_CHECK(state.Bundle()->hash == bundle_hash);
+        BOOST_CHECK_EQUAL(state.Bundle()->height, 2);
+        BOOST_CHECK_EQUAL(Assert(state.BundleTx())->nLockTime, 2U);
+    }
+    // Without it, the block's height, as in the template.
+    {
+        hooks.step.peg_height.reset();
+        sidechain::StoreOverlay store{base, /*journal=*/true};
+        sidechain::State state{store};
+        CAmount minted{-1};
+        BOOST_CHECK(!state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(bundle_hash)}}), 5, params, mainchain, minted, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-sc-bundle-hash");
+        hooks.step.peg_height = 2;
+    }
+
+    // The mainchain fails the bundle: the failure is at the height the step says, and the retry
+    // delay counts from it, whatever the heights of the blocks.
+    sidechain::StoreOverlay store{base, /*journal=*/false};
+    sidechain::State state{store};
+    CAmount minted{-1};
+    BOOST_REQUIRE_MESSAGE(state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(bundle_hash)}}), 5, params, mainchain, minted, reason), reason);
+    sidechain::MainBlock failed;
+    failed.hash = uint256{0x99};
+    failed.prev_hash = mainchain.TipHash();
+    failed.time = 101;
+    failed.bundles.push_back({bundle_hash, /*paid=*/false});
+    BOOST_REQUIRE(mainchain.Append(failed));
+    hooks.step = sidechain::PegStep{.main_height = 1, .nonce = uint256{0xb}, .max_withdrawal_height = 6, .peg_height = 6};
+    BOOST_REQUIRE_MESSAGE(state.ConnectBlock(CoinbaseBlock(true), 50, params, mainchain, minted, reason), reason);
+    BOOST_CHECK(!state.Bundle());
+    BOOST_CHECK_EQUAL(state.LastFailureHeight(), 6);
+    // Two after it: too early, although the block is far higher.
+    hooks.step = sidechain::PegStep{.main_height = 1, .nonce = uint256{0xc}, .max_withdrawal_height = 8, .peg_height = 8};
+    const auto early{sidechain::State{store}.NextBundle(9, uint256{0xc}, params, nullptr, 8)};
+    BOOST_REQUIRE(early);
+    BOOST_CHECK(!state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(early->GetHash().ToUint256())}}), 60, params, mainchain, minted, reason));
+    BOOST_CHECK_EQUAL(reason, "bad-sc-bundle-not-allowed");
+    // Three after it: the bundle again, at that height.
+    hooks.step = sidechain::PegStep{.main_height = 1, .nonce = uint256{0xc}, .max_withdrawal_height = 9, .peg_height = 9};
+    BOOST_REQUIRE_MESSAGE(state.ConnectBlock(CoinbaseBlock(true, {CTxOut{0, sidechain::BundleCommitScript(early->GetHash().ToUint256())}}), 61, params, mainchain, minted, reason), reason);
+    BOOST_CHECK_EQUAL(state.Bundle()->height, 9);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

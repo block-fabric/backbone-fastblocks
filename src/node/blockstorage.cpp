@@ -1098,7 +1098,15 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
 bool BlockManager::ReadBlock(CBlock& block, const CBlockIndex& index) const
 {
     const FlatFilePos block_pos{WITH_LOCK(cs_main, return index.GetBlockPos())};
-    return ReadBlock(block, block_pos, index.GetBlockHash());
+    if (!ReadBlock(block, block_pos, index.GetBlockHash())) return false;
+    // The block hash does not cover the signature of an extended header: the one the node checked is
+    // the index's. A block stored with another one (before AcceptBlock turned such blocks away) is
+    // read with the index's: the same block otherwise, as the hash says.
+    if (!sidechain::SameExtension(block, index) && index.m_ext) {
+        LogWarning("The block %s on disk does not carry the extension of its header; reading it with the header's", index.GetBlockHash().ToString());
+        block.ext = *index.m_ext;
+    }
+    return true;
 }
 
 BlockManager::ReadRawBlockResult BlockManager::ReadRawBlock(const FlatFilePos& pos, std::optional<std::pair<size_t, size_t>> block_part) const
