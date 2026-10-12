@@ -950,6 +950,32 @@ BOOST_AUTO_TEST_CASE(hooks_without_context)
     BOOST_CHECK_EQUAL(reason, "bad-pos-context");
     BOOST_CHECK(!hooks.AfterBlock(state, block, 1, std::nullopt, 0, params->GetConsensus().sidechain, reason));
     BOOST_CHECK_EQUAL(reason, "bad-pos-context");
+    // An acknowledgement committed on record, but no block index to find what it anchors. (Extended
+    // blocks on for it, as installed hooks would have them.)
+    {
+        SetBlockExtensions(true);
+        pos::PosSections sections;
+        sections.ack = pos::AnchorAck{.ticket = pos::AnchorTicket{.version = 1, .anchored = uint256{7}, .payee = CScript() << OP_TRUE}, .main_height = 1};
+        CBlock acking{block};
+        acking.vSections = sections.Encode();
+        sidechain::Mainchain record;
+        sidechain::MainBlock first;
+        first.hash = uint256{1};
+        BOOST_REQUIRE(record.Append(first));
+        sidechain::MainBlock committing;
+        committing.hash = uint256{2};
+        committing.prev_hash = first.hash;
+        committing.bmm = sections.ack->ticket.Hash();
+        BOOST_REQUIRE(record.Append(committing));
+        std::optional<sidechain::PegStep> step;
+        BOOST_CHECK(!hooks.GetPegStep(acking, record, step, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-context");
+        // Sections that do not read.
+        acking.vSections = {9};
+        BOOST_CHECK(!hooks.GetPegStep(acking, record, step, reason));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-sections");
+        SetBlockExtensions(false);
+    }
     // Without validators, no block of stake.
     BOOST_CHECK(!hooks.Validators().Active());
 }
@@ -1229,6 +1255,13 @@ BOOST_FIXTURE_TEST_CASE(ticket_requests, FastBlocksSetup)
     BOOST_CHECK_EQUAL(message(pos::MSG_GETTICKETS, std::vector<uint256>(pos::MAX_TICKETS_ASKED + 1, uint256{1})), "too many anchor tickets asked for");
     BOOST_CHECK_EQUAL(message(pos::MSG_GETTICKETS, std::vector<unsigned char>{5}), "malformed request for anchor tickets");
     BOOST_CHECK_EQUAL(message(pos::MSG_EVIDENCE, std::vector<unsigned char>{1, 2}), "malformed evidence");
+    {
+        DataStream stream{};
+        stream << uint8_t{1};
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(7, pos::MSG_TICKET, stream, misbehaving));
+        BOOST_CHECK_EQUAL(misbehaving, "malformed anchor ticket");
+    }
     // Other messages are not FastBlocks'.
     DataStream empty{};
     std::string misbehaving;

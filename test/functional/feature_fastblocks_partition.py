@@ -231,8 +231,13 @@ class FastBlocksPartitionTest(SidechainTest):
         # Its blocks: one anchor covers them, but a commitment was skipped: soft until one more.
         covered = n0.getanchorinfo()["recent"][0]["anchored"]
         assert_equal(n0.getblock(covered)["finality"]["status"], "soft")
-        self.anchor(self.validators())
-        self.wait_in_sync()
+        # Each skipped commitment that node 0 cannot place (the abandoned one, unless it learned the
+        # block of its ticket) counts against every fork: an anchor more for each, at most.
+        for _ in range(len(n0.getanchorinfo()["skipped"]) + 1):
+            self.anchor(self.validators())
+            self.wait_in_sync()
+            if n0.getblock(covered)["finality"]["status"] == "final":
+                break
         assert n0.getblock(covered)["finality"]["status"] == "final", (n0.getanchorinfo(20), n0.getblockheader(covered)["height"])
         self.stop_bmm(n0)
         self.check_peg()
