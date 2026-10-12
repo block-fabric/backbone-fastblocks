@@ -163,11 +163,11 @@ public:
     /**
      * Punish an offence a block carried proof of (checked by the caller: the slot's leader signed two
      * headers): slash_bps of its stake, a ban, the rest unbonded; 1/reporter_share_divisor of the
-     * penalty to `reporter`, at the next peg step, the rest to the reserve. Once: a banned validator
-     * loses nothing more.
+     * penalty to `reporter`, at the next peg step, the rest to the reserve. No reporter (the offender
+     * carried the proof itself): all of it to the reserve. Once: a banned validator loses nothing more.
      * Reasons: bad-pos-evidence-known (punished before), bad-pos-evidence-banned (the validator is banned).
      */
-    bool Punish(sidechain::StoreOverlay& out, const Offence& offence, const CScript& reporter, uint64_t anchors, std::string& reject_reason) const;
+    bool Punish(sidechain::StoreOverlay& out, const Offence& offence, const std::optional<CScript>& reporter, uint64_t anchors, std::string& reject_reason) const;
 
     /** The validator set the state makes now, for epochs `epoch` on (jailed validators left out). */
     ValidatorSet MakeSet(const sidechain::StoreView& view, int64_t epoch) const;

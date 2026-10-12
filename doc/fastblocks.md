@@ -298,7 +298,8 @@ connects the block) says who is banned, so the rule is the same on every node.
 when connected.) As for the reward: the
 block that carried the proof is owed 1/`reporter_share_divisor` (1/8) of the
 penalty, paid to the script of its coinbase's first output at the next peg
-step (table `0x54`); the rest goes to a reserve that each anchor pays
+step (table `0x54`), unless its leader is the offender (a proof against
+itself): then nothing, its share to the reserve too; the rest goes to a reserve that each anchor pays
 1/`pot_reserve_anchors` of (rounded up) with the pot, to the anchor's payee.
 
 **Peg actions of an anchor** (before the template's, `BeforePegStep`): the pot
@@ -528,7 +529,7 @@ after every step:
 | `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex`; the producer's signatures are deterministic; another valid signature of the leader is the same block (taken, the node's own kept, no peer disconnected; two nodes holding the two stay in sync) |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; an unbond paid unbonding_anchors anchors later |
-| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
+| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
 `pos_evidence`, `pos_state` (a whole chain from fuzzed choices, with bonds,
@@ -615,8 +616,6 @@ Found and left as they are (decisions):
   the coins go to its owner): a bond of 1 satoshi just before an owner's
   unbond of all of it makes that unbond fail (`bad-pos-unbond-remainder`); the
   owner signs again.
-- The reporter's reward goes to the block that carries the proof: an offender
-  that leads a slot after its offence gets 1/8 of its penalty back.
 
 ## The decisions of 2026-10-12
 
@@ -636,6 +635,10 @@ functional tests named).
   banned it (`bad-pos-leader-banned`): its slots stay empty, rather than wait
   two epochs for the sets to leave it out. The ban is in the state below each
   block, so every node agrees on it (`slashed_once_and_out_of_the_schedule`,
+  `feature_fastblocks_slashing.py`).
+- No reward for reporting oneself: a proof carried by a block of stake whose
+  leader is the offender pays no reporter; the penalty applies all the same,
+  and the reward's share goes to the reserve (`self_reported`,
   `feature_fastblocks_slashing.py`).
 <!-- decisions-2026-10-12 -->
 

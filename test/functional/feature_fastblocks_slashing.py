@@ -14,6 +14,7 @@ set, a bootstrap of regtest), one key per node, each with a bond:
   - invalid evidence stays refused, and a proof is punished once;
   - banned, a validator leads no more from the next block (its slots stay empty), and a proof of
     another of its offences takes nothing more (slashed once);
+  - a leader that carries the proof against itself is paid nothing for it (the share to the reserve);
   - after every step, the coins of every node are the mainchain's escrow (pegbalance), the reserve
     and the rewards owed included.
 """
@@ -200,6 +201,48 @@ class FastBlocksSlashingTest(SidechainTest):
         self.wait_until(offender_gone, timeout=240)
         self.wait_in_sync()
         self.check_peg()
+
+        self.log.info("A leader that carries the proof against itself: the penalty, no reward (all of it to the reserve)")
+        others = [k for k in XONLY if k != offender]
+        self_reporter, third = others
+        third_node = self.nodes[XONLY.index(third)]
+        self.settle_sets(n0)
+        third_node.setstaking(False)
+        self.wait_in_sync()
+        made = self.pos_tip(n0)
+        while made["proposer"] != self_reporter:
+            self.wait_until(lambda: n0.getbestblockhash() != made["hash"], timeout=60)
+            made = self.pos_tip(n0)
+        reserve = n0.getposinfo()["pot"]["reserve"]
+        slashed = n0.getposinfo()["staking"]["slashed"]
+        first, second = self.rival(n0, made["hash"])
+        assert_equal(n1.submitblock(second.serialize().hex()), "inconclusive")
+        self.wait_until(lambda: all(n.getvalidator(self_reporter)["bond"]["banned"] for n in self.nodes), timeout=60)
+        self.wait_in_sync()
+        carrying2 = self.carrying(n0)
+        assert_equal(carrying2["proposer"], self_reporter)
+        staking = n0.getposinfo()["staking"]
+        assert_equal(staking["slashed"], slashed + PENALTY)
+        assert_equal(staking["rewardsowed"], 0)
+        assert_equal(n0.getposinfo()["pot"]["reserve"], reserve + PENALTY)
+        self.check_peg()
+        third_node.setstaking(True)
+        self.anchor()
+        self.wait_in_sync()
+        reporter2 = carrying2["tx"][0]["vout"][0]["scriptPubKey"]["hex"]
+        blockhash = n0.getbestblockhash()
+        while blockhash != carrying2["hash"]:
+            assert not self.pays(n0, blockhash, REWARD, reporter2)
+            blockhash = n0.getblock(blockhash)["previousblockhash"]
+        self.check_peg()
+
+    def settle_sets(self, node):
+        """Two epochs without an anchor: the set of the epoch is then the last anchor's, and a proof of
+        a slot of it is within the window for proofs (evidence_window_anchors, 10 on regtest), however
+        many anchors the test made before."""
+        epoch = node.getleaderschedule()["epoch"]
+        self.wait_until(lambda: node.getleaderschedule()["epoch"] >= epoch + 2, timeout=120)
+        self.wait_in_sync()
 
     def pos_tip(self, node):
         """The newest block of stake of the node's chain, once its tip is one."""

@@ -594,7 +594,9 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
         for (const DoubleProposal& proof : sections.evidence) {
             const auto offence{CheckChainEvidence(proof, *prev, slot, state.View(), fast.anchors, reject_reason)};
             if (!offence) return false;
-            if (!m_staking.Punish(out, *offence, coinbase.vout.at(0).scriptPubKey, fast.anchors, reject_reason)) return false;
+            // The offender carrying the proof against itself is paid nothing for it.
+            const std::optional<CScript> reporter{offence->pubkey == leader.pubkey ? std::nullopt : std::optional<CScript>{coinbase.vout.at(0).scriptPubKey}};
+            if (!m_staking.Punish(out, *offence, reporter, fast.anchors, reject_reason)) return false;
             LogDebug(BCLog::VALIDATION, "FastBlocks: validator %s punished for signing two blocks at slot %d\n", HexStr(offence->pubkey), offence->slot);
         }
         if (sections.ack) NoteAck(block.GetHash(), *sections.ack);

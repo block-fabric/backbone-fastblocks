@@ -385,7 +385,7 @@ void Staking::NoteLiveness(sidechain::StoreOverlay& out, int64_t slot, const uin
     add(slot, producer, true);
 }
 
-bool Staking::Punish(sidechain::StoreOverlay& out, const Offence& offence, const CScript& reporter, uint64_t anchors, std::string& reject_reason) const
+bool Staking::Punish(sidechain::StoreOverlay& out, const Offence& offence, const std::optional<CScript>& reporter, uint64_t anchors, std::string& reject_reason) const
 {
     const OffenceKey offence_key{.pubkey = offence.pubkey, .slot = static_cast<uint64_t>(offence.slot)};
     if (OFFENCES.Contains(out, offence_key)) return Fail(reject_reason, "bad-pos-evidence-known");
@@ -417,10 +417,11 @@ bool Staking::Punish(sidechain::StoreOverlay& out, const Offence& offence, const
     }
     std::erase_if(after.unbonding, [](const UnbondingEntry& entry) { return entry.amount == 0; });
 
-    // The block that carried the proof is paid its share at the next peg step; the rest goes to the reserve.
-    const CAmount reward{m_params.reporter_share_divisor > 0 ? penalty / m_params.reporter_share_divisor : 0};
+    // The block that carried the proof is paid its share at the next peg step; the rest goes to the
+    // reserve. The offender carrying it itself is paid nothing: all of it to the reserve.
+    const CAmount reward{reporter && m_params.reporter_share_divisor > 0 ? penalty / m_params.reporter_share_divisor : 0};
     if (reward > 0) {
-        REWARDS.Put(out, stake.next_reward++, CTxOut{reward, reporter});
+        REWARDS.Put(out, stake.next_reward++, CTxOut{reward, *reporter});
         stake.rewards_owed += reward;
     }
     stake.pot_reserve += penalty - reward;

@@ -980,9 +980,13 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
             const bool known{pos::OffencePunished(step, offence.pubkey, offence.slot)};
             // Slashed once: a banned validator loses nothing more.
             const bool banned{record && record->tombstoned};
+            // The offender carrying the proof itself: no reporter, the reward to the reserve.
+            const bool self_reported{fdp.ConsumeBool()};
+            const auto stake_before{pos::GetStakeState(step)};
             std::string reason;
-            kept = staking.Punish(step, offence, CScript() << OP_TRUE, anchors, reason);
+            kept = staking.Punish(step, offence, self_reported ? std::nullopt : std::optional<CScript>{CScript() << OP_TRUE}, anchors, reason);
             assert(kept == (!known && !banned));
+            if (kept && self_reported) assert(pos::GetStakeState(step).rewards_owed == stake_before.rewards_owed);
             if (kept) {
                 const auto after{pos::GetValidator(step, offence.pubkey)};
                 assert(after && after->tombstoned && after->bonded == 0);

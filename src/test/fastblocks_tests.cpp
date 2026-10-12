@@ -2878,4 +2878,35 @@ BOOST_FIXTURE_TEST_CASE(slashed_once_and_out_of_the_schedule, FastBlocksSetup)
     BOOST_CHECK(*Validator(offender) == banned);
 }
 
+BOOST_FIXTURE_TEST_CASE(self_reported, FastBlocksSetup)
+{
+    // The offender carrying the proof against itself: the penalty all the same, no reward, its
+    // share to the reserve.
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key)), BondOut(keys[1], bond, Owner(key)), BondOut(keys[2], bond, Owner(key))}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    int k{3};
+    while (XOnly(Leader(base_slot + k)) != offender) ++k;
+    const CBlock carrying{WithEvidence(k, {proof})};
+    Take(carrying);
+    const CAmount penalty{bond / 10};
+    BOOST_CHECK(Validator(offender)->tombstoned);
+    BOOST_CHECK_EQUAL(Stake().slashed, penalty);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, penalty);
+    BOOST_CHECK_EQUAL(Stake().bonded + Stake().unbonding + Stake().pot_reserve + Stake().rewards_owed, 3 * bond);
+    // The next peg step pays no reward to the block that carried it.
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    BOOST_CHECK(!Pays(bmm, CTxOut{penalty / 8, carrying.vtx[0]->vout[0].scriptPubKey}));
+    MineBmm(bmm);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
