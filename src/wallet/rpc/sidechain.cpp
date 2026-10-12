@@ -291,12 +291,12 @@ RPCMethod createbond()
     uint160 owner;
     if (existing && !existing->owner.IsNull()) {
         owner = existing->owner;
-        if (!pwallet->IsMine(GetScriptForDestination(WitnessV0KeyHash{owner}))) throw JSONRPCError(RPC_WALLET_ERROR, "Another wallet owns the bond of this validator");
+        if (!WITH_LOCK(pwallet->cs_wallet, return pwallet->IsMine(GetScriptForDestination(WitnessV0KeyHash{owner})))) throw JSONRPCError(RPC_WALLET_ERROR, "Another wallet owns the bond of this validator");
     } else if (!request.params[3].isNull()) {
         const CTxDestination dest{DecodeDestination(request.params[3].get_str())};
         const WitnessV0KeyHash* keyhash{std::get_if<WitnessV0KeyHash>(&dest)};
         if (!keyhash) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The owner must be a P2WPKH address");
-        if (!pwallet->IsMine(dest)) throw JSONRPCError(RPC_WALLET_ERROR, "The owner is not an address of this wallet");
+        if (!WITH_LOCK(pwallet->cs_wallet, return pwallet->IsMine(dest))) throw JSONRPCError(RPC_WALLET_ERROR, "The owner is not an address of this wallet");
         owner = uint160{*keyhash};
     } else {
         const auto dest{pwallet->GetNewDestination(OutputType::BECH32, "bond")};
@@ -448,6 +448,7 @@ RPCMethod listbonds()
     const bool all{!request.params[0].isNull() && request.params[0].get_bool()};
     const auto staking{EnsureStaking(*pwallet)};
     UniValue result(UniValue::VARR);
+    LOCK(pwallet->cs_wallet);
     for (const auto& bond : staking.bonds) {
         if (!all && (bond.owner.IsNull() || !pwallet->IsMine(GetScriptForDestination(WitnessV0KeyHash{bond.owner})))) continue;
         result.push_back(BondJSON(bond));
