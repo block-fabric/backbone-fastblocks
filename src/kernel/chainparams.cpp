@@ -365,7 +365,7 @@ public:
         consensus.sidechain.bundle_retry_delay = 20;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         // TODO: set it to the block that activates slot 5 on the test network, once it does.
-        consensus.sidechain.main_activation_height = 0;
+        consensus.sidechain.main_activation_height = 8621; // the block that activated slot 5 on the test network
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
