@@ -269,7 +269,7 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
         if (const auto last{FastBlocksHooks::LastPosSlot(tip, params)}; last && *last >= slot) return fail("the chain has a block of this slot or a later one");
         if (SlotTime(slot, params) <= tip->GetMedianTimePast()) return fail("the slot is not after the median time of the chain");
         const FastState fast{GetFastState(chainman.ActiveChainstate().SideState().View())};
-        ack = m_hooks.NextAck(*tip, fast);
+        ack = m_hooks.NextAck(*tip, fast, slot);
         if (!ack && fast.first_unanchored_slot >= 0 && slot - fast.first_unanchored_slot >= params.max_unanchored_slots) {
             return fail("no anchor for too long: blocks of stake wait for one");
         }
@@ -291,12 +291,26 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     if (!m_protection->MaySign(leader_key, slot, protection_error)) return fail("slashing protection: " + protection_error);
     if (!Sign(*block, *key)) return fail("signing failed");
 
-    {
+    const auto check{[&]() -> std::optional<std::string> {
         LOCK(::cs_main);
-        if (chainman.ActiveChain().Tip()->GetBlockHash() != tip_hash) return fail("the tip moved while the block was built");
+        if (chainman.ActiveChain().Tip()->GetBlockHash() != tip_hash) return "the tip moved while the block was built";
         const BlockValidationState state{TestBlockValidity(chainman.ActiveChainstate(), *block, /*check_pow=*/false, /*check_merkle_root=*/true)};
-        if (!state.IsValid()) return fail("the block is not valid: " + state.ToString());
+        if (!state.IsValid()) return "the block is not valid: " + state.ToString();
+        return std::nullopt;
+    }};
+    auto invalid{check()};
+    // An acknowledgement that makes the block invalid (what the state checks against the record, say):
+    // the block without it, rather than no block. (Signed again: only one of the two leaves the node.)
+    if (invalid && ack) {
+        LogInfo("FastBlocks: slot %d without the acknowledgement of %s: %s", slot, ack->ticket.Hash().ToString(), *invalid);
+        ack.reset();
+        block = Build(slot, ack, build_error);
+        if (!block) return fail(build_error);
+        if (block->hashPrevBlock != tip_hash) return fail("the tip moved while the block was built");
+        if (!Sign(*block, *key)) return fail("signing failed");
+        invalid = check();
     }
+    if (invalid) return fail(*invalid);
     const auto shared{std::make_shared<const CBlock>(*block)};
     bool new_block{false};
     if (!chainman.ProcessNewBlock(shared, /*force_processing=*/true, /*min_pow_checked=*/true, &new_block)) return fail("the node refused the block");

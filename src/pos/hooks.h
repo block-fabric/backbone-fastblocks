@@ -160,12 +160,24 @@ public:
     /** Relay the proofs found since the last call (by watching headers). */
     void RelayNewEvidence() const;
     /**
-     * The acknowledgement a PoS block on top of `tip` can carry: of the anchor committed first among
-     * those it may acknowledge, if any. Called with cs_main held.
+     * The acknowledgement a PoS block of `slot` on top of `tip` can carry: of the anchor committed first
+     * among those it may acknowledge (Acknowledgeable), if any. Called with cs_main held.
      */
-    std::optional<AnchorAck> NextAck(const CBlockIndex& tip, const FastState& fast) const;
-    /** The block a ticket made now would anchor: the block before the tip, or the tip if that one is not after the last anchor. */
-    static const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast);
+    std::optional<AnchorAck> NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
+    /**
+     * Whether a PoS block of `slot` on top of `tip` may acknowledge a ticket, as far as the chain tells
+     * (not the record): a ticket of version 1 with a payee, for a block on the chain at or after the
+     * last anchor point, and not so old that the blocks of stake above it would be uncovered for
+     * max_unanchored_slots. Called with cs_main held.
+     */
+    bool Acknowledgeable(const AnchorTicket& ticket, const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
+    /**
+     * The block a ticket made at `slot` would anchor: the block before the tip (ticket depth 1), or the
+     * tip if that one is not after the last anchor point, or if a ticket for it could not be
+     * acknowledged in the next slot (blocks of stake stopped for want of an anchor: nothing is built on
+     * the tip until one comes). Called with cs_main held.
+     */
+    const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
     /** Whether a BMM block built now would be in stall mode (and may take transactions). */
     bool Stalled(const FastState& fast, int64_t main_time) const;
     const Producer* GetProducer() const { return m_producer.get(); }
@@ -179,6 +191,11 @@ public:
     std::string ProducerError() const { return m_producer_error; }
 
 private:
+    /**
+     * Whether a PoS block of `slot` on `tip` that acknowledges an anchor of `target` is in time: the
+     * blocks of stake above `target` not uncovered for max_unanchored_slots by then.
+     */
+    bool InTime(const CBlockIndex& tip, const CBlockIndex& target, int64_t slot) const;
     /** The acknowledgement in a PoS block, read from its sections, noted by commitment. */
     void NoteAck(const uint256& block_hash, const AnchorAck& ack) const EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
     /** The acknowledgement a PoS block carries, from memory or else from disk. */

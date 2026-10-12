@@ -475,15 +475,46 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
     return true;
 }
 
-const CBlockIndex* FastBlocksHooks::TicketTarget(const CBlockIndex& tip, const FastState& fast)
+const CBlockIndex* FastBlocksHooks::TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot) const
 {
+    AssertLockHeld(::cs_main);
     // The block just before the newest (ticket depth 1), unless that is before the last anchor point.
     const CBlockIndex* target{tip.pprev ? tip.pprev : &tip};
-    if (target->nHeight < fast.anchor_point_height) target = &tip;
+    if (target->nHeight < fast.anchor_point_height) return &tip;
+    // A ticket for it that could not be acknowledged any more (blocks of stake stopped): the tip, which
+    // no block will follow before an anchor covers it.
+    if (!InTime(tip, *target, slot + 1)) return &tip;
     return target;
 }
 
-std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const FastState& fast) const
+bool FastBlocksHooks::InTime(const CBlockIndex& tip, const CBlockIndex& target, int64_t slot) const
+{
+    int64_t first{slot};
+    for (const CBlockIndex* index{&tip}; index && index->nHeight > target.nHeight; index = index->pprev) {
+        if (index->m_ext) first = SlotOf(index->nTime, m_params);
+    }
+    return slot - first < m_params.max_unanchored_slots;
+}
+
+bool FastBlocksHooks::Acknowledgeable(const AnchorTicket& ticket, const CBlockIndex& tip, const FastState& fast, int64_t slot) const
+{
+    AssertLockHeld(::cs_main);
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman || ticket.version != 1 || !IsValidPayee(ticket.payee)) return false;
+    // On this chain (at or below the tip: the parent of the block that would carry it).
+    const CBlockIndex* target{chainman->m_blockman.LookupBlockIndex(ticket.anchored)};
+    if (!target || !Descends(&tip, target)) return false;
+    // At or after the block that took the last peg actions (the state checks it: bad-pos-ack-chain).
+    if (fast.anchor_point_height >= 0) {
+        const CBlockIndex* point{AncestorAt(target, fast.anchor_point_height)};
+        if (!point || point->GetBlockHash() != fast.anchor_point) return false;
+    }
+    // Not so old that the blocks of stake above it would have been uncovered too long (the state
+    // checks it: bad-pos-unanchored).
+    return InTime(tip, *target, slot);
+}
+
+std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot) const
 {
     AssertLockHeld(::cs_main);
     ChainstateManager* chainman{Chainman()};
@@ -494,13 +525,7 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
         const auto committed{record.CommittedHeight(ticket.Hash())};
         if (!committed || *committed <= fast.last_main_height) continue;
         if (best && best->main_height <= *committed) continue;
-        if (ticket.version != 1 || !IsValidPayee(ticket.payee)) continue;
-        const CBlockIndex* target{chainman->m_blockman.LookupBlockIndex(ticket.anchored)};
-        if (!target || !Descends(&tip, target)) continue;
-        if (fast.anchor_point_height >= 0) {
-            const CBlockIndex* point{AncestorAt(target, fast.anchor_point_height)};
-            if (!point || point->GetBlockHash() != fast.anchor_point) continue;
-        }
+        if (!Acknowledgeable(ticket, tip, fast, slot)) continue;
         best = AnchorAck{.ticket = ticket, .main_height = *committed};
     }
     return best;
@@ -740,9 +765,13 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
     }
     // A ticket of the last mainchain block is acknowledged first: the next one must anchor that
     // acknowledgement or a block after it. Until then this node's ticket goes to its peers again, once
-    // per mainchain block, in case the leaders lost it.
+    // per mainchain block, in case the leaders lost it. (Not a ticket that cannot be acknowledged any
+    // more, as one made before blocks of stake stopped for want of anchors: waiting for it would
+    // wait for ever.)
+    const int64_t slot{SlotOf(TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()), m_params)};
     if (const auto last{record.BmmAt(main_height)}; last && fast.last_main_height < main_height) {
-        if (const auto ticket{GetTicket(*last)}) {
+        const auto ticket{GetTicket(*last)};
+        if (ticket && WITH_LOCK(::cs_main, return Acknowledgeable(*ticket, *tip, fast, slot + 1))) {
             LOCK(m_anchor_mutex);
             if (m_ticket_relayed_for != main_tip && WITH_LOCK(m_tickets_mutex, return m_own_tickets.contains(*last))) {
                 m_ticket_relayed_for = main_tip;
@@ -753,7 +782,7 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
     }
 
     AnchorTicket ticket;
-    ticket.anchored = WITH_LOCK(::cs_main, return TicketTarget(*tip, fast)->GetBlockHash());
+    ticket.anchored = WITH_LOCK(::cs_main, return TicketTarget(*tip, fast, slot)->GetBlockHash());
     ticket.payee = mining.coinbase_script;
     if (!IsValidPayee(ticket.payee)) return true;
     // Bid what the pot will pay, but the operator's share, or what the operator said (for tests).

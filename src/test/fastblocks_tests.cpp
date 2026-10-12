@@ -1495,4 +1495,37 @@ BOOST_FIXTURE_TEST_CASE(hidden_anchor, FastBlocksSetup)
     BOOST_CHECK(finality(attacked).status == pos::FinalityStatus::ANCHORED);
 }
 
+BOOST_FIXTURE_TEST_CASE(stale_tickets, FastBlocksSetup)
+{
+    // Blocks of stake stopped for want of an anchor, long enough that a ticket for the block before
+    // the tip (ticket depth 1) can no longer be acknowledged: the blocks above it would have been
+    // uncovered too long. Leaders do not try it (it would fail the slot), the merged miner does not
+    // wait for it (it would wait for ever), and a new ticket names the tip, which is in time.
+    StartPos();
+    Take(PosBlock(1));
+    Take(PosBlock(2));
+    const CBlockIndex* stopped{Tip()};
+    const pos::AnchorAck old{Anchor(Ticket(stopped->pprev->GetBlockHash(), script))};
+    const int last{static_cast<int>(Pos().max_unanchored_slots)};
+    // Still in time: the leader acknowledges it.
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().NextAck(*stopped, Fast(), base_slot + 3)) == std::optional<pos::AnchorAck>{old});
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().TicketTarget(*stopped, Fast(), base_slot + 3)) == stopped->pprev);
+    // Too late: the block of stake above it (slot 2) would be uncovered for max_unanchored_slots.
+    const int64_t late{base_slot + 2 + last};
+    BOOST_CHECK_EQUAL(Check(PosBlock(2 + last, old)), "bad-pos-unanchored");
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Hooks().Acknowledgeable(old.ticket, *stopped, Fast(), late)));
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Hooks().NextAck(*stopped, Fast(), late)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().TicketTarget(*stopped, Fast(), late)) == stopped);
+    std::string error;
+    BOOST_CHECK(!producer->Produce(Slot(2 + last), error));
+    BOOST_CHECK_EQUAL(error, "no anchor for too long: blocks of stake wait for one");
+    // A ticket for the tip is in time, and starts the blocks of stake again.
+    const pos::AnchorAck fresh{Anchor(Ticket(stopped->GetBlockHash(), script))};
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Hooks().NextAck(*stopped, Fast(), late + 1)) == std::optional<pos::AnchorAck>{fresh});
+    const auto made{producer->Produce(Slot(3 + last), error)};
+    BOOST_REQUIRE_MESSAGE(made, error);
+    BOOST_CHECK_EQUAL(Fast().last_main_height, fresh.main_height);
+    Take(PosBlock(4 + last));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -253,9 +253,15 @@ value reaches the mainchain's miners.
 - `-validatorpayout=<address>`: where the producer's share goes.
 - With `setbmm`, while PoS blocks come, the node's merged miner makes a ticket
   per mainchain block (P is the block before its tip, or the last
-  acknowledgement), relays it, and bids for its commitment (what the pot will
-  pay, less 1 %); after `stall_seconds` without PoS blocks, it merged mines
-  BMM blocks as the template does.
+  acknowledgement, or the tip itself once a ticket for the block before it
+  could no longer be acknowledged in time: blocks of stake stopped for want of
+  anchors), relays it, and bids for its commitment (what the pot will pay, less
+  1 %); after `stall_seconds` without PoS blocks, it merged mines BMM blocks as
+  the template does. It waits for its committed ticket to be acknowledged before
+  it makes the next, but not for one that can no longer be.
+- A leader acknowledges the first committed ticket that its block can carry in
+  time (`bad-pos-unanchored`); if the block with the acknowledgement does not
+  pass validation, it makes the block without it rather than none.
 - A node keeps at most 1000 tickets; a flood from a peer pushes out the oldest,
   but not the node's own nor those the mainchain committed to. Until its
   committed ticket is acknowledged, the merged miner relays it again once per
