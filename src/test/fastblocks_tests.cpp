@@ -395,6 +395,22 @@ BOOST_AUTO_TEST_CASE(chain_key)
     BOOST_CHECK(earlier.Work() > longer.Work());
 }
 
+BOOST_AUTO_TEST_CASE(network_parameters)
+{
+    // The user's decisions (design, section 13): 30-second slots; blocks of stake halt after an hour
+    // without anchors; BMM blocks take transactions after 30 minutes without blocks of stake (10 on
+    // the test networks), which is sooner, so that the chain goes on in BMM blocks.
+    for (const auto& params : {CChainParams::Main(), CChainParams::TestNet(), CChainParams::SigNet({})}) {
+        const Consensus::PosParams& pos{params->GetConsensus().pos};
+        BOOST_CHECK_EQUAL(pos.slot_seconds, 30);
+        BOOST_CHECK_EQUAL(pos.slot_seconds * pos.max_unanchored_slots, 60 * 60);
+        BOOST_CHECK_LT(pos.stall_seconds, pos.slot_seconds * pos.max_unanchored_slots);
+        BOOST_CHECK_EQUAL(pos.producer_share_bps, 5000);
+    }
+    BOOST_CHECK_EQUAL(CChainParams::Main()->GetConsensus().pos.stall_seconds, 30 * 60);
+    BOOST_CHECK_EQUAL(Consensus::PosParams{}.slot_seconds * Consensus::PosParams{}.max_unanchored_slots, 60 * 60);
+}
+
 BOOST_AUTO_TEST_CASE(leader_schedule)
 {
     // Leaders are picked by stake, the same way by everyone; a larger stake leads more slots.

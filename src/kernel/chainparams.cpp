@@ -250,7 +250,7 @@ public:
         consensus.pos.slots_per_epoch = 120;
         consensus.pos.min_active_validators = 4;
         consensus.pos.max_validators = 100;
-        consensus.pos.max_unanchored_slots = 1200;
+        consensus.pos.max_unanchored_slots = 120; // an hour: PoS blocks halt after an hour without anchors
         consensus.pos.stall_seconds = 1800;
     }
 };
@@ -364,7 +364,7 @@ public:
         consensus.pos.slots_per_epoch = 20;
         consensus.pos.min_active_validators = 3;
         consensus.pos.max_validators = 32;
-        consensus.pos.max_unanchored_slots = 600;
+        consensus.pos.max_unanchored_slots = 120; // an hour
         consensus.pos.stall_seconds = 600;
         consensus.pos.final_anchors = 3;
     }
@@ -483,7 +483,7 @@ public:
         consensus.pos.slots_per_epoch = 20;
         consensus.pos.min_active_validators = 3;
         consensus.pos.max_validators = 32;
-        consensus.pos.max_unanchored_slots = 600;
+        consensus.pos.max_unanchored_slots = 120; // an hour
         consensus.pos.stall_seconds = 600;
         consensus.pos.final_anchors = 3;
     }

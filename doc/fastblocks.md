@@ -37,7 +37,7 @@ test network and signet only warn (it is 0 there until the slot activates).
 | Slot | 30 s | 30 s | 1 s |
 | Slots per epoch | 120 | 20 | 20 |
 | Validators (min active / max) | 4 / 100 | 3 / 32 | 1 / 8 |
-| `max_unanchored_slots` | 1200 (1 h) | 600 | 100 |
+| `max_unanchored_slots` | 120 (1 h) | 120 (1 h) | 100 |
 | `stall_seconds` | 1800 | 600 | 30 |
 | Producer share | 50 % | 50 % | 50 % |
 | Anchors that make a block final (wallets) | 6 | 3 | 1 |

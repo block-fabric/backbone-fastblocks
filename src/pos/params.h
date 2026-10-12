@@ -38,7 +38,7 @@ struct PosParams {
      * A PoS block is valid only within this many slots of the first PoS block that no anchor covers
      * yet: without anchors from the mainchain, PoS blocks stop after so long.
      */
-    int64_t max_unanchored_slots{1200};
+    int64_t max_unanchored_slots{120};
     /**
      * A BMM block may carry transactions only when the mainchain block before the one that
      * committed to it is at least this much later (median time) than the last PoS block.
