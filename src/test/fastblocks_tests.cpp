@@ -2201,8 +2201,9 @@ BOOST_FIXTURE_TEST_CASE(liveness_noted, FastBlocksSetup)
             produced += liveness->produced;
         }
     }
-    // The first block of stake: the epoch of slots before it unmade, and itself; the second: two slots and itself.
-    BOOST_CHECK_EQUAL(assigned, static_cast<uint32_t>(Pos().slots_per_epoch + 1 + 2 + 1));
+    // The first block of stake: itself (the slots up to the BMM block it follows are nobody's to
+    // fill); the second: two slots and itself.
+    BOOST_CHECK_EQUAL(assigned, static_cast<uint32_t>(1 + 2 + 1));
     BOOST_CHECK_EQUAL(produced, 2U);
 }
 
@@ -2522,6 +2523,43 @@ BOOST_FIXTURE_TEST_CASE(one_signature_per_slot, FastBlocksSetup)
     CBlock block;
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(block, *Tip())));
     BOOST_CHECK(block.vSections.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(no_jail_for_slots_nobody_could_fill, FastBlocksSetup)
+{
+    // The leaders of slots at which no block of stake could be made are not charged for them: slots
+    // max_unanchored_slots or more after the first block no anchor covered (blocks of stake stopped),
+    // and slots up to a BMM block the block follows (which ends such a stop, or a stall).
+    const auto total{[&]() {
+        uint32_t assigned{0};
+        LOCK(::cs_main);
+        for (int64_t e{pos::EpochOf(base_slot, Pos()) - 1}; e <= pos::EpochOf(base_slot, Pos()) + 20; ++e) {
+            for (const CKey& k : keys) {
+                if (const auto liveness{pos::GetLiveness(Chain().SideState().View(), e, XOnly(k))}) assigned += liveness->assigned;
+            }
+        }
+        return assigned;
+    }};
+    StartPos();
+    Take(PosBlock(1));
+    BOOST_CHECK_EQUAL(total(), 1U);
+    // Blocks of stake stop at slot 1 + max_unanchored_slots; an acknowledgement 10 slots later: an
+    // epoch of slots back, but only those before the stop are charged.
+    const int stop{1 + static_cast<int>(Pos().max_unanchored_slots)};
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    const CBlock late{PosBlock(stop + 10, ack)};
+    BOOST_REQUIRE_EQUAL(Check(late), "");
+    Take(late);
+    // (The anchor's peg actions took the liveness of the epochs before its own into account, and
+    // dropped it, before the block noted its own.) Ten slots and the block, not an epoch of slots.
+    BOOST_CHECK_EQUAL(total(), 10U + 1);
+    // A BMM block, then a block of stake: the slots up to the BMM block are not charged.
+    const int bmm_at{stop + 40};
+    Slot(bmm_at);
+    MineBmm(BmmBlock(/*use_mempool=*/false));
+    const uint32_t after_bmm{total()};
+    Take(PosBlock(bmm_at + 5));
+    BOOST_CHECK_EQUAL(total(), after_bmm + 4 + 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

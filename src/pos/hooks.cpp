@@ -519,6 +519,7 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
 
         // PoS blocks stop when no anchor covers them for too long: the first one no anchor covers
         // starts the count. An acknowledgement covers what is at or below the block it anchors.
+        const int64_t before_step_unanchored{fast.first_unanchored_slot};
         if (step) {
             int64_t first{slot};
             for (const CBlockIndex* index{prev}; index && index->nHeight > fast.last_anchored_height; index = index->pprev) {
@@ -531,10 +532,21 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
         if (slot - fast.first_unanchored_slot >= m_params.max_unanchored_slots) return Fail(reject_reason, "bad-pos-unanchored");
 
         // Liveness: the block's leader made it; the leaders of the slots since the last block of stake
-        // (an epoch of them at most) made none.
+        // (an epoch of them at most) made none -- of the slots at which a block could be made: not
+        // those max_unanchored_slots or more after the first block of stake no anchor covered (blocks
+        // of stake had stopped for want of anchors), nor those up to a BMM block the block follows
+        // (which may end such a stop, or a stall, and whose slot is the earliest the leaders could
+        // build on it). Leaders are not jailed for slots nobody could fill.
+        int64_t charged_from{std::max(fast.last_pos_slot + 1, slot - m_params.slots_per_epoch)};
+        int64_t charged_until{slot};
+        if (prev->nHeight > 0 && !prev->m_ext) {
+            charged_from = std::max(charged_from, SlotOf(prev->nTime, m_params) + 1);
+        } else if (before_step_unanchored >= 0) {
+            charged_until = std::min(charged_until, before_step_unanchored + m_params.max_unanchored_slots);
+        }
         std::vector<std::pair<int64_t, uint256>> missed;
         std::map<int64_t, SlotLeader> epochs;
-        for (int64_t at{std::max(fast.last_pos_slot + 1, slot - m_params.slots_per_epoch)}; at < slot; ++at) {
+        for (int64_t at{charged_from}; at < charged_until; ++at) {
             const int64_t epoch{EpochOf(at, m_params)};
             auto found{epochs.find(epoch)};
             if (found == epochs.end()) found = epochs.emplace(epoch, LeaderOf(*prev, epoch * m_params.slots_per_epoch, &state.View())).first;
