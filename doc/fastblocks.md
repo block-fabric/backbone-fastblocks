@@ -43,6 +43,11 @@ test network and signet only warn (it is 0 there until the slot activates).
 | Anchors that make a block final (wallets) | 6 | 3 | 1 |
 | Validator set | none yet | none yet | `-posvalidators` |
 
+Bitcoin's heuristics that count blocks by the target spacing (headers sync and
+block download timeouts, stale tips, verification progress) count a block a
+slot: `nPowTargetSpacing` is 30 s on every 30-second network (60 s before,
+which gave initial block download half the headers timeout it needs).
+
 Without enough validators a network has no PoS blocks: it is the template's
 chain, merged mined only. Regtest takes its fixed set with
 `-posvalidators=<x-only key hex>[:<stake>],...` (consensus: every node of a

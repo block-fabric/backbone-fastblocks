@@ -252,6 +252,10 @@ public:
         consensus.pos.max_validators = 100;
         consensus.pos.max_unanchored_slots = 120; // an hour: PoS blocks halt after an hour without anchors
         consensus.pos.stall_seconds = 1800;
+        // Bitcoin's heuristics (headers sync and block download timeouts, stale tips, verification
+        // progress) count blocks by this: a block a slot. Version bits periods stay 2016 blocks.
+        consensus.nPowTargetSpacing = consensus.pos.slot_seconds;
+        consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing;
     }
 };
 
@@ -366,6 +370,10 @@ public:
         consensus.pos.max_validators = 32;
         consensus.pos.max_unanchored_slots = 120; // an hour
         consensus.pos.stall_seconds = 600;
+        // Bitcoin's heuristics (headers sync and block download timeouts, stale tips, verification
+        // progress) count blocks by this: a block a slot. Version bits periods stay 2016 blocks.
+        consensus.nPowTargetSpacing = consensus.pos.slot_seconds;
+        consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing;
         consensus.pos.final_anchors = 3;
     }
 };
@@ -485,6 +493,10 @@ public:
         consensus.pos.max_validators = 32;
         consensus.pos.max_unanchored_slots = 120; // an hour
         consensus.pos.stall_seconds = 600;
+        // Bitcoin's heuristics (headers sync and block download timeouts, stale tips, verification
+        // progress) count blocks by this: a block a slot. Version bits periods stay 2016 blocks.
+        consensus.nPowTargetSpacing = consensus.pos.slot_seconds;
+        consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing;
         consensus.pos.final_anchors = 3;
     }
 };

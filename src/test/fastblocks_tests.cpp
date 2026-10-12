@@ -406,6 +406,9 @@ BOOST_AUTO_TEST_CASE(network_parameters)
         BOOST_CHECK_EQUAL(pos.slot_seconds * pos.max_unanchored_slots, 60 * 60);
         BOOST_CHECK_LT(pos.stall_seconds, pos.slot_seconds * pos.max_unanchored_slots);
         BOOST_CHECK_EQUAL(pos.producer_share_bps, 5000);
+        // Bitcoin's heuristics count a block a slot; version bits periods stay 2016 blocks.
+        BOOST_CHECK_EQUAL(params->GetConsensus().nPowTargetSpacing, pos.slot_seconds);
+        BOOST_CHECK_EQUAL(params->GetConsensus().DifficultyAdjustmentInterval(), 2016);
     }
     BOOST_CHECK_EQUAL(CChainParams::Main()->GetConsensus().pos.stall_seconds, 30 * 60);
     BOOST_CHECK_EQUAL(Consensus::PosParams{}.slot_seconds * Consensus::PosParams{}.max_unanchored_slots, 60 * 60);
