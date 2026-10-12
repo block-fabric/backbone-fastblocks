@@ -157,6 +157,7 @@ Every block (state):
 | Rule | Reason |
 |---|---|
 | A PoS block is signed by the leader of its slot, as the chain below it and the record say when it is connected (its header may have come before the node knew the epoch's set; the record may have moved the seed since) | `bad-pos-sig`, `bad-pos-inactive`, `pos-seed-unknown`, `bad-pos-set-unknown` (a set the state no longer has) |
+| A PoS block's leader is not banned in the state of the chain below it: from the block after the one that banned it, a banned validator leads no more, and its slots stay empty | `bad-pos-leader-banned` |
 | A PoS block's producer keeps at most 50 % of its fees: all the coinbase but the payouts and the pot ≤ 50 % of that and the pot | `bad-pos-producer-share` |
 | A PoS block comes less than `max_unanchored_slots` after the first PoS block no anchor covers | `bad-pos-unanchored` |
 | A BMM block carries transactions only when the mainchain block before its commitment is `stall_seconds` after the last PoS block | `bad-pos-bmm-not-stalled` |
@@ -284,7 +285,17 @@ made in the next `jail_epochs` + 1 epochs. No coins are lost.
 
 **Slashing.** A block of stake may carry proofs that leaders signed two blocks
 for a slot (below). The offender loses `slash_bps` (10 %) of its stake, bonded
-then unbonding, is banned for good, and the rest of its bond is unbonded; the
+then unbonding, once: it is banned for good, a proof of another of its offences
+takes nothing more (`bad-pos-evidence-banned`), and the rest of its bond is
+unbonded. From the next block on it leads no more: the sets made before its
+ban still name it (for two epochs at most), but its slots stay empty
+(`bad-pos-leader-banned`; its node's producer makes no block, and
+`getleaderschedule` shows the slot as `banned`). The slots are not given to the
+others: whoever carries a proof would otherwise choose the leaders of the slots
+to come, and the state below a block (which every node of its chain has, as it
+connects the block) says who is banned, so the rule is the same on every node.
+(A header is taken before its block's state is known; its block is refused
+when connected.) As for the reward: the
 block that carried the proof is owed 1/`reporter_share_divisor` (1/8) of the
 penalty, paid to the script of its coinbase's first output at the next peg
 step (table `0x54`); the rest goes to a reserve that each anchor pays
@@ -317,6 +328,7 @@ by a leader (16 at most) while the chain has not punished them:
 | In a block: of a slot not after the block's | `bad-pos-evidence-late` |
 | In a block: at most `evidence_window_anchors` anchors after the anchor that made the set of the offence's epoch (and a set the state still has) | `bad-pos-evidence-old` |
 | In a block: not punished before (one per key and slot) | `bad-pos-evidence-known` |
+| In a block: its validator is not banned (slashed once; so one proof per validator in a block) | `bad-pos-evidence-banned` |
 
 `submitevidence <hex>` (the two headers, serialized) and `listevidence`. A
 proof whose leader a node cannot tell yet (`pos-evidence-unknown`) is dropped
@@ -345,7 +357,7 @@ last acknowledged one that it has neither a ticket nor a block of.
 | `getvalidators [epoch]` | The set of an epoch as the active chain fixes it (`known`, `seedknown`), and the slots each one leads |
 | `getvalidator <pubkey>` | One validator: stake, slots, next slot, offences known, its bond (owner, bonded, unbonds and when they are paid, jail, ban) |
 | `signbondpop <owner> [pubkey]` | The proof of possession for a bond owned by `owner`, by a key of this node's producer |
-| `getleaderschedule [epoch]` | The leader of each slot of an epoch |
+| `getleaderschedule [epoch]` | The leader of each slot of an epoch (a banned one as `banned`: nobody leads the slot) |
 | `getanchorinfo [count]` | The newest anchors, the anchored and final tips, the commitments the chain skipped, the pot, the tickets known |
 | `getsidechainstate` | Adds `pegbalance`: the coins the chain holds against the escrow (below) |
 | `submitevidence <hex>`, `listevidence` | Evidence (above) |
@@ -499,7 +511,8 @@ and the producer.
 - Liveness charges at most an epoch of empty slots per block of stake; a
   BMM block's epoch, for jailing and pruning, is taken two hours before its
   time (it may be that far ahead of the clock).
-- Several proofs of one key for different slots each cost 10 % of what is left.
+- A validator is slashed once: proofs of other offences of a banned validator
+  are not taken.
 
 ## Tests, fuzzing and the audit (phase 5)
 
@@ -515,7 +528,7 @@ after every step:
 | `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex`; the producer's signatures are deterministic; another valid signature of the leader is the same block (taken, the node's own kept, no peer disconnected; two nodes holding the two stay in sync) |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; an unbond paid unbonding_anchors anchors later |
-| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
+| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
 `pos_evidence`, `pos_state` (a whole chain from fuzzed choices, with bonds,
@@ -602,8 +615,6 @@ Found and left as they are (decisions):
   the coins go to its owner): a bond of 1 satoshi just before an owner's
   unbond of all of it makes that unbond fail (`bad-pos-unbond-remainder`); the
   owner signs again.
-- A banned validator keeps leading the slots of the sets made before its ban
-  (two epochs at most); each further proof costs 10 % of what is left.
 - The reporter's reward goes to the block that carries the proof: an offender
   that leads a slot after its offence gets 1/8 of its penalty back.
 
@@ -619,6 +630,13 @@ functional tests named).
   another valid signature of the leader over a block is the same block: the
   node keeps its own, punishes nobody, and does not split
   (`deterministic_signatures`, `feature_fastblocks_signature.py`).
+- Slashed once: 10 % of a validator's stake, once. A banned validator's other
+  offences take nothing more (`bad-pos-evidence-banned`, a block carries one
+  proof per validator), and it leads no more from the block after the one that
+  banned it (`bad-pos-leader-banned`): its slots stay empty, rather than wait
+  two epochs for the sets to leave it out. The ban is in the state below each
+  block, so every node agrees on it (`slashed_once_and_out_of_the_schedule`,
+  `feature_fastblocks_slashing.py`).
 <!-- decisions-2026-10-12 -->
 
 ## Deviations from the design (phase 5)

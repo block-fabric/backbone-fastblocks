@@ -392,6 +392,8 @@ bool Staking::Punish(sidechain::StoreOverlay& out, const Offence& offence, const
     LoadGenesis(out);
     StakeState stake{STAKE_STATE.Get(out)};
     const auto before{VALIDATORS.Get(out, offence.pubkey)};
+    // Slashed once: a banned validator's further offences take nothing more (and are no proof a block carries).
+    if (before && before->tombstoned) return Fail(reject_reason, "bad-pos-evidence-banned");
     ValidatorRecord after{before.value_or(ValidatorRecord{})};
 
     // slash_bps of all its stake: bonded first, then what it is unbonding, the latest first.

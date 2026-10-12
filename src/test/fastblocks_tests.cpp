@@ -2813,4 +2813,69 @@ BOOST_FIXTURE_TEST_CASE(deterministic_signatures, FastBlocksSetup)
     Take(PosBlock(3));
 }
 
+BOOST_FIXTURE_TEST_CASE(slashed_once_and_out_of_the_schedule, FastBlocksSetup)
+{
+    // A validator is slashed once: a proof of another of its offences, once it is banned, takes
+    // nothing more (bad-pos-evidence-banned), nor does a second proof in the block that bans it. And
+    // from the block after the one that bans it, it leads no more: its blocks are invalid
+    // (bad-pos-leader-banned), its producer makes none, and the others go on.
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key)), BondOut(keys[1], bond, Owner(key)), BondOut(keys[2], bond, Owner(key))}));
+    Take(PosBlock(1));
+    const auto [a1, b1]{TwoBlocks(2)};
+    const pos::DoubleProposal first_offence{.a = a1, .b = b1};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(a1);
+    const auto leads{[&](int i) { return XOnly(Leader(base_slot + i)) == offender; }};
+    int k{3};
+    while (leads(k)) ++k;
+    int j{k + 1};
+    while (!leads(j)) ++j;
+    int m{j + 1};
+    while (leads(m)) ++m;
+    // Another offence, at slot j (on the slot-2 block); its first block is valid as yet.
+    const auto [a2, b2]{TwoBlocks(j)};
+    const pos::DoubleProposal second_offence{.a = a2, .b = b2};
+    BOOST_CHECK_EQUAL(Check(a2), "");
+    const sidechain::StoreView& before{ActiveView()};
+    BOOST_CHECK_EQUAL(After(WithEvidence(m, {second_offence}), before), "");
+    BOOST_CHECK_EQUAL(After(WithEvidence(m, {first_offence, second_offence}), before), "bad-pos-evidence-banned");
+
+    // The first proof, in the block of slot k: banned, 10 % gone.
+    Take(WithEvidence(k, {first_offence}));
+    const auto banned{*Validator(offender)};
+    BOOST_REQUIRE(banned.tombstoned);
+    const pos::StakeState stake{Stake()};
+    BOOST_CHECK_EQUAL(stake.slashed, bond / 10);
+    // The second proof takes nothing more. (Asked of the rules directly: blocks of one slot given to
+    // validation would be proofs that its leader signed them all.)
+    BOOST_CHECK_EQUAL(After(WithEvidence(m, {second_offence}), ActiveView()), "bad-pos-evidence-banned");
+    // The offender's block of slot j, on the block that banned it: invalid; its producer makes none.
+    {
+        const int64_t slot_j{Slot(j)};
+        std::string error;
+        auto block{producer->Build(slot_j, std::nullopt, error)};
+        BOOST_REQUIRE_MESSAGE(block, error);
+        BOOST_REQUIRE(pos::Producer::Sign(*block, Leader(slot_j)));
+        BOOST_CHECK_EQUAL(Check(*block), "bad-pos-leader-banned");
+        BOOST_CHECK(!producer->Produce(slot_j, error));
+        BOOST_CHECK(error.find("banned") != std::string::npos);
+    }
+    // The producer leaves the second proof out; the others' blocks go on. Nothing more is taken.
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(second_offence, reason), reason);
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(producer->Produce(Slot(m), error), error);
+    CBlock made;
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(made, *Tip())));
+    pos::PosSections sections;
+    BOOST_REQUIRE(pos::PosSections::Decode(made.vSections, sections));
+    BOOST_CHECK(sections.evidence.empty());
+    BOOST_CHECK(Stake() == stake);
+    BOOST_CHECK(*Validator(offender) == banned);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

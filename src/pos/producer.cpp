@@ -311,21 +311,26 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
         if (const auto last{FastBlocksHooks::LastPosSlot(tip, params)}; last && *last >= slot) return fail("the chain has a block of this slot or a later one");
         if (SlotTime(slot, params) <= tip->GetMedianTimePast()) return fail("the slot is not after the median time of the chain");
         const sidechain::StoreView& view{chainman.ActiveChainstate().SideCache()};
+        // A banned leader leads no more (its block would be invalid: bad-pos-leader-banned).
+        if (const auto record{GetValidator(view, leader_key)}; record && record->tombstoned) return fail("this validator is banned: it signed two blocks for a slot");
         const FastState fast{GetFastState(view)};
         const auto [refused_tickets, refused_offences]{WITH_LOCK(m_mutex, return std::make_pair(m_refused_tickets, m_refused_offences))};
         ack = m_hooks.NextAck(*tip, fast, slot, &refused_tickets);
         if (!ack && fast.first_unanchored_slot >= 0 && slot - fast.first_unanchored_slot >= params.max_unanchored_slots) {
             return fail("no anchor for too long: blocks of stake wait for one");
         }
-        // The proofs this node knows that the chain has not punished yet.
+        // The proofs this node knows that the chain has not punished yet, one per validator (a
+        // validator is slashed once: a second proof against it in the block would be invalid).
         const uint64_t anchors{fast.anchors + (ack ? 1 : 0)};
+        std::set<uint256> offenders;
         for (const auto& [offence, proof] : m_hooks.Evidence().All()) {
             if (evidence.size() >= MAX_SECTION_EVIDENCE) break;
-            if (refused_offences.contains(offence)) continue;
+            if (refused_offences.contains(offence) || offenders.contains(offence.pubkey)) continue;
             std::string reason;
             if (m_hooks.CheckChainEvidence(proof, *tip, slot, view, anchors, reason)) {
                 evidence.push_back(proof);
                 offences.push_back(offence);
+                offenders.insert(offence.pubkey);
             }
         }
         tip_hash = tip->GetBlockHash();

@@ -24,6 +24,8 @@
 #include <sidechain/state.h>
 #include <txdb.h>
 #include <univalue.h>
+
+#include <set>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <validation.h>
@@ -55,6 +57,8 @@ uint256 ParsePubkey(const UniValue& value)
 struct EpochSchedule {
     std::shared_ptr<const pos::ValidatorSet> set;
     std::optional<uint256> seed;
+    //! Validators of the set the active chain banned: they lead no slot any more (their slots stay empty).
+    std::set<uint256> banned;
 
     /** The leader of a slot of the epoch, if the set is known and active and the seed known. */
     std::optional<size_t> Leader(int64_t slot) const
@@ -62,11 +66,19 @@ struct EpochSchedule {
         if (!set || !seed) return std::nullopt;
         return set->Leader(slot, *seed);
     }
-    std::optional<uint256> LeaderKey(int64_t slot) const
+    /** The key of the leader the set and the seed name, banned or not. */
+    std::optional<uint256> ScheduledKey(int64_t slot) const
     {
         const auto index{Leader(slot)};
         if (!index) return std::nullopt;
         return set->Validators()[*index].pubkey;
+    }
+    /** The key of the leader of a slot: none if it is banned. */
+    std::optional<uint256> LeaderKey(int64_t slot) const
+    {
+        const auto key{ScheduledKey(slot)};
+        if (!key || banned.contains(*key)) return std::nullopt;
+        return key;
     }
 };
 
@@ -77,6 +89,12 @@ EpochSchedule ScheduleOf(const pos::FastBlocksHooks& hooks, ChainstateManager& c
     const CBlockIndex* tip{chainman.ActiveChain().Tip()};
     if (tip) schedule.set = hooks.SetFor(*tip, epoch);
     if (chainman.m_mainchain) schedule.seed = pos::EpochSeed(epoch, hooks.Params(), *chainman.m_mainchain);
+    if (schedule.set) {
+        const sidechain::StoreView& view{chainman.ActiveChainstate().SideState().View()};
+        for (const Consensus::PosValidator& validator : schedule.set->Validators()) {
+            if (const auto record{pos::GetValidator(view, validator.pubkey)}; record && record->tombstoned) schedule.banned.insert(validator.pubkey);
+        }
+    }
     return schedule;
 }
 
@@ -86,7 +104,7 @@ std::vector<int64_t> SlotsLed(const pos::FastBlocksHooks& hooks, const EpochSche
     const Consensus::PosParams& params{hooks.Params()};
     std::vector<int64_t> counts(schedule.set ? schedule.set->Validators().size() : 0, 0);
     for (int64_t slot{epoch * params.slots_per_epoch}; slot < (epoch + 1) * params.slots_per_epoch; ++slot) {
-        if (const auto leader{schedule.Leader(slot)}) ++counts[*leader];
+        if (const auto leader{schedule.Leader(slot)}; leader && schedule.LeaderKey(slot)) ++counts[*leader];
     }
     return counts;
 }
@@ -434,7 +452,8 @@ RPCMethod getleaderschedule()
                 {
                     {RPCResult::Type::NUM, "slot", "The slot"},
                     {RPCResult::Type::NUM_TIME, "time", "When it starts, " + UNIX_EPOCH_TIME},
-                    {RPCResult::Type::STR_HEX, "leader", /*optional=*/true, "x-only key of its leader (none if blocks of stake cannot be made, or the set or the seed of the epoch is not known yet)"},
+                    {RPCResult::Type::STR_HEX, "leader", /*optional=*/true, "x-only key of its leader (none if blocks of stake cannot be made, or the set or the seed of the epoch is not known yet, or the leader is banned)"},
+                    {RPCResult::Type::STR_HEX, "banned", /*optional=*/true, "x-only key of the leader the set names, banned since: nobody leads the slot"},
                 }},
             }},
         }},
@@ -452,7 +471,11 @@ RPCMethod getleaderschedule()
         UniValue entry(UniValue::VOBJ);
         entry.pushKV("slot", slot);
         entry.pushKV("time", pos::SlotTime(slot, params));
-        if (const auto leader{schedule.LeaderKey(slot)}) entry.pushKV("leader", HexStr(*leader));
+        if (const auto leader{schedule.LeaderKey(slot)}) {
+            entry.pushKV("leader", HexStr(*leader));
+        } else if (const auto scheduled{schedule.ScheduledKey(slot)}) {
+            entry.pushKV("banned", HexStr(*scheduled));
+        }
         slots.push_back(std::move(entry));
     }
     UniValue result(UniValue::VOBJ);

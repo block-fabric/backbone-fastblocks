@@ -524,6 +524,11 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
         case LeaderStatus::OK: break;
         }
         if (!CheckBlockSig(block, leader.pubkey)) return Fail(reject_reason, "bad-pos-sig");
+        // A banned leader leads no more: from the block after the one that punished it, its slots
+        // stay empty (the sets made before its ban still name it; the state of the chain below the
+        // block says it is banned, so every node agrees). Its slots are not given to others: who
+        // carries a proof would otherwise choose the leaders of the slots to come.
+        if (const auto record{GetValidator(state.View(), leader.pubkey)}; record && record->tombstoned) return Fail(reject_reason, "bad-pos-leader-banned");
 
         // The fee split: what the producer keeps (all of the coinbase but the payouts and the pot) is at
         // most producer_share_bps of it and the pot together. Fees it leaves unclaimed are lost.
@@ -749,6 +754,8 @@ std::optional<Offence> FastBlocksHooks::CheckChainEvidence(const DoubleProposal&
     // Within the window: while the stake it signed with is still bonded or unbonding.
     if (anchors > leader.set_anchors + static_cast<uint64_t>(m_params.evidence_window_anchors)) return fail("bad-pos-evidence-old");
     if (OffencePunished(view, offence->pubkey, offence->slot)) return fail("bad-pos-evidence-known");
+    // Slashed once: no proof against a banned validator takes anything more.
+    if (const auto record{GetValidator(view, offence->pubkey)}; record && record->tombstoned) return fail("bad-pos-evidence-banned");
     return offence;
 }
 

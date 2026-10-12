@@ -978,9 +978,11 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
             const auto record{pos::GetValidator(step, offence.pubkey)};
             const CAmount stake{record ? record->bonded + record->Unbonding() : 0};
             const bool known{pos::OffencePunished(step, offence.pubkey, offence.slot)};
+            // Slashed once: a banned validator loses nothing more.
+            const bool banned{record && record->tombstoned};
             std::string reason;
             kept = staking.Punish(step, offence, CScript() << OP_TRUE, anchors, reason);
-            assert(kept == !known);
+            assert(kept == (!known && !banned));
             if (kept) {
                 const auto after{pos::GetValidator(step, offence.pubkey)};
                 assert(after && after->tombstoned && after->bonded == 0);
