@@ -246,7 +246,11 @@ acknowledgement or a BMM block) makes a set from the state as it is then: the
 eligible validators (not banned, enough stake, not jailed), the
 `max_validators` largest (ties to the lower key), weight = bonded + genesis
 stake. The set of epoch e is the one the newest anchor on the chain whose slot
-(a BMM block's: of its time) is before the start of epoch e − 1 made: the stake
+is before the start of epoch e − 1 made -- an anchor's slot being that of its
+time, or of the median time of the mainchain block that committed to it if that
+is later (a block's time can be set back as far as the median time of the chain
+before it, which a merged miner that makes every block after a stall controls:
+it could otherwise fix the set of an epoch whose seed is known): the stake
 is fixed at least an epoch before the epoch's seed exists, and a bond counts
 from the epoch after the next anchor's next. The set has blocks of stake if it
 has `min_active_validators`. Sets are kept by version, with each anchor's
@@ -260,14 +264,22 @@ checked when its block is connected.
 (`pos-seed-unknown`). A mainchain reorg that moves the seed of an epoch takes
 the blocks of stake whose leader changed back (as a lost commitment does), and
 gives them back when the record does: the follower checks the leaders of the
-newest blocks of the active chain at each new mainchain tip.
+newest blocks of the active chain at each new mainchain tip. The blocks of
+stake of an epoch whose seed moved are connected again from its start, those
+whose leader did not change too: the leaders they charged for empty slots (and
+so the jailing, and the sets made after) are the new seed's. The rules of a
+block read the sets of anchors from its chain's state alone; the sets a node
+keeps in memory serve headers only.
 
 **Jailing.** Each block of stake notes that its leader made one, and that the
 leaders of the slots since the last block of stake (an epoch of them at most)
-made none (table `0x5d`, by epoch). At an anchor, a validator that made less
-than `liveness_min_bps` of the slots it led in an earlier epoch, having led
-`liveness_min_assigned` or more, is jailed: left out of the sets made in the
-next `jail_epochs` + 1 epochs. No coins are lost.
+made none (table `0x5d`, by epoch) -- of the slots at which a block could be
+made: not those `max_unanchored_slots` or more after the first block of stake
+no anchor covered (blocks of stake had stopped), nor those up to a BMM block the
+block follows (which ends such a stop, or a stall). At an anchor, a validator
+that made less than `liveness_min_bps` of the slots it led in an earlier epoch,
+having led `liveness_min_assigned` or more, is jailed: left out of the sets
+made in the next `jail_epochs` + 1 epochs. No coins are lost.
 
 **Slashing.** A block of stake may carry proofs that leaders signed two blocks
 for a slot (below). The offender loses `slash_bps` (10 %) of its stake, bonded
@@ -409,8 +421,11 @@ Every FastBlocks functional test checks this on every node after every step
   it makes the next, but not for one that can no longer be.
 - A leader acknowledges the first committed ticket that its block can carry in
   time (`bad-pos-unanchored`), and puts in the proofs it knows the chain has
-  not punished; if the block with them does not pass validation, it makes the
-  block without them rather than none. It does not acknowledge a commitment
+  not punished. If the signed block does not pass validation, the slot is lost:
+  a second block of the slot would be a second signature, which the node (it
+  noted the first header) would take for proof against its own key; the
+  acknowledgement and proofs it carried are left out of the producer's next
+  blocks. It does not acknowledge a commitment
   whose acknowledging block failed when the record lost the commitment: the
   follower gives that block back once the record has it again (acknowledging
   it on a second branch only forked the chain).
@@ -497,9 +512,12 @@ after every step:
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
-`pos_evidence`, `pos_state` (a whole chain from fuzzed choices: the state agrees
-with the chain key, the coins are the deposits, a tip taken back and connected
-again gives the same state).
+`pos_evidence`, `pos_state` (a whole chain from fuzzed choices, with bonds,
+unbonds and leaders that sign twice: the state agrees with the chain key, the
+totals of staking with its validators, the coins are the deposits, a tip taken
+back and connected again gives the same state), `pos_staking` (the staking
+rules alone with fuzzed parameters: every coin bonded is accounted for, the
+journal takes any step back).
 
 What the audit of this round changed (each with a test):
 
@@ -529,6 +547,59 @@ What the audit of this round changed (each with a test):
 - The bundle is fixed by P: its lock time and the height a failure counts
   from are P's (template hook `PegStep::peg_height`), not those of the
   acknowledging block.
+
+## The audit of staking
+
+Tests, fuzzing and coverage of phase 3, and an adversarial review of it (stake
+grinding, nothing at stake, unbonding against the window for proofs, slashing
+nobody can avoid or that others can cause, validator sets across reorgs and
+anchors, jailing, the reporter's reward, the peg balance). What it changed,
+each with a regression test:
+
+- The producer never signs a second block for a slot. A block found invalid
+  once signed (with an acknowledgement or proofs) was made again without them
+  and signed again; the node, which had noted the first header, took the two
+  for proof against its own key, relayed it, and put it in its next block:
+  an honest validator slashed. Now the slot is lost, and the ticket and the
+  proofs are left out of the producer's next blocks (`one_signature_per_slot`).
+- Leaders are not charged for slots at which no block could be made: those
+  `max_unanchored_slots` or more after the first uncovered block of stake, and
+  those up to a BMM block the block follows. A stop for want of anchors could
+  jail a whole small set (`no_jail_for_slots_nobody_could_fill`).
+- The rules of a block read the sets of anchors from its chain's state only,
+  not from the sets the node keeps in memory (a set the state pruned, or one an
+  earlier record made, could decide validity on one node and not another). A
+  mainchain reorg that moves the seed of an epoch connects its blocks of stake
+  again from its start, not only those whose own leader changed: the liveness
+  they charged (and the jailing, and the sets after) were the old seed's.
+  `CheckSeeds` no longer holds the set mutex while it checks blocks it took
+  back (the follower deadlocked with `cs_main` held once a block whose set an
+  anchor made was given back) (`seed_moved_state_connected_again`,
+  `leader_checked_when_connected`).
+- An anchor's slot is not before the median time of the mainchain block that
+  committed to it: a merged miner that makes every block after a stall could
+  otherwise set two BMM blocks' times back and fix, with bonds, the set of an
+  epoch whose seed is known (`anchor_slot_from_the_commitment`).
+- `createbond` and `listbonds` ask the wallet about its scripts with its lock
+  held (a data race; a debug build aborted, and the Qt staking test hung).
+- A unit test of a penalty larger than the bond (taken from the latest
+  unbonds); `pos_state` fuzzes bonds, unbonds and leaders that sign twice;
+  `pos_staking` fuzzes the staking rules alone.
+
+Found and left as they are (decisions):
+
+- With `liveness_min_assigned` 10 per epoch, a validator is never jailed once
+  it leads fewer than 10 slots an epoch: on the main network (120 slots) with
+  13 or more equal validators, on the test networks (20 slots) unless it holds
+  half the stake.
+- Anyone can add a bond to a validator (the proof of possession is public, and
+  the coins go to its owner): a bond of 1 satoshi just before an owner's
+  unbond of all of it makes that unbond fail (`bad-pos-unbond-remainder`); the
+  owner signs again.
+- A banned validator keeps leading the slots of the sets made before its ban
+  (two epochs at most); each further proof costs 10 % of what is left.
+- The reporter's reward goes to the block that carries the proof: an offender
+  that leads a slot after its offence gets 1/8 of its penalty back.
 
 ## Deviations from the design (phase 5)
 

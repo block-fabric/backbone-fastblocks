@@ -2691,4 +2691,61 @@ BOOST_FIXTURE_TEST_CASE(anchor_slot_from_the_commitment, FastBlocksSetup)
     BOOST_CHECK_EQUAL(set_anchors, 2U);
 }
 
+BOOST_AUTO_TEST_CASE(penalty_from_unbonding)
+{
+    // A penalty larger than what is still bonded takes the rest from what the validator is unbonding,
+    // the latest unbond first (an unbond taken to nothing leaves the queue); the coins stay accounted for.
+    ECC_Context ecc;
+    CKey validator, owner;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    owner.MakeNewKey(/*fCompressed=*/true);
+    Consensus::PosParams params;
+    params.min_stake = 100;
+    params.unbonding_anchors = 10;
+    const uint256 genesis{1};
+    const pos::Staking staking{params, genesis};
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay out{empty};
+    const uint160 owner_hash{owner.GetPubKey().GetID()};
+    const uint256 pubkey{XOnly(validator)};
+    std::array<unsigned char, 64> pop;
+    BOOST_REQUIRE(validator.SignSchnorr(pos::BondPopHash(owner_hash, genesis), pop, nullptr, uint256{}));
+    std::string reason;
+    CMutableTransaction bond;
+    bond.vout.emplace_back(10000, pos::BondScript(pubkey, owner_hash, pop));
+    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{bond}, 1, 0, reason));
+    const auto unbond{[&](CAmount amount, uint32_t sequence, uint64_t anchors) {
+        pos::Unbond u;
+        u.pubkey = pubkey;
+        u.amount = amount;
+        u.sequence = sequence;
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(pubkey, amount, sequence, genesis)), u.signature));
+        CMutableTransaction tx;
+        tx.vout.emplace_back(0, pos::UnbondScript(u));
+        BOOST_REQUIRE_MESSAGE(staking.ApplyTx(out, CTransaction{tx}, 2, anchors, reason), reason);
+    }};
+    unbond(9400, 0, 0);
+    unbond(500, 1, 1);
+    BOOST_CHECK_EQUAL(pos::GetValidator(out, pubkey)->bonded, 100);
+    // 10 % of 10000: 100 from the bond, 500 from the latest unbond (gone), 400 from the first.
+    BOOST_REQUIRE(staking.Punish(out, pos::Offence{.pubkey = pubkey, .slot = 7}, CScript() << OP_TRUE, 2, reason));
+    const auto record{*pos::GetValidator(out, pubkey)};
+    BOOST_CHECK(record.tombstoned);
+    BOOST_CHECK_EQUAL(record.bonded, 0);
+    BOOST_REQUIRE_EQUAL(record.unbonding.size(), 1U);
+    BOOST_CHECK(record.unbonding[0] == (pos::UnbondingEntry{.release_anchor = 10, .sequence = 0, .amount = 9000}));
+    std::vector<std::pair<uint64_t, CAmount>> queue;
+    pos::ForEachUnbonding(out, [&](uint64_t release, const uint256& key, CAmount amount) {
+        BOOST_CHECK(key == pubkey);
+        queue.emplace_back(release, amount);
+        return true;
+    });
+    BOOST_CHECK(queue == (std::vector<std::pair<uint64_t, CAmount>>{{10, 9000}}));
+    const pos::StakeState stake{pos::GetStakeState(out)};
+    BOOST_CHECK_EQUAL(stake.bonded, 0);
+    BOOST_CHECK_EQUAL(stake.unbonding, 9000);
+    BOOST_CHECK_EQUAL(stake.slashed, 1000);
+    BOOST_CHECK_EQUAL(stake.rewards_owed + stake.pot_reserve, 1000);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
