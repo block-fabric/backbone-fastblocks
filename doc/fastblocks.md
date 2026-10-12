@@ -464,8 +464,9 @@ Every FastBlocks functional test checks this on every node after every step
   follower gives that block back once the record has it again (acknowledging
   it on a second branch only forked the chain).
 - A peer that sends the header of a block that failed against the record, or of
-  one on it, is not punished (template hook `PardonRecordFailures`): its record
-  may be ahead of this node's.
+  one on it, is not punished (template hook `PardonRecordFailures`, on for
+  every sidechain of the template since 2026-10-12): its record may be ahead
+  of this node's.
 - A node keeps at most 1000 tickets; a flood from a peer pushes out the oldest,
   but not the node's own nor those the mainchain committed to. Until its
   committed ticket is acknowledged, the merged miner relays it again once per
@@ -656,6 +657,15 @@ functional tests named).
   making blocks of stake cannot keep a proof off the chain (template hook
   `MergeMinedOutputs`: the node's merged miner puts in the proofs it knows)
   (`evidence_in_bmm_blocks`, `feature_fastblocks_slashing.py`).
+- `PardonRecordFailures` is on in the template for every sidechain (a node a
+  little behind on the record no longer disconnects the peers that are not);
+  the template's unit and functional tests pass with it
+  (`sidechain_hooks_tests/record_failures_pardoned`).
+- `feature_sidechain_record.py` failed about one run in three: it mined a
+  block on the parent of a block the operator had invalidated, with the same
+  coinbase, no transaction and, within one second, the same time: the very
+  block, which the node rightly refused (`duplicate-invalid`). A test timing
+  matter, not a bug: each block it mines now pays a new address.
 - Bonds cannot be griefed: only the owner adds to a bond (it signs each
   later bond, `bad-pos-bond-owner-sig`), and an unbond of all (amount 0,
   `createunbond <key>` or `all`) takes all that is bonded when it is applied
