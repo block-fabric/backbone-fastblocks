@@ -2422,4 +2422,56 @@ BOOST_FIXTURE_TEST_CASE(seed_from_the_mainchain, SeedSetup)
     BOOST_CHECK(Tip()->GetBlockHash() == tip);
 }
 
+BOOST_FIXTURE_TEST_CASE(record_failures_pardoned, FastBlocksSetup)
+{
+    // A block that failed against the record (its anchor's commitment lost, say), and the blocks on
+    // it: a peer that sends their headers is not punished (its record may be ahead), unlike for a
+    // block the operator marked invalid.
+    BOOST_CHECK(Hooks().PardonRecordFailures());
+    StartPos();
+    const CBlock first{PosBlock(1)};
+    Take(first);
+    const CBlock second{PosBlock(2)};
+    Take(second);
+    CBlockIndex* failed{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(first.GetHash()))};
+    BlockValidationState invalidated;
+    BOOST_REQUIRE(Chain().InvalidateBlock(invalidated, failed, /*by_record=*/true));
+    const auto result{[&](const CBlockHeader& header) {
+        BlockValidationState state;
+        Chainman().ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state);
+        return std::make_pair(state.GetResult(), state.GetRejectReason());
+    }};
+    BOOST_CHECK(result(second) == std::make_pair(BlockValidationResult::BLOCK_TIME_FUTURE, std::string{"record-failed"}));
+    BOOST_CHECK(result(first) == std::make_pair(BlockValidationResult::BLOCK_TIME_FUTURE, std::string{"record-failed"}));
+    BOOST_REQUIRE(Chain().InvalidateBlock(invalidated, failed, /*by_record=*/false));
+    BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+}
+
+BOOST_FIXTURE_TEST_CASE(no_second_ack_while_one_waits, FastBlocksSetup)
+{
+    // The acknowledgement of a commitment the record lost and has again waits for the follower to
+    // give its block back: a leader does not acknowledge the commitment again on another branch.
+    // One the operator marked invalid, it may.
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    const CBlockIndex* parent{Tip()};
+    const CBlock acking{PosBlock(2, ack)};
+    Take(acking);
+    CBlockIndex* index{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(acking.GetHash()))};
+    const auto next_ack{[&](int i) {
+        const int64_t slot{Slot(i)};
+        LOCK(::cs_main);
+        return Hooks().NextAck(*Tip(), pos::GetFastState(Chain().SideState().View()), slot);
+    }};
+    BlockValidationState state;
+    BOOST_REQUIRE(Chain().InvalidateBlock(state, index, /*by_record=*/true));
+    BOOST_REQUIRE(Tip() == parent);
+    BOOST_CHECK(!next_ack(3));
+    BOOST_REQUIRE(Chain().InvalidateBlock(state, index, /*by_record=*/false));
+    const auto again{next_ack(3)};
+    BOOST_REQUIRE(again);
+    BOOST_CHECK(*again == ack);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

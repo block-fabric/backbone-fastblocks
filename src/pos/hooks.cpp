@@ -808,6 +808,16 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
         if (!committed || *committed <= fast.last_main_height) continue;
         if (best && best->main_height <= *committed) continue;
         if (!Acknowledgeable(ticket, tip, fast, slot)) continue;
+        // A block that acknowledged it failed when the record lost the commitment, and the follower is
+        // about to give it back now that the record has it again: acknowledging it here too would only
+        // fork the chain (both branches with the same anchor; the longer wins).
+        const auto acked{BlocksCommittedBy(ticket.Hash())};
+        if (std::any_of(acked.begin() + 1, acked.end(), [&](const uint256& hash) {
+                const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(hash)};
+                return index && (index->nStatus & BLOCK_FAILED_VALID) && record.GetFailure(hash) == sidechain::Mainchain::Failure::RECORD;
+            })) {
+            continue;
+        }
         best = AnchorAck{.ticket = ticket, .main_height = *committed};
     }
     return best;

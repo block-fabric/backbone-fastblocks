@@ -147,6 +147,8 @@ public:
     bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override;
     bool CheckBlock(const CBlock& block, BlockValidationState& state) const override;
     bool IsWaitReason(const std::string& reject_reason) const override;
+    //! A node a little behind on the record after a mainchain reorg must not cut itself off from the peers that took an anchor back first.
+    bool PardonRecordFailures() const override { return true; }
     std::optional<int64_t> WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const override;
     uint256 SectionsHash(std::span<const unsigned char> sections) const override;
     int64_t MaxFutureBlockTime() const override;
