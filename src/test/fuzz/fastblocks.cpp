@@ -66,6 +66,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -578,7 +579,7 @@ struct FastChain {
     }
 
     /** A transaction spending a coin of `key`, with these outputs (taking their value from it) and the change; nothing if no coin pays for it. */
-    std::optional<CMutableTransaction> Spend(FuzzedDataProvider& fdp, std::vector<CTxOut> outputs)
+    std::optional<CMutableTransaction> Spend(FuzzedDataProvider& fdp, std::vector<CTxOut> outputs, const std::function<void(CMutableTransaction&)>& before_signing = {})
     {
         if (coins.empty()) return std::nullopt;
         auto it{coins.begin()};
@@ -592,6 +593,7 @@ struct FastChain {
         tx.vin.emplace_back(outpoint);
         tx.vout = std::move(outputs);
         if (left > 0) tx.vout.emplace_back(left, script);
+        if (before_signing) before_signing(tx);
         FillableSigningProvider keystore;
         keystore.AddKey(key);
         std::map<COutPoint, Coin> spent_coins{{outpoint, Coin{spent, 1, /*fCoinBaseIn=*/false}}};
@@ -611,7 +613,14 @@ struct FastChain {
         const CKey& signer{fdp.ConsumeIntegralInRange<int>(0, 15) == 0 ? keys[0] : validator};
         if (!signer.SignSchnorr(pos::BondPopHash(owner, Genesis()), pop, nullptr, uint256{})) return;
         const CAmount amount{fdp.ConsumeIntegralInRange<CAmount>(1, 2 * Hooks().Params().min_stake + 1000)};
-        if (const auto tx{Spend(fdp, {CTxOut{amount, pos::BondScript(XOnly(validator), owner, pop)}})}) {
+        // The owner's signature, which a bond to a validator with an owner needs (mostly there).
+        const bool owner_signs{fdp.ConsumeIntegralInRange<int>(0, 7) != 0};
+        const auto sign{[&](CMutableTransaction& tx) {
+            std::vector<unsigned char> sig;
+            if (owner_signs && !key.SignCompact(MessageHash(pos::BondMessage(XOnly(validator), amount, tx.vin[0].prevout, Genesis())), sig)) return;
+            tx.vout[0].scriptPubKey = pos::BondScript(XOnly(validator), owner, pop, sig);
+        }};
+        if (const auto tx{Spend(fdp, {CTxOut{amount, pos::BondScript(XOnly(validator), owner, pop)}}, sign)}) {
             (void)WITH_LOCK(::cs_main, return Chainman().ProcessTransaction(MakeTransactionRef(*tx)));
         }
     }
@@ -917,6 +926,8 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
         case 0: {
             // A transaction of bonds and unbonds.
             CMutableTransaction tx;
+            // A coin it spends: what the owner's signature of a bond names.
+            tx.vin.emplace_back(COutPoint{Txid::FromUint256(ArithToUint256(arith_uint256{fdp.ConsumeIntegral<uint64_t>()})), fdp.ConsumeIntegral<uint32_t>()});
             CAmount bonding{0};
             LIMITED_WHILE(fdp.ConsumeBool(), 3)
             {
@@ -928,12 +939,16 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
                     const CKey& signer{fdp.ConsumeIntegralInRange<int>(0, 15) == 0 ? keys[0] : validator};
                     assert(signer.SignSchnorr(pos::BondPopHash(owner_hash, genesis), pop, nullptr, uint256{}));
                     const CAmount amount{fdp.ConsumeBool() ? fdp.ConsumeIntegralInRange<CAmount>(-1, 3 * params.min_stake) : fdp.ConsumeIntegral<CAmount>()};
-                    tx.vout.emplace_back(amount, pos::BondScript(XOnly(validator), owner_hash, pop));
+                    // The owner's signature (a bond to a validator with an owner needs it), or none.
+                    std::vector<unsigned char> owner_sig;
+                    if (fdp.ConsumeBool()) assert(owner.SignCompact(MessageHash(pos::BondMessage(XOnly(validator), amount, tx.vin[0].prevout, genesis)), owner_sig));
+                    tx.vout.emplace_back(amount, pos::BondScript(XOnly(validator), owner_hash, pop, owner_sig));
                     bonding += amount > 0 && MoneyRange(amount) ? amount : 0;
                 } else {
                     const auto record{pos::GetValidator(step, XOnly(validator))};
                     pos::Unbond unbond;
                     unbond.pubkey = XOnly(validator);
+                    // (0 is UNBOND_ALL: all that is bonded then.)
                     unbond.amount = fdp.ConsumeBool() && record ? record->bonded : fdp.ConsumeIntegralInRange<CAmount>(0, 3 * params.min_stake);
                     unbond.sequence = (record ? record->unbond_seq : 0) + fdp.ConsumeIntegralInRange<uint32_t>(0, 1);
                     assert(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, genesis)), unbond.signature));

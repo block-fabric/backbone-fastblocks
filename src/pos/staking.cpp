@@ -220,8 +220,19 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const auto before{VALIDATORS.Get(out, bond->pubkey)};
             ValidatorRecord after{before.value_or(ValidatorRecord{})};
             if (after.tombstoned) return Fail(reject_reason, "bad-pos-bond-tombstoned");
-            // The first bond names the owner; more bonds must name the same.
-            if (!after.owner.IsNull() && after.owner != bond->owner) return Fail(reject_reason, "bad-pos-bond-owner");
+            // The first bond names the owner; more bonds must name the same, and only the owner adds
+            // them: it signs the bond (its amount, and the first coin the transaction spends, so that
+            // the signature serves once). Otherwise anyone could top up a bond, by a satoshi, and so
+            // leave a remainder under the minimum stake to an unbond the owner signed.
+            if (!after.owner.IsNull()) {
+                if (after.owner != bond->owner) return Fail(reject_reason, "bad-pos-bond-owner");
+                CPubKey signer;
+                if (bond->owner_sig.empty() || tx.vin.empty() ||
+                    !signer.RecoverCompact(MessageHash(BondMessage(bond->pubkey, bond->amount, tx.vin[0].prevout, m_genesis)), bond->owner_sig) ||
+                    !signer.IsCompressed() || signer.GetID() != CKeyID{after.owner}) {
+                    return Fail(reject_reason, "bad-pos-bond-owner-sig");
+                }
+            }
             after.owner = bond->owner;
             after.bonded += bond->amount;
             if (!MoneyRange(after.bonded)) return Fail(reject_reason, "bad-pos-bond-amount");
@@ -236,9 +247,11 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const auto before{VALIDATORS.Get(out, unbond->pubkey)};
             if (!before || before->owner.IsNull()) return Fail(reject_reason, "bad-pos-unbond-unknown");
             if (unbond->sequence != before->unbond_seq) return Fail(reject_reason, "bad-pos-unbond-sequence");
-            if (unbond->amount <= 0 || unbond->amount > before->bonded) return Fail(reject_reason, "bad-pos-unbond-amount");
+            // UNBOND_ALL: all that is bonded now, whatever was added since the owner signed.
+            const CAmount amount{unbond->amount == UNBOND_ALL ? before->bonded : unbond->amount};
+            if (amount <= 0 || amount > before->bonded) return Fail(reject_reason, "bad-pos-unbond-amount");
             // All of it, or so that what stays is enough to take part.
-            const CAmount remainder{before->bonded - unbond->amount};
+            const CAmount remainder{before->bonded - amount};
             if (remainder != 0 && remainder < m_params.min_stake) return Fail(reject_reason, "bad-pos-unbond-remainder");
             CPubKey signer;
             if (!signer.RecoverCompact(MessageHash(UnbondMessage(unbond->pubkey, unbond->amount, unbond->sequence, m_genesis)), unbond->signature) ||
@@ -248,13 +261,13 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             ValidatorRecord after{*before};
             after.bonded = remainder;
             ++after.unbond_seq;
-            const UnbondingEntry entry{.release_anchor = anchors + static_cast<uint64_t>(m_params.unbonding_anchors), .sequence = unbond->sequence, .amount = unbond->amount};
+            const UnbondingEntry entry{.release_anchor = anchors + static_cast<uint64_t>(m_params.unbonding_anchors), .sequence = unbond->sequence, .amount = amount};
             after.unbonding.push_back(entry);
             UNBOND_QUEUE.Put(out, UnbondKey{.release_anchor = entry.release_anchor, .pubkey = unbond->pubkey, .sequence = entry.sequence}, entry.amount);
             PutValidator(out, unbond->pubkey, before, after);
             if (!stake) stake = STAKE_STATE.Get(out);
-            stake->bonded -= unbond->amount;
-            stake->unbonding += unbond->amount;
+            stake->bonded -= amount;
+            stake->unbonding += amount;
         }
     }
     if (stake) STAKE_STATE.Put(out, *stake);

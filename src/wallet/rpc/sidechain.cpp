@@ -34,6 +34,40 @@ CTransactionRef SendScript(CWallet& wallet, const CScript& script, CAmount value
     return res->tx;
 }
 
+/**
+ * Make, sign and send a bond to `pubkey` of `amount`, owned by `owner`. With `owner_signs` (a bond to
+ * a validator that has an owner), the owner signs it: its amount and the first coin the transaction
+ * spends, which only coin selection knows. The transaction is made with a signature of the same size
+ * in its place (the fee stays right), then the owner's goes in, then the inputs are signed.
+ */
+CTransactionRef SendBond(CWallet& wallet, const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop, CAmount amount, bool owner_signs)
+{
+    const std::vector<unsigned char> placeholder(owner_signs ? CPubKey::COMPACT_SIGNATURE_SIZE : 0, 0);
+    std::vector<CRecipient> recipients{{CNoDestination{pos::BondScript(pubkey, owner, pop, placeholder)}, amount, /*fSubtractFeeFromAmount=*/false}};
+    CCoinControl coin_control;
+    auto res{CreateTransaction(wallet, recipients, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false)};
+    if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
+    CMutableTransaction tx{*res->tx};
+    if (owner_signs) {
+        std::string signature_base64;
+        const SigningResult signing{wallet.SignMessage(pos::BondMessage(pubkey, amount, tx.vin.at(0).prevout, Params().GetConsensus().hashGenesisBlock), PKHash{owner}, signature_base64)};
+        if (signing != SigningResult::OK) throw JSONRPCError(RPC_WALLET_ERROR, "This wallet cannot sign for the bond's owner: " + SigningResultString(signing));
+        const auto signature{*Assert(DecodeBase64(signature_base64))};
+        const CScript placeholder_script{pos::BondScript(pubkey, owner, pop, placeholder)};
+        bool replaced{false};
+        for (CTxOut& out : tx.vout) {
+            if (out.scriptPubKey != placeholder_script || replaced) continue;
+            out.scriptPubKey = pos::BondScript(pubkey, owner, pop, signature);
+            replaced = true;
+        }
+        if (!replaced) throw JSONRPCError(RPC_WALLET_ERROR, "The bond output is missing from the transaction made");
+    }
+    if (!WITH_LOCK(wallet.cs_wallet, return wallet.SignTransaction(tx))) throw JSONRPCError(RPC_WALLET_ERROR, "The wallet could not sign the bond's transaction");
+    const CTransactionRef signed_tx{MakeTransactionRef(std::move(tx))};
+    wallet.CommitTransaction(signed_tx, /*replaces_txid=*/std::nullopt, /*comment=*/std::nullopt, /*comment_to=*/std::nullopt);
+    return signed_tx;
+}
+
 } // namespace
 
 RPCMethod getdepositaddress()
@@ -319,7 +353,8 @@ RPCMethod createbond()
     }
     if (!pos::CheckBondPop(pubkey, owner, pop, Params().GetConsensus().hashGenesisBlock)) throw JSONRPCError(RPC_INVALID_PARAMETER, "The proof of possession is not the validator key's signature for this owner");
 
-    const CTransactionRef tx{SendScript(*pwallet, pos::BondScript(pubkey, owner, pop), amount)};
+    // Once a validator has an owner, only the owner adds bonds to it: it signs them.
+    const CTransactionRef tx{SendBond(*pwallet, pubkey, owner, pop, amount, /*owner_signs=*/existing && !existing->owner.IsNull())};
     if (CommittedTransactionRefused(*pwallet, tx)) {
         pwallet->AbandonTransaction(tx->GetHash());
         throw JSONRPCError(RPC_WALLET_ERROR, "The bond was not accepted into the mempool");
@@ -346,12 +381,13 @@ RPCMethod createunbond()
         HELP_REQUIRING_PASSPHRASE,
         {
             {"validator_pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The validator's x-only key"},
-            {"amount", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"all of the bond"}, "The amount in " + CURRENCY_UNIT + " to unbond"},
+            {"amount", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"all"}, "The amount in " + CURRENCY_UNIT + " to unbond, or \"all\": all that is bonded when the unbond is mined (whatever was added since)"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
             {RPCResult::Type::STR_HEX, "txid", "The id of the transaction"},
-            {RPCResult::Type::STR_AMOUNT, "amount", "The amount unbonded"},
+            {RPCResult::Type::STR_AMOUNT, "amount", "The amount unbonded (for all: what is bonded now)"},
+            {RPCResult::Type::BOOL, "all", "Whether it unbonds all that is bonded when it is mined"},
             {RPCResult::Type::STR, "owner", "The address it will be paid to"},
             {RPCResult::Type::NUM, "releaseanchor", "About when: the anchor count it is paid at (if mined before the next anchor)"},
         }},
@@ -365,9 +401,10 @@ RPCMethod createunbond()
     const auto staking{EnsureStaking(*pwallet)};
     const auto bond{FindBond(staking, pubkey)};
     if (!bond || bond->owner.IsNull() || bond->bonded <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "This validator has nothing bonded");
-    const CAmount amount{request.params[1].isNull() ? bond->bonded : AmountFromValue(request.params[1])};
+    const bool all{request.params[1].isNull() || (request.params[1].isStr() && request.params[1].get_str() == "all")};
+    const CAmount amount{all ? bond->bonded : AmountFromValue(request.params[1])};
     if (amount <= 0 || amount > bond->bonded) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The amount must be positive and at most what is bonded (%s %s)", FormatMoney(bond->bonded), CURRENCY_UNIT));
-    if (amount != bond->bonded && bond->bonded - amount < staking.min_stake) {
+    if (!all && amount != bond->bonded && bond->bonded - amount < staking.min_stake) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("What stays bonded must be nothing or at least the minimum stake of %s %s", FormatMoney(staking.min_stake), CURRENCY_UNIT));
     }
 
@@ -386,10 +423,12 @@ RPCMethod createunbond()
     EnsureWalletIsUnlocked(*pwallet);
     pos::Unbond unbond;
     unbond.pubkey = pubkey;
-    unbond.amount = amount;
+    // All of it: the form that unbonds all that is bonded when it is mined, so that a bond added
+    // meanwhile leaves no remainder under the minimum stake.
+    unbond.amount = all ? pos::UNBOND_ALL : amount;
     unbond.sequence = bond->unbond_seq;
     std::string signature_base64;
-    const SigningResult signing{pwallet->SignMessage(pos::UnbondMessage(pubkey, amount, unbond.sequence, Params().GetConsensus().hashGenesisBlock), PKHash{bond->owner}, signature_base64)};
+    const SigningResult signing{pwallet->SignMessage(pos::UnbondMessage(pubkey, unbond.amount, unbond.sequence, Params().GetConsensus().hashGenesisBlock), PKHash{bond->owner}, signature_base64)};
     if (signing != SigningResult::OK) throw JSONRPCError(RPC_WALLET_ERROR, "This wallet does not own the bond: " + SigningResultString(signing));
     unbond.signature = *Assert(DecodeBase64(signature_base64));
 
@@ -401,6 +440,7 @@ RPCMethod createunbond()
     UniValue result(UniValue::VOBJ);
     result.pushKV("txid", tx->GetHash().GetHex());
     result.pushKV("amount", ValueFromAmount(amount));
+    result.pushKV("all", all);
     result.pushKV("owner", EncodeDestination(WitnessV0KeyHash{bond->owner}));
     result.pushKV("releaseanchor", staking.anchors + static_cast<uint64_t>(Params().GetConsensus().pos.unbonding_anchors));
     return result;

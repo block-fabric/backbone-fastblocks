@@ -209,17 +209,25 @@ left out of the validator sets for a while when they miss their slots, and lose
 part of their stake for good when they sign two blocks for a slot.
 
 **Bond** (`createbond`): an output `OP_RETURN 0xDB'STK' | validator x-only key
-(32) | owner key hash (20) | proof of possession (64)` whose value is bonded:
+(32) | owner key hash (20) | proof of possession (64) [| owner signature (65)]`
+whose value is bonded:
 it leaves circulation into the state, as a withdrawal does. The proof is the
 validator key's BIP340 signature of `TaggedHash("hpos/bond", owner ||
 genesis hash)`: nobody bonds a key not theirs (`signbondpop` on the
 validator's node makes it; `createbond` asks the node's block producer if it
 has the key). The first bond names the owner, who alone may unbond, and who is
-paid what is unbonded (P2WPKH).
+paid what is unbonded (P2WPKH); and who alone adds bonds after: each later bond
+carries the owner's signed message `FastBlocks bond <key> <amount>
+<txid>:<n> <genesis>`, naming the first coin its transaction spends (a coin is
+spent once, so the signature serves once). The proof of possession is public:
+without this, anyone could top up a bond by a satoshi, and leave a remainder
+under the minimum stake to an unbond its owner signed.
 
 **Unbond** (`createunbond`): an output of value 0, `OP_RETURN 0xDC'UNB' |
 validator key | amount (8) | sequence (4) | signature (65)`, the owner's signed
-message `FastBlocks unbond <key> <amount> <sequence> <genesis>`. It takes the
+message `FastBlocks unbond <key> <amount> <sequence> <genesis>`; an amount of 0
+(`all` in the message) unbonds all that is bonded when the unbond is applied,
+whatever was added since it was signed. It takes the
 amount off the stake at once, and pays it to the owner at the peg step of the
 anchor `unbonding_anchors` after (the coinbase's payouts, as refunds); until
 then a proof can still take a share of it. If the mainchain stalls, so does
@@ -230,13 +238,14 @@ unbonding.
 | A bond output reads | `bad-pos-bond` |
 | Its value is positive (and the total within MAX_MONEY) | `bad-pos-bond-amount` |
 | It names an owner, the validator's own if it has one | `bad-pos-bond-owner` |
+| To a validator with an owner: the owner signed it (its amount and the transaction's first input) | `bad-pos-bond-owner-sig` |
 | Its proof of possession verifies | `bad-pos-bond-pop` |
 | The key is not banned | `bad-pos-bond-tombstoned` |
 | An unbond output reads | `bad-pos-unbond` |
 | Its value is 0 | `bad-pos-unbond-value` |
 | The validator has an owner | `bad-pos-unbond-unknown` |
 | Its sequence is the validator's next (an unbond counts once) | `bad-pos-unbond-sequence` |
-| Its amount is positive, at most what is bonded | `bad-pos-unbond-amount` |
+| Its amount (all that is bonded, for 0) is positive, at most what is bonded | `bad-pos-unbond-amount` |
 | What stays bonded is nothing or at least `min_stake` | `bad-pos-unbond-remainder` |
 | The owner signed it | `bad-pos-unbond-sig` |
 
@@ -369,8 +378,8 @@ last acknowledged one that it has neither a ticket nor a block of.
 | `getsidechainstate` | Adds `pegbalance`: the coins the chain holds against the escrow (below) |
 | `submitevidence <hex>`, `listevidence` | Evidence (above) |
 | `setstaking true\|false`, `getstakinginfo` | This node as a validator: on or off (on at start), its keys, what it made, its next slot |
-| `createbond <pubkey> <amount> [pop] [owner]` (wallet) | Bond coins of the wallet to a key |
-| `createunbond <pubkey> [amount]` (wallet) | Unbond some or all of the wallet's bond |
+| `createbond <pubkey> <amount> [pop] [owner]` (wallet) | Bond coins of the wallet to a key (signed by the owner, to a key that has one) |
+| `createunbond <pubkey> [amount\|"all"]` (wallet) | Unbond some of the wallet's bond, or all of it (the default: all that is bonded when it is mined) |
 | `listbonds [all]` (wallet) | The wallet's bonds (or every validator's) |
 
 ## The staking page
@@ -534,7 +543,7 @@ after every step:
 | `feature_fastblocks_partition.py` | A leader that signs twice; a partition with an anchor on each side (the earlier one wins); an anchor of a branch the validators left; IBD |
 | `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex`; the producer's signatures are deterministic; another valid signature of the leader is the same block (taken, the node's own kept, no peer disconnected; two nodes holding the two stay in sync) |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
-| `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; an unbond paid unbonding_anchors anchors later |
+| `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; a stranger's top-up of a satoshi refused, the owner's taken; an unbond of all paid unbonding_anchors anchors later |
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; a BMM block carries a proof (all validators stopped), its payee rewarded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
@@ -618,10 +627,6 @@ Found and left as they are (decisions):
   it leads fewer than 10 slots an epoch: on the main network (120 slots) with
   13 or more equal validators, on the test networks (20 slots) unless it holds
   half the stake.
-- Anyone can add a bond to a validator (the proof of possession is public, and
-  the coins go to its owner): a bond of 1 satoshi just before an owner's
-  unbond of all of it makes that unbond fail (`bad-pos-unbond-remainder`); the
-  owner signs again.
 
 ## The decisions of 2026-10-12
 
@@ -651,7 +656,11 @@ functional tests named).
   making blocks of stake cannot keep a proof off the chain (template hook
   `MergeMinedOutputs`: the node's merged miner puts in the proofs it knows)
   (`evidence_in_bmm_blocks`, `feature_fastblocks_slashing.py`).
-<!-- decisions-2026-10-12 -->
+- Bonds cannot be griefed: only the owner adds to a bond (it signs each
+  later bond, `bad-pos-bond-owner-sig`), and an unbond of all (amount 0,
+  `createunbond <key>` or `all`) takes all that is bonded when it is applied
+  (`bond_griefing`, `bonds`, `unbonds`, `feature_fastblocks_staking.py`).
+  Jailing is unchanged.
 
 ## Deviations from the design (phase 5)
 

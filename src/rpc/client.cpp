@@ -72,7 +72,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "createwithdrawal", 2, "mainchainfee" },
     { "refundwithdrawal", 1, "vout" },
     { "createbond", 1, "amount" },
-    { "createunbond", 1, "amount" },
+    { "createunbond", 1, "amount", ParamFormat::JSON_OR_STRING },
     { "listbonds", 0, "all" },
     { "setmocktime", 0, "timestamp" },
     { "mockscheduler", 0, "delta_time" },

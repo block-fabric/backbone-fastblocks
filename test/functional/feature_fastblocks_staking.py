@@ -13,8 +13,11 @@ enough stake is bonded. Two nodes, each with a validator key, against a mainchai
     leaders that run, the third key's slots stay empty;
   - liveness: the third key made none of the many slots it led, and is jailed: out of the sets made
     in the next epochs, its coins kept;
-  - unbond: the second node takes its stake back; it leaves the stake at once, and is paid to its
-    wallet, through the payouts of the peg actions, unbonding_anchors anchors later;
+  - only the owner adds to a bond: a stranger's top-up of a satoshi (with the public proof of
+    possession) is refused; the owner's own (which it signs) is taken;
+  - unbond: the second node takes all its stake back (an unbond of all: what is bonded when it is
+    mined); it leaves the stake at once, and is paid to its wallet, through the payouts of the peg
+    actions, unbonding_anchors anchors later;
   - after every step, the coins of every node are the mainchain's escrow (pegbalance), bonded and
     unbonding stake included.
 """
@@ -25,9 +28,12 @@ from decimal import Decimal
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
 from test_framework.authproxy import JSONRPCException
 from test_framework.fastblocks import KEYS, SLOT, XONLY, assert_peg_balance, bond_pop
+from test_framework.messages import CTransaction, CTxOut
 from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error, rpc_port
 
 UNBONDING_ANCHORS = 20
+#: The tag of a bond output (OP_RETURN 0xDB'STK' | ...), in hex.
+BOND_TAG = "db53544b"
 
 
 class FastBlocksStakingTest(SidechainTest):
@@ -165,10 +171,27 @@ class FastBlocksStakingTest(SidechainTest):
         self.wait_in_sync()
         self.check_peg()
 
-        self.log.info("Unbond: the stake leaves at once, and is paid unbonding_anchors anchors later")
-        assert_raises_rpc_error(-8, "What stays bonded must be nothing or at least the minimum stake", n1.createunbond, XONLY[1], Decimal("0.00999"))
-        unbond = n1.createunbond(XONLY[1])
-        assert_equal(unbond["amount"], Decimal("0.01"))
+        self.log.info("Only the owner adds to a bond: a stranger's satoshi is refused, the owner's top-up taken")
+        bond_tx = n1.decoderawtransaction(n1.gettransaction(bond1["txid"])["hex"])
+        [bond_script] = [o["scriptPubKey"]["hex"] for o in bond_tx["vout"] if o["scriptPubKey"]["hex"].startswith("6a") and BOND_TAG in o["scriptPubKey"]["hex"][:16]]
+        grief = CTransaction()
+        grief.vout = [CTxOut(1, bytes.fromhex(bond_script))]
+        funded = n0.fundrawtransaction(grief.serialize().hex())["hex"]
+        signed = n0.signrawtransactionwithwallet(funded)["hex"]
+        assert_raises_rpc_error(-26, "bad-pos-bond-owner-sig", n0.sendrawtransaction, signed, 0, Decimal("0.00000001"))
+        assert_raises_rpc_error(-4, "Another wallet owns the bond of this validator", n0.createbond, XONLY[1], Decimal("0.00000001"), bond_script[2 + 4 + 8 + 64 + 40:2 + 4 + 8 + 64 + 40 + 128])
+        topup = n1.createbond(XONLY[1], Decimal("0.005"))
+        assert_equal(topup["bonded"], Decimal("0.015"))
+        self.wait_until(lambda: n1.gettransaction(topup["txid"])["confirmations"] > 0, timeout=60)
+        assert_equal(n0.getvalidator(XONLY[1])["bond"]["bonded"], Decimal("0.015"))
+        self.wait_in_sync()
+        self.check_peg()
+
+        self.log.info("Unbond all: the stake leaves at once, and is paid unbonding_anchors anchors later")
+        assert_raises_rpc_error(-8, "What stays bonded must be nothing or at least the minimum stake", n1.createunbond, XONLY[1], Decimal("0.01499"))
+        unbond = n1.createunbond(XONLY[1], "all")
+        assert_equal(unbond["amount"], Decimal("0.015"))
+        assert_equal(unbond["all"], True)
         # One at a time: a second, with the same sequence, could never be mined.
         try:
             n1.createunbond(XONLY[1])
@@ -179,7 +202,7 @@ class FastBlocksStakingTest(SidechainTest):
         self.wait_until(lambda: n1.gettransaction(unbond["txid"])["confirmations"] > 0, timeout=60)
         listed = n1.listbonds()[0]
         assert_equal(listed["bonded"], 0)
-        assert_equal(listed["unbonding"], Decimal("0.01"))
+        assert_equal(listed["unbonding"], Decimal("0.015"))
         release = listed["unbonds"][0]["releaseanchor"]
         assert_equal(release - n1.getposinfo()["anchors"] <= UNBONDING_ANCHORS, True)
         received = n1.getreceivedbyaddress(owner, 0)
@@ -187,7 +210,7 @@ class FastBlocksStakingTest(SidechainTest):
         while n1.getposinfo()["anchors"] < release:
             assert_equal(n1.getreceivedbyaddress(owner, 0), received)
             self.anchor()
-        self.wait_until(lambda: n1.getreceivedbyaddress(owner, 0) - received == Decimal("0.01"), timeout=60)
+        self.wait_until(lambda: n1.getreceivedbyaddress(owner, 0) - received == Decimal("0.015"), timeout=60)
         assert_equal(n1.listbonds()[0]["unbonding"], 0)
         self.wait_in_sync()
         balance = self.check_peg()

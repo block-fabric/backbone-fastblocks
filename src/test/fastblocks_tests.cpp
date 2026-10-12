@@ -347,12 +347,17 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
     uint160 Owner(const CKey& owner) { return uint160{owner.GetPubKey().GetID()}; }
     pos::StakeState Stake() { return WITH_LOCK(::cs_main, return pos::GetStakeState(Chain().SideState().View())); }
     std::optional<pos::ValidatorRecord> Validator(const uint256& pubkey) { return WITH_LOCK(::cs_main, return pos::GetValidator(Chain().SideState().View(), pubkey)); }
-    /** A bond output: `validator` signs the proof of possession for `owner`. */
-    CTxOut BondOut(const CKey& validator, CAmount amount, const uint160& owner)
+    /**
+     * A bond output: `validator` signs the proof of possession for `owner`; `owner_signer`, if given,
+     * signs the bond for a transaction that spends `spends` first (a bond to a validator with an owner).
+     */
+    CTxOut BondOut(const CKey& validator, CAmount amount, const uint160& owner, const CKey* owner_signer = nullptr, const COutPoint& spends = TxWithCoin())
     {
         std::array<unsigned char, 64> pop;
         BOOST_REQUIRE(validator.SignSchnorr(pos::BondPopHash(owner, Genesis()), pop, nullptr, uint256{}));
-        return CTxOut{amount, pos::BondScript(XOnly(validator), owner, pop)};
+        std::vector<unsigned char> owner_sig;
+        if (owner_signer) BOOST_REQUIRE(owner_signer->SignCompact(MessageHash(pos::BondMessage(XOnly(validator), amount, spends, Genesis())), owner_sig));
+        return CTxOut{amount, pos::BondScript(XOnly(validator), owner, pop, owner_sig)};
     }
     /** An unbond output, signed by `owner`. */
     CTxOut UnbondOut(const CKey& validator, CAmount amount, uint32_t sequence, const CKey& owner)
@@ -390,10 +395,12 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         if (Hooks().GetStaking().ApplyTx(overlay, tx, Tip()->nHeight + 1, Fast().anchors, reason)) return {};
         return reason;
     }
+    /** The coin TxWith spends. */
+    static COutPoint TxWithCoin() { return COutPoint{Txid::FromUint256(uint256{0x77}), 0}; }
     CTransaction TxWith(std::vector<CTxOut> outputs)
     {
         CMutableTransaction tx;
-        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{0x77}), 0});
+        tx.vin.emplace_back(TxWithCoin());
         tx.vout = std::move(outputs);
         return CTransaction{tx};
     }
@@ -1910,6 +1917,24 @@ BOOST_AUTO_TEST_CASE(staking_scripts)
     // The message names the validator, the amount, the sequence and the chain.
     BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 8, genesis));
     BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 7, uint256{2}));
+    // A bond with the owner's signature reads back; one with a signature of another size does not.
+    const std::vector<unsigned char> owner_sig(CPubKey::COMPACT_SIGNATURE_SIZE, 3);
+    const auto signed_bond{pos::ParseBond(CTxOut{5000, pos::BondScript(XOnly(validator), owner_hash, pop, owner_sig)})};
+    BOOST_REQUIRE(signed_bond);
+    BOOST_CHECK(signed_bond->owner_sig == owner_sig && signed_bond->pop == pop && bond->owner_sig.empty());
+    BOOST_CHECK(!pos::ParseBond(CTxOut{5000, pos::BondScript(XOnly(validator), owner_hash, pop, std::vector<unsigned char>(64, 3))}));
+    // The owner's message names the validator, the amount, the coin spent and the chain.
+    const COutPoint coin{Txid::FromUint256(uint256{5}), 1};
+    const std::string bond_message{pos::BondMessage(unbond.pubkey, 4000, coin, genesis)};
+    BOOST_CHECK(bond_message != pos::BondMessage(unbond.pubkey, 4001, coin, genesis));
+    BOOST_CHECK(bond_message != pos::BondMessage(unbond.pubkey, 4000, COutPoint{coin.hash, 2}, genesis));
+    BOOST_CHECK(bond_message != pos::BondMessage(unbond.pubkey, 4000, coin, uint256{2}));
+    BOOST_CHECK(bond_message != pos::BondMessage(XOnly(owner), 4000, coin, genesis));
+    // An unbond of all says so, and reads back.
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, pos::UNBOND_ALL, 7, genesis).find(" all ") != std::string::npos);
+    pos::Unbond all{unbond};
+    all.amount = pos::UNBOND_ALL;
+    BOOST_CHECK_EQUAL(pos::ParseUnbond(CTxOut{0, pos::UnbondScript(all)})->amount, pos::UNBOND_ALL);
     // The penalty: 10 %, in integers, without overflow.
     Consensus::PosParams params;
     const pos::Staking staking{params, genesis};
@@ -1984,8 +2009,8 @@ BOOST_FIXTURE_TEST_CASE(bonds, FastBlocksSetup)
     BOOST_CHECK_EQUAL(record->first_bond_height, Tip()->nHeight);
     BOOST_CHECK(record->Eligible(Pos()));
     BOOST_CHECK_EQUAL(Stake().bonded, 2 * min);
-    // More, by the same owner.
-    Accept(Pay(coin, spent, {BondOut(validator, min, Owner(key))}));
+    // More, by the same owner, who signs them (the amount and the coin the transaction spends first).
+    Accept(Pay(coin, spent, {BondOut(validator, min, Owner(key), &key, coin)}));
     Take(PosBlock(2));
     BOOST_CHECK_EQUAL(Validator(pubkey)->bonded, 3 * min);
     BOOST_CHECK_EQUAL(Stake().bonded, 3 * min);
@@ -1995,7 +2020,16 @@ BOOST_FIXTURE_TEST_CASE(bonds, FastBlocksSetup)
     BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, 0, Owner(key))})), "bad-pos-bond-amount");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, MAX_MONEY + 1, Owner(key))})), "bad-pos-bond-amount");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({CTxOut{min, CScript() << OP_RETURN << std::vector<unsigned char>{0xDB, 'S', 'T', 'K', 1}}})), "bad-pos-bond");
-    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(key))})), "");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(key), &key)})), "");
+    // Without the owner's signature, or with another's, or with one for another coin or amount: refused.
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(key))})), "bad-pos-bond-owner-sig");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(key), &stranger)})), "bad-pos-bond-owner-sig");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, min, Owner(key), &key, coin)})), "bad-pos-bond-owner-sig");
+    {
+        CTxOut other_amount{BondOut(validator, min, Owner(key), &key)};
+        other_amount.nValue = min + 1;
+        BOOST_CHECK_EQUAL(StakingRules(TxWith({other_amount})), "bad-pos-bond-owner-sig");
+    }
     // A smaller bond is taken, but the key takes part only with min_stake.
     Accept(Pay(coin, spent, {BondOut(stranger, min - 1, Owner(key))}));
     Take(PosBlock(3));
@@ -2037,7 +2071,8 @@ BOOST_FIXTURE_TEST_CASE(unbonds, FastBlocksSetup)
     BOOST_CHECK_EQUAL(StakingRules(TxWith({valued})), "bad-pos-unbond-value");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(stranger, min, 0, key)})), "bad-pos-unbond-unknown");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, min, 1, key)})), "bad-pos-unbond-sequence");
-    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 0, 0, key)})), "bad-pos-unbond-amount");
+    // (UNBOND_ALL, 0: all that is bonded.)
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, pos::UNBOND_ALL, 0, key)})), "");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 3 * min + 1, 0, key)})), "bad-pos-unbond-amount");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 3 * min - min / 2, 0, key)})), "bad-pos-unbond-remainder");
     BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, min, 0, stranger)})), "bad-pos-unbond-sig");
@@ -2063,6 +2098,9 @@ BOOST_FIXTURE_TEST_CASE(unbonds, FastBlocksSetup)
     Accept(Pay(coin, spent, {UnbondOut(validator, 2 * min, 1, key)}));
     Take(PosBlock(3));
     BOOST_CHECK(!Validator(pubkey)->Eligible(Pos()));
+    // Nothing bonded: nothing to unbond, all of it or not.
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, pos::UNBOND_ALL, 2, key)})), "bad-pos-unbond-amount");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(validator, 1, 2, key)})), "bad-pos-unbond-amount");
     BOOST_CHECK_EQUAL(Stake().unbonding, 3 * min);
     // Paid at the anchor it is due, through the payouts of the peg actions: not before.
     const CTxOut first{min, script}, second{2 * min, script};
@@ -2811,6 +2849,63 @@ BOOST_FIXTURE_TEST_CASE(deterministic_signatures, FastBlocksSetup)
     // No proof that the leader signed twice: one block, one hash.
     BOOST_CHECK(Hooks().Evidence().All().empty());
     Take(PosBlock(3));
+}
+
+BOOST_FIXTURE_TEST_CASE(bond_griefing, FastBlocksSetup)
+{
+    // Anyone could add to a validator's bond (the proof of possession is public): a satoshi added
+    // made the owner's signed unbond of all of it leave a remainder under the minimum stake. Now only
+    // the owner adds bonds (it signs them), and an unbond of all takes all there is when it is applied.
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    CKey validator, attacker;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    attacker.MakeNewKey(/*fCompressed=*/true);
+    const uint256 pubkey{XOnly(validator)};
+    const CAmount min{Pos().min_stake};
+    Accept(Pay(coin, spent, {BondOut(validator, 2 * min, Owner(key))}));
+    Take(PosBlock(1));
+    // The owner signs an unbond of all of it.
+    const CTxOut unbond_all{UnbondOut(validator, pos::UNBOND_ALL, 0, key)};
+    // The attacker's top-up of a satoshi, with the public proof of possession: refused, without the
+    // owner's signature, with its own, or with the owner's of another bond.
+    const pos::Bond public_bond{*pos::ParseBond(BondOut(validator, 2 * min, Owner(key)))};
+    {
+        COutPoint c{coin};
+        CTxOut s{spent};
+        BOOST_CHECK_EQUAL(Refused(Pay(c, s, {CTxOut{1, pos::BondScript(pubkey, Owner(key), public_bond.pop)}})), "bad-pos-bond-owner-sig");
+    }
+    {
+        COutPoint c{coin};
+        CTxOut s{spent};
+        BOOST_CHECK_EQUAL(Refused(Pay(c, s, {BondOut(validator, 1, Owner(key), &attacker, coin)})), "bad-pos-bond-owner-sig");
+    }
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, 1, Owner(key), &attacker)})), "bad-pos-bond-owner-sig");
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({BondOut(validator, 1, Owner(attacker))})), "bad-pos-bond-owner");
+    // Nor in a block.
+    {
+        CBlock block{PosBlock(2)};
+        COutPoint c{coin};
+        CTxOut s{spent};
+        block.vtx.push_back(MakeTransactionRef(Pay(c, s, {CTxOut{1, pos::BondScript(pubkey, Owner(key), public_bond.pop)}})));
+        Resign(block);
+        BOOST_CHECK_EQUAL(Check(block), "bad-pos-bond-owner-sig");
+    }
+    BOOST_CHECK_EQUAL(Validator(pubkey)->bonded, 2 * min);
+    // The owner's own top-up, signed, is taken; the unbond of all it signed before takes all of it.
+    Accept(Pay(coin, spent, {BondOut(validator, min + 1, Owner(key), &key, coin)}));
+    Take(PosBlock(2));
+    BOOST_CHECK_EQUAL(Validator(pubkey)->bonded, 3 * min + 1);
+    Accept(Pay(coin, spent, {unbond_all}));
+    Take(PosBlock(3));
+    const auto record{*Validator(pubkey)};
+    BOOST_CHECK_EQUAL(record.bonded, 0);
+    BOOST_CHECK_EQUAL(record.Unbonding(), 3 * min + 1);
+    BOOST_CHECK_EQUAL(record.unbond_seq, 1U);
+    BOOST_CHECK(!record.Eligible(Pos()));
+    BOOST_CHECK_EQUAL(Stake().bonded, 0);
+    BOOST_CHECK_EQUAL(Stake().unbonding, 3 * min + 1);
 }
 
 BOOST_FIXTURE_TEST_CASE(slashed_once_and_out_of_the_schedule, FastBlocksSetup)

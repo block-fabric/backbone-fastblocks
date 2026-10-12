@@ -36,11 +36,12 @@ CScript Tagged(std::span<const unsigned char> tag, std::span<const unsigned char
 
 } // namespace
 
-CScript BondScript(const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop)
+CScript BondScript(const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop, std::span<const unsigned char> owner_sig)
 {
     std::vector<unsigned char> payload{pubkey.begin(), pubkey.end()};
     payload.insert(payload.end(), owner.begin(), owner.end());
     payload.insert(payload.end(), pop.begin(), pop.end());
+    payload.insert(payload.end(), owner_sig.begin(), owner_sig.end());
     return Tagged(BOND_TAG, payload);
 }
 
@@ -60,11 +61,13 @@ bool IsUnbondScript(const CScript& script) { return ParseTagged(script, UNBOND_T
 std::optional<Bond> ParseBond(const CTxOut& out)
 {
     const auto payload{ParseTagged(out.scriptPubKey, BOND_TAG)};
-    if (!payload || payload->size() != 32 + 20 + 64) return std::nullopt;
+    constexpr size_t BASE{32 + 20 + 64};
+    if (!payload || (payload->size() != BASE && payload->size() != BASE + CPubKey::COMPACT_SIGNATURE_SIZE)) return std::nullopt;
     Bond bond;
     bond.pubkey = uint256{std::span{*payload}.first(32)};
     std::copy(payload->begin() + 32, payload->begin() + 52, bond.owner.begin());
-    std::copy(payload->begin() + 52, payload->end(), bond.pop.begin());
+    std::copy(payload->begin() + 52, payload->begin() + BASE, bond.pop.begin());
+    bond.owner_sig.assign(payload->begin() + BASE, payload->end());
     bond.amount = out.nValue;
     return bond;
 }
@@ -97,7 +100,13 @@ bool CheckBondPop(const uint256& pubkey, const uint160& owner, const std::array<
 
 std::string UnbondMessage(const uint256& pubkey, CAmount amount, uint32_t sequence, const uint256& genesis_hash)
 {
-    return strprintf("FastBlocks unbond %s %d %u %s", HexStr(pubkey), amount, sequence, genesis_hash.GetHex());
+    const std::string what{amount == UNBOND_ALL ? std::string{"all"} : strprintf("%d", amount)};
+    return strprintf("FastBlocks unbond %s %s %u %s", HexStr(pubkey), what, sequence, genesis_hash.GetHex());
+}
+
+std::string BondMessage(const uint256& pubkey, CAmount amount, const COutPoint& spent, const uint256& genesis_hash)
+{
+    return strprintf("FastBlocks bond %s %d %s:%u %s", HexStr(pubkey), amount, spent.hash.GetHex(), spent.n, genesis_hash.GetHex());
 }
 
 } // namespace pos
