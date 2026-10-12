@@ -584,9 +584,12 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
     return true;
 }
 
-std::shared_ptr<const ValidatorSet> FastBlocksHooks::AnchorSetOf(const uint256& anchor, const sidechain::StoreView& view, uint64_t* set_anchors) const
+std::shared_ptr<const ValidatorSet> FastBlocksHooks::AnchorSetOf(const uint256& anchor, const sidechain::StoreView& view, uint64_t* set_anchors, bool from_state) const
 {
-    {
+    // From memory only for a header (the active chain's state is no state of its branch): the rules
+    // of a block read the state of its chain, so that what a node holds in memory -- a set the state
+    // pruned since, or one an earlier record made (CheckSeeds) -- does not change the outcome.
+    if (!from_state) {
         LOCK(m_sets_mutex);
         if (const auto found{m_known_sets.find(anchor)}; found != m_known_sets.end()) {
             if (set_anchors) *set_anchors = found->second.anchors;
@@ -601,7 +604,7 @@ std::shared_ptr<const ValidatorSet> FastBlocksHooks::AnchorSetOf(const uint256& 
     if (set_anchors) *set_anchors = entry->anchors;
     // Kept in memory, for the headers of branches that are not active (bounded: the oldest go first).
     LOCK(m_sets_mutex);
-    if (m_known_sets.emplace(anchor, KnownSet{.set = set, .anchors = entry->anchors}).second) {
+    if (const auto [found, inserted]{m_known_sets.insert_or_assign(anchor, KnownSet{.set = set, .anchors = entry->anchors})}; inserted) {
         m_known_order.push_back(anchor);
         while (m_known_order.size() > MAX_KNOWN_SETS) {
             m_known_sets.erase(m_known_order.front());
@@ -624,10 +627,10 @@ std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& p
         }
         const bool anchor{!index->m_ext || index->nNonce != 0};
         if (!anchor || SlotOf(index->nTime, m_params) >= boundary) continue;
-        if (view) return AnchorSetOf(index->GetBlockHash(), *view, set_anchors);
+        if (view) return AnchorSetOf(index->GetBlockHash(), *view, set_anchors, /*from_state=*/true);
         ChainstateManager* chainman{Chainman()};
         if (!chainman) return nullptr;
-        return AnchorSetOf(index->GetBlockHash(), chainman->ActiveChainstate().SideCache(), set_anchors);
+        return AnchorSetOf(index->GetBlockHash(), chainman->ActiveChainstate().SideCache(), set_anchors, /*from_state=*/false);
     }
     return nullptr;
 }
@@ -716,7 +719,8 @@ void FastBlocksHooks::CheckSeeds() const
 {
     ChainstateManager* chainman{Chainman()};
     if (!chainman || !chainman->m_mainchain) return;
-    const uint256 main_tip{chainman->m_mainchain->TipHash()};
+    const sidechain::Mainchain& record{*chainman->m_mainchain};
+    const uint256 main_tip{record.TipHash()};
     {
         LOCK(m_sets_mutex);
         if (m_seeds_checked_for == main_tip) return;
@@ -730,40 +734,91 @@ void FastBlocksHooks::CheckSeeds() const
         return leader.status == LeaderStatus::OK && CheckBlockSig(index.GetBlockHeader(), leader.pubkey);
     }};
     CBlockIndex* lowest{nullptr};
+    CBlockIndex* moved{nullptr};
     std::vector<CBlockIndex*> again;
     {
         LOCK(::cs_main);
-        // The newest blocks of the active chain: a mainchain reorg reaches the seeds of the last epochs only.
+        // The newest blocks of the active chain: a mainchain reorg reaches the seeds of the last epochs
+        // only. Their blocks of stake, and the epochs whose seeds they read: their own, and that of the
+        // slots they skipped (the leaders they charged for them, which the sets that anchors make
+        // after depend on).
+        std::vector<CBlockIndex*> blocks;
+        std::map<int64_t, std::optional<uint256>> seeds;
         CBlockIndex* index{chainman->ActiveChain().Tip()};
         for (int64_t i{0}; index && index->nHeight > 0 && i < 2 * m_params.slots_per_epoch + m_params.max_unanchored_slots; ++i, index = index->pprev) {
-            if (index->m_ext && !agrees(*index)) lowest = index;
-        }
-        LOCK(m_sets_mutex);
-        for (auto it{m_seed_failed.begin()}; it != m_seed_failed.end();) {
-            CBlockIndex* failed{chainman->m_blockman.LookupBlockIndex(*it)};
-            if (!failed || !(failed->nStatus & BLOCK_FAILED_VALID)) {
-                it = m_seed_failed.erase(it);
-            } else if (failed->pprev && agrees(*failed)) {
-                again.push_back(failed);
-                it = m_seed_failed.erase(it);
-            } else {
-                ++it;
+            if (!index->m_ext) continue;
+            blocks.push_back(index);
+            const int64_t slot{SlotOf(index->nTime, m_params)};
+            for (int64_t epoch{EpochOf(std::max<int64_t>(0, slot - m_params.slots_per_epoch), m_params)}; epoch <= EpochOf(slot, m_params); ++epoch) {
+                if (!seeds.contains(epoch)) seeds.emplace(epoch, EpochSeed(epoch, m_params, record));
             }
+        }
+        for (CBlockIndex* block : blocks) {
+            if (!agrees(*block)) lowest = block;
+        }
+        // An epoch whose seed the record moved since the last check: the blocks of stake from its start
+        // on are connected again, even if their own leaders did not change, so that their state is the
+        // one the record gives now.
+        std::optional<int64_t> changed;
+        std::vector<CBlockIndex*> failed;
+        {
+            LOCK(m_sets_mutex);
+            for (const auto& [epoch, seed] : seeds) {
+                const auto before{m_epoch_seeds.find(epoch)};
+                // (A seed not known at the last check, known now, is no change: no block read it before.)
+                if (before != m_epoch_seeds.end() && before->second && before->second != seed && (!changed || epoch < *changed)) changed = epoch;
+            }
+            m_epoch_seeds = seeds;
+            for (auto it{m_seed_failed.begin()}; it != m_seed_failed.end();) {
+                CBlockIndex* block{chainman->m_blockman.LookupBlockIndex(*it)};
+                if (!block || !(block->nStatus & BLOCK_FAILED_VALID)) {
+                    it = m_seed_failed.erase(it);
+                } else {
+                    failed.push_back(block);
+                    ++it;
+                }
+            }
+            // The sets anchors made may change with the state: read again.
+            if (changed || lowest) {
+                m_known_sets.clear();
+                m_known_order.clear();
+            }
+        }
+        if (changed) {
+            for (CBlockIndex* block : blocks) {
+                if (SlotOf(block->nTime, m_params) >= *changed * m_params.slots_per_epoch) moved = block;
+            }
+        }
+        // (Not with m_sets_mutex held: the leaders read the sets.)
+        for (CBlockIndex* block : failed) {
+            if (block->pprev && agrees(*block)) again.push_back(block);
+        }
+        if (!again.empty()) {
+            LOCK(m_sets_mutex);
+            for (CBlockIndex* block : again) m_seed_failed.erase(block->GetBlockHash());
         }
     }
     if (lowest) {
         LogInfo("FastBlocks: the record moved the seed of the epoch of block %s: it and the blocks after it are taken back", lowest->GetBlockHash().ToString());
         WITH_LOCK(m_sets_mutex, m_seed_failed.insert(lowest->GetBlockHash()));
+    }
+    // From the lower of the two: a block whose leader the record moved stays failed until the record
+    // agrees again (when connected again, it fails too: m_seed_failed keeps it); one below it whose
+    // seed moved only is checked again at once.
+    const bool recheck{moved && (!lowest || moved->nHeight < lowest->nHeight)};
+    if (CBlockIndex* start{recheck ? moved : lowest}) {
+        if (recheck) LogInfo("FastBlocks: the record moved the seed of the epoch of block %s: it and the blocks after it are checked again", moved->GetBlockHash().ToString());
         BlockValidationState state;
-        chainman->ActiveChainstate().InvalidateBlock(state, lowest, /*by_record=*/true);
+        chainman->ActiveChainstate().InvalidateBlock(state, start, /*by_record=*/true);
+        if (recheck) WITH_LOCK(::cs_main, chainman->ActiveChainstate().ReconsiderRecordFailure(start));
     }
     if (!again.empty()) {
         LOCK(::cs_main);
-        for (CBlockIndex* failed : again) {
-            if (chainman->ActiveChainstate().ReconsiderRecordFailure(failed)) LogInfo("FastBlocks: the record gives the seed of block %s back", failed->GetBlockHash().ToString());
+        for (CBlockIndex* block : again) {
+            if (chainman->ActiveChainstate().ReconsiderRecordFailure(block)) LogInfo("FastBlocks: the record gives the seed of block %s back", block->GetBlockHash().ToString());
         }
     }
-    if (lowest || !again.empty()) {
+    if (lowest || recheck || !again.empty()) {
         BlockValidationState state;
         chainman->ActiveChainstate().ActivateBestChain(state);
     }

@@ -121,7 +121,8 @@ public:
      * The validator set of `epoch` for a block on top of `prev`: the one the newest anchor at or below
      * `prev` whose slot is before the epoch before `epoch` made (none: the genesis set). nullptr if this
      * node does not know it: the anchor is on a branch whose blocks it has not connected. `view`: the
-     * state to read the sets of anchors from, the active chain's if none. Called with cs_main held.
+     * state of the chain of `prev`, to read the set from (that state alone); none: the sets this node
+     * read before, or else the active chain's state (for headers). Called with cs_main held.
      */
     std::shared_ptr<const ValidatorSet> SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view = nullptr, uint64_t* set_anchors = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
@@ -255,8 +256,12 @@ private:
     /** The acknowledgement a PoS block carries, from memory or else from disk. */
     std::optional<AnchorAck> ReadAck(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
 
-    /** The set an anchor made, from memory or the state `view` (noted in memory then). */
-    std::shared_ptr<const ValidatorSet> AnchorSetOf(const uint256& anchor, const sidechain::StoreView& view, uint64_t* set_anchors) const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
+    /**
+     * The set an anchor made, from the state `view` (noted in memory then); or, unless `from_state`
+     * (the rules of a block: its chain's state alone), from memory first.
+     */
+    std::shared_ptr<const ValidatorSet> AnchorSetOf(const uint256& anchor, const sidechain::StoreView& view, uint64_t* set_anchors, bool from_state) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
 
     const CChainParams& m_chain_params;
     const Consensus::PosParams& m_params;
@@ -279,6 +284,8 @@ private:
     mutable std::set<uint256> m_seed_failed GUARDED_BY(m_sets_mutex);
     //! The mainchain tip for which the seeds of the active chain were last checked.
     mutable uint256 m_seeds_checked_for GUARDED_BY(m_sets_mutex);
+    //! The seeds of the epochs of the newest blocks of the active chain, as of that check (nothing: not known then).
+    mutable std::map<int64_t, std::optional<uint256>> m_epoch_seeds GUARDED_BY(m_sets_mutex);
 
     mutable Mutex m_acks_mutex;
     //! Commitment (h*) of each acknowledging block seen, and the blocks of each commitment.

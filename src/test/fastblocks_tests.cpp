@@ -2321,13 +2321,17 @@ BOOST_FIXTURE_TEST_CASE(leader_checked_when_connected, FastBlocksSetup)
 {
     StartPos();
     // A block whose epoch's set this state does not have (the header was taken before the node knew
-    // it): refused when connected. (The set of the anchor of an epoch two on, not looked up yet.)
+    // it): refused when connected. (The set of the anchor of an epoch two on.) Even once this node has
+    // that set in memory: the rules of a block read its chain's state alone, so that a set the node
+    // read before (one the state pruned since, or an earlier record made) does not decide.
     {
         const int64_t slot{Slot(2 * static_cast<int>(Pos().slots_per_epoch) + 5)};
         std::string error;
         const auto block{producer->Build(slot, std::nullopt, error)};
         BOOST_REQUIRE_MESSAGE(block, error);
         sidechain::EmptyStore empty;
+        BOOST_CHECK_EQUAL(After(*block, empty), "bad-pos-set-unknown");
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), pos::EpochOf(slot, Pos()))));
         BOOST_CHECK_EQUAL(After(*block, empty), "bad-pos-set-unknown");
     }
     // Signed by another key than the leader's: refused when connected, whatever the header check said.
@@ -2560,6 +2564,100 @@ BOOST_FIXTURE_TEST_CASE(no_jail_for_slots_nobody_could_fill, FastBlocksSetup)
     const uint32_t after_bmm{total()};
     Take(PosBlock(bmm_at + 5));
     BOOST_CHECK_EQUAL(total(), after_bmm + 4 + 1);
+}
+
+BOOST_FIXTURE_TEST_CASE(seed_moved_state_connected_again, SeedSetup)
+{
+    // A mainchain reorg that moves the seed of an epoch changes more than the leaders of its blocks:
+    // the leaders charged for the slots the blocks skipped (and the sets anchors make after). The
+    // blocks of stake of the epoch are connected again, also those whose own leader did not change, so
+    // that the state is the one the record gives now, as a node that takes the chain in afresh has it.
+    StartPos();
+    const int64_t spe{Pos().slots_per_epoch};
+    const int64_t e1{pos::EpochOf(base_slot, Pos()) + 1};
+    const int64_t e2{e1 + 1};
+    const auto at{[&](int64_t slot) { return static_cast<int>(slot - base_slot); }};
+    // Epoch e1 (the genesis set): its seed is the block of the BMM block's commitment.
+    Slot(at(e1 * spe) + 1);
+    Main();
+    Take(PosBlock(at(e1 * spe) + 2));
+    Take(PosBlock(at(e1 * spe) + 3));
+    // Epoch e2 (the set of the BMM block, an anchor): its seed is the block just added.
+    Slot(at(e2 * spe) + 1);
+    Main();
+    for (int k : {7, 9, 11, 13, 15, 17}) Take(PosBlock(at(e2 * spe) + k));
+    const uint256 tip{Tip()->GetBlockHash()};
+    using Snapshot = std::map<std::pair<int64_t, uint256>, pos::Liveness>;
+    const auto liveness{[&]() {
+        Snapshot snapshot;
+        LOCK(::cs_main);
+        for (int64_t e{e1 - 1}; e <= e2; ++e) {
+            for (const CKey& k : keys) {
+                if (const auto l{pos::GetLiveness(Chain().SideState().View(), e, XOnly(k))}) snapshot[{e, XOnly(k)}] = *l;
+            }
+        }
+        return snapshot;
+    }};
+    const Snapshot original{liveness()};
+    Hooks().CheckSeeds();
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
+    // The reorg: the block that seeds e2 replaced (that of e1 stays); by one with which the first block
+    // of e2 keeps its leader, and a slot it skipped does not (it charged another leader for it).
+    const int seed_height{Record().Height() - 1};
+    const CBlockIndex* first{WITH_LOCK(::cs_main, return Chain().m_chain[Tip()->nHeight - 5])};
+    BOOST_REQUIRE_EQUAL(pos::SlotOf(first->nTime, Pos()), e2 * spe + 7);
+    const auto leaders{[&]() {
+        std::vector<uint256> keys_of;
+        LOCK(::cs_main);
+        for (int64_t slot{e2 * spe}; slot <= e2 * spe + 7; ++slot) keys_of.push_back(Hooks().LeaderOf(*first->pprev, slot).pubkey);
+        return keys_of;
+    }};
+    const std::vector<uint256> leaders_before{leaders()};
+    std::vector<sidechain::MainBlock> replaced;
+    bool found{false};
+    for (int salt{1}; salt < 100 && !found; ++salt) {
+        replaced = Record().Truncate(seed_height - 1);
+        for (sidechain::MainBlock main : replaced) {
+            main.prev_hash = Record().TipHash();
+            main.hash = ArithToUint256(UintToArith256(main.hash) + salt);
+            BOOST_REQUIRE(Record().Append(main));
+        }
+        const std::vector<uint256> leaders_after{leaders()};
+        found = leaders_after.back() == leaders_before.back() && !std::equal(leaders_after.begin(), leaders_after.end() - 1, leaders_before.begin());
+        if (!found) {
+            Record().Truncate(seed_height - 1);
+            for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+        }
+    }
+    BOOST_REQUIRE(found);
+    Hooks().CheckSeeds();
+    const CBlockIndex* now{Tip()};
+    const Snapshot checked{liveness()};
+    // As the chain is connected afresh under the record as it is now.
+    CBlockIndex* first_e2{nullptr};
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* index{Chain().m_chain.Tip()}; index && index->nHeight > 0; index = index->pprev) {
+            if (index->m_ext && pos::SlotOf(index->nTime, Pos()) >= e2 * spe) first_e2 = index;
+        }
+    }
+    BOOST_REQUIRE(first_e2 == first);
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, first_e2, /*by_record=*/true));
+        WITH_LOCK(::cs_main, Chain().ReconsiderRecordFailure(first_e2));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+        BOOST_CHECK(Tip() == now);
+        BOOST_CHECK(liveness() == checked);
+    }
+    BOOST_CHECK(checked != original);
+    // The record as it was: the blocks are given back (the leaders of blocks taken back read the set of
+    // an anchor), and the state is the first one again.
+    Record().Truncate(seed_height - 1);
+    for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+    Hooks().CheckSeeds();
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
+    BOOST_CHECK(liveness() == original);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
