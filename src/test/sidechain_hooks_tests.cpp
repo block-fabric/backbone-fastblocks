@@ -9,6 +9,7 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <hash.h>
+#include <interfaces/mining.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -142,10 +143,56 @@ struct OwedHooks : sidechain::ChainHooks {
     }
 };
 
+/** Hooks that let blocks be at most a minute ahead of the clock. */
+struct NearTimeHooks : sidechain::ChainHooks {
+    int64_t MaxFutureBlockTime() const override { return 60; }
+};
+
+/**
+ * Hooks with a chain order of their own that reads something that can change, as a record of the
+ * mainchain does: each block adds 1 and `bonus` to the key of its parent.
+ */
+struct BonusHooks : sidechain::ChainHooks {
+    mutable int64_t bonus{0};
+    bool CustomChainOrder() const override { return true; }
+    arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader&) const override
+    {
+        return (prev ? prev->nChainWork : arith_uint256{0}) + arith_uint256{static_cast<uint64_t>(1 + bonus)};
+    }
+};
+
 /** A chain that is a sidechain in slot 3, with a record of its mainchain the test writes. */
 struct SidechainSetup : public TestingSetup {
     SidechainSetup() : TestingSetup{ChainType::REGTEST, {.extra_args = {"-sidechainslot=3"}}} {}
     sidechain::Mainchain& Record() { return *Assert(m_node.chainman->m_mainchain); }
+
+    /** A block on the tip, with this time (the clock's if none), its proof of work done. */
+    CBlock Build(std::optional<int64_t> time = std::nullopt)
+    {
+        auto block_template{interfaces::MakeMining(m_node)->createNewBlock({.use_mempool = false, .coinbase_output_script = CScript() << OP_TRUE, .test_block_validity = false}, /*cooldown=*/false)};
+        BOOST_REQUIRE(block_template);
+        CBlock block{block_template->getBlock()};
+        if (time) block.nTime = static_cast<uint32_t>(*time);
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        while (!CheckProofOfWork(block.GetHash(), block.nBits, m_node.chainman->GetConsensus())) ++block.nNonce;
+        return block;
+    }
+    /** Have the next mainchain block commit to `hash`. */
+    void Commit(const uint256& hash)
+    {
+        sidechain::MainBlock main;
+        main.hash = uint256{static_cast<uint8_t>(0x40 + Record().Height() + 1)};
+        main.prev_hash = Record().TipHash();
+        main.bmm = hash;
+        BOOST_REQUIRE(Record().Append(main));
+    }
+    /** Commit to a block and give it to the node. */
+    void Take(const CBlock& block)
+    {
+        Commit(block.GetHash());
+        BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/nullptr));
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    }
 };
 
 } // namespace
@@ -165,6 +212,9 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     const CBlockHeader plain{Header(false)}, flagged{Header(true)};
     BOOST_CHECK(hooks.Kind(plain) == sidechain::BlockKind::BMM);
     BOOST_CHECK(hooks.Kind(flagged) == sidechain::BlockKind::BMM);
+
+    // Blocks may be two hours ahead of the clock, as Bitcoin's.
+    BOOST_CHECK_EQUAL(hooks.MaxFutureBlockTime(), MAX_FUTURE_BLOCK_TIME);
 
     // Headers wait only for a commitment.
     BOOST_CHECK(hooks.IsWaitReason("bmm-unknown"));
@@ -603,6 +653,74 @@ BOOST_FIXTURE_TEST_CASE(assembly_takes_own_peg_actions, SidechainSetup)
         BOOST_CHECK_EQUAL(hooks.seen.size(), 2U);
         for (const CTxOut& out : block_template->block.vtx.at(0)->vout) BOOST_CHECK(out != CTxOut(7, script));
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(future_block_time, SidechainSetup)
+{
+    // A header an hour and a half ahead of the clock: within Bitcoin's two hours, the template takes it.
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3f};
+    BOOST_REQUIRE(Record().Append(first));
+    const int64_t ahead{GetTime() + 90 * 60};
+    {
+        const CBlock block{Build(ahead)};
+        Commit(block.GetHash());
+        BlockValidationState state;
+        BOOST_CHECK_MESSAGE(m_node.chainman->ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state), state.ToString());
+    }
+    // A sidechain that allows a minute turns it away, as a header that may come later; a block
+    // half a minute ahead it takes.
+    InstallHooks installed{std::make_unique<NearTimeHooks>()};
+    const CBlock block{Build(GetTime() + 90)};
+    Commit(block.GetHash());
+    BlockValidationState state;
+    BOOST_CHECK(!m_node.chainman->ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state));
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "time-too-new");
+    BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE);
+    const CBlock near{Build(GetTime() + 30)};
+    Commit(near.GetHash());
+    BlockValidationState near_state;
+    BOOST_CHECK_MESSAGE(m_node.chainman->ProcessNewBlockHeaders({{near}}, /*min_pow_checked=*/true, near_state), near_state.ToString());
+}
+
+BOOST_FIXTURE_TEST_CASE(chain_work_recomputed, SidechainSetup)
+{
+    // A chain order that reads the record is computed anew for a block, and all above it, when the
+    // record takes back its failure (its commitment came back, perhaps at another height).
+    auto owned{std::make_unique<BonusHooks>()};
+    const BonusHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3f};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    const arith_uint256 base{WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->nChainWork)};
+    const CBlock a{Build()};
+    Take(a);
+    const CBlock b{Build()};
+    Take(b);
+    CBlockIndex* index_a{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(a.GetHash()))};
+    CBlockIndex* index_b{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(b.GetHash()))};
+    BOOST_CHECK(index_a->nChainWork == base + 1);
+    BOOST_CHECK(index_b->nChainWork == base + 2);
+
+    // The record drops the commitment to a, and it comes back: what the key reads changed meanwhile.
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, index_a, /*by_record=*/true));
+    hooks.bonus = 10;
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.ReconsiderRecordFailure(index_a)));
+    BOOST_CHECK(index_a->nChainWork == base + 11);
+    BOOST_CHECK(index_b->nChainWork == base + 22);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.m_best_header) == index_b);
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == index_b);
+
+    // With Bitcoin's order the work is the parent's and the header's, whatever was before.
+    sidechain::SetHooks(nullptr);
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, index_a, /*by_record=*/true));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.ReconsiderRecordFailure(index_a)));
+    BOOST_CHECK(index_a->nChainWork == base + 11);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

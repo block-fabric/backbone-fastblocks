@@ -4137,6 +4137,21 @@ bool Chainstate::ReconsiderRecordFailure(CBlockIndex* pindex)
         if ((block_index.nStatus & BLOCK_FAILED_VALID) && block_index.GetAncestor(root->nHeight) == root) failed.push_back(&block_index);
     }
     std::sort(failed.begin(), failed.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+    // A chain order of a sidechain's own may read the record, which changed: the commitment may be at
+    // another height now. Computed anew for the block and all above it, parents first (out of the
+    // candidates while it changes).
+    if (sidechain::Hooks().CustomChainOrder()) {
+        std::vector<CBlockIndex*> above;
+        for (auto& [_, block_index] : m_blockman.m_block_index) {
+            if (block_index.GetAncestor(root->nHeight) == root) above.push_back(&block_index);
+        }
+        std::sort(above.begin(), above.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return a->nHeight < b->nHeight; });
+        for (CBlockIndex* block_index : above) {
+            const bool candidate{setBlockIndexCandidates.erase(block_index) > 0};
+            block_index->nChainWork = sidechain::Hooks().ChainWork(block_index->pprev, block_index->GetBlockHeader());
+            if (candidate) setBlockIndexCandidates.insert(block_index);
+        }
+    }
     for (CBlockIndex* block_index : failed) {
         // Above a block that stays failed, everything does.
         if (block_index != root && (block_index->pprev->nStatus & BLOCK_FAILED_VALID)) continue;
@@ -4596,8 +4611,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         }
     }
 
-    // Check timestamp
-    if (block.Time() > NodeClock::now() + std::chrono::seconds{MAX_FUTURE_BLOCK_TIME}) {
+    // Check timestamp (a sidechain may allow less than Bitcoin's two hours)
+    if (block.Time() > NodeClock::now() + std::chrono::seconds{sidechain::Hooks().MaxFutureBlockTime()}) {
         return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "time-too-new", "block timestamp too far in the future");
     }
 

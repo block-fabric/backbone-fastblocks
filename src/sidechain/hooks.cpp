@@ -32,6 +32,8 @@ uint256 ChainHooks::SectionsHash(std::span<const unsigned char> sections) const
     return (TaggedHash("sidechain/sections") << sections).GetSHA256();
 }
 
+int64_t ChainHooks::MaxFutureBlockTime() const { return MAX_FUTURE_BLOCK_TIME; }
+
 arith_uint256 ChainHooks::ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const
 {
     return (prev ? prev->nChainWork : arith_uint256{0}) + GetBlockProof(header);

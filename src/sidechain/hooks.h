@@ -97,6 +97,13 @@ public:
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
     virtual uint256 SectionsHash(std::span<const unsigned char> sections) const;
+    /**
+     * How far ahead of the node's clock a block's time may be, in seconds (ContextualCheckBlockHeader,
+     * "time-too-new", a header that may come later). By default Bitcoin's MAX_FUTURE_BLOCK_TIME. A chain
+     * whose blocks come every few seconds may want less: far-ahead times push the median time past
+     * ahead, and with it the time every next block must have.
+     */
+    virtual int64_t MaxFutureBlockTime() const;
 
     //
     // Chain order
@@ -113,6 +120,8 @@ public:
      * Used only if CustomChainOrder; otherwise, and by default, the work of the parent plus that of the header.
      */
     virtual arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const;
+    // (A ChainWork that reads the record of the mainchain is computed anew for the blocks taken back
+    // when their commitment comes back, perhaps at another height: Chainstate::ReconsiderRecordFailure.)
 
     //
     // Headers that wait for the node to know more (the record of the mainchain, say)
