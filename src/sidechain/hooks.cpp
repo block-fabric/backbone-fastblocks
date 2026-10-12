@@ -106,4 +106,10 @@ bool CheckSections(const CBlock& block)
     return block.ext.hashSections == expected;
 }
 
+bool SameExtension(const CBlockHeader& header, const CBlockIndex& index)
+{
+    if (!header.IsExtended()) return !index.m_ext;
+    return index.m_ext && *index.m_ext == header.ext;
+}
+
 } // namespace sidechain

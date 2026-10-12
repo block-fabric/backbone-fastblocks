@@ -215,6 +215,12 @@ std::unique_ptr<ChainHooks> SetHooks(std::unique_ptr<ChainHooks> hooks);
 bool CheckHeaderWork(const CBlockHeader& header, const Consensus::Params& params);
 /** Whether an extended block's sections are those its header commits to (always so for others). */
 bool CheckSections(const CBlock& block);
+/**
+ * Whether a header carries the extension of the block index of its hash (always so for a header that
+ * is not extended, as is the index then). The block hash does not cover the extension's signature:
+ * a block for a header the node has with another one is a mutated block (AcceptBlock).
+ */
+bool SameExtension(const CBlockHeader& header, const CBlockIndex& index);
 
 } // namespace sidechain
 

@@ -26,6 +26,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -158,6 +159,28 @@ struct BonusHooks : sidechain::ChainHooks {
     arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader&) const override
     {
         return (prev ? prev->nChainWork : arith_uint256{0}) + arith_uint256{static_cast<uint64_t>(1 + bonus)};
+    }
+};
+
+/**
+ * Hooks whose extended blocks are of the sidechain's own kind, take no peg actions, and are valid if
+ * their "signature" (which the block hash does not cover) is that of the test's signer: all fives.
+ */
+struct SignedHooks : sidechain::ChainHooks {
+    bool BlockExtensions() const override { return true; }
+    sidechain::BlockKind Kind(const CBlockHeader& header) const override { return header.IsExtended() ? sidechain::BlockKind::PLUGIN : sidechain::BlockKind::BMM; }
+    bool CheckHeader(const CBlockHeader& header, const CBlockIndex&, const ChainstateManager&, BlockValidationState& state) const override
+    {
+        std::array<unsigned char, 64> signed_sig;
+        signed_sig.fill(5);
+        if (header.ext.sig != signed_sig) return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-test-sig");
+        return true;
+    }
+    bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& step, std::string& reject_reason) const override
+    {
+        if (!block.IsExtended()) return ChainHooks::GetPegStep(block, mainchain, step, reject_reason);
+        step.reset();
+        return true;
     }
 };
 
@@ -732,6 +755,97 @@ BOOST_FIXTURE_TEST_CASE(chain_work_recomputed, SidechainSetup)
     BOOST_REQUIRE(chainstate.InvalidateBlock(state, index_a, /*by_record=*/true));
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.ReconsiderRecordFailure(index_a)));
     BOOST_CHECK(index_a->nChainWork == base + 11);
+}
+
+BOOST_FIXTURE_TEST_CASE(block_extension_mismatch, SidechainSetup)
+{
+    // The block hash does not cover an extended header's signature: a block for a header the node
+    // has must carry the extension of that header, or it is a mutated block -- turned away without
+    // taking the header for invalid, so that the block with the right one is taken after.
+    InstallHooks installed{std::make_unique<SignedHooks>()};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3f};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    CBlock honest{Build()};
+    honest.nVersion |= BLOCK_EXTENSION_BIT;
+    honest.ext.hashSections.SetNull();
+    honest.ext.sig.fill(5);
+    BOOST_REQUIRE(honest.IsExtended());
+    CBlock swapped{honest};
+    swapped.ext.sig.fill(6);
+    CBlock zeroed{honest};
+    zeroed.ext.sig.fill(0);
+    BOOST_REQUIRE(swapped.GetHash() == honest.GetHash() && zeroed.GetHash() == honest.GetHash());
+
+    // Without the header, a block with another signature fails the header's rules, and leaves no index.
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(swapped), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-test-sig");
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash())));
+    }
+    // The header comes first, then blocks with its hash and another signature, or none.
+    BlockValidationState header_state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{honest}}, /*min_pow_checked=*/true, header_state), header_state.ToString());
+    CBlockIndex* index{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index && index->m_ext && *index->m_ext == honest.ext);
+    BOOST_CHECK(sidechain::SameExtension(honest, *index));
+    BOOST_CHECK(!sidechain::SameExtension(swapped, *index));
+    for (const CBlock& bad : {swapped, zeroed}) {
+        BlockValidationState state;
+        bool new_block{true};
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(bad), state, nullptr, true, nullptr, &new_block, true)));
+        BOOST_CHECK(!new_block);
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "bad-blk-extension");
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+        BOOST_CHECK(!chainman.ProcessNewBlock(std::make_shared<const CBlock>(bad), /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
+        BOOST_CHECK(!new_block);
+        LOCK(::cs_main);
+        BOOST_CHECK(!(index->nStatus & BLOCK_FAILED_VALID));
+        BOOST_CHECK(!(index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK(*index->m_ext == honest.ext);
+    }
+    // The block with the header's signature is taken, and stored with it.
+    bool new_block{false};
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(honest), /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
+    BOOST_CHECK(new_block);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()) == index);
+    CBlock read;
+    BOOST_REQUIRE(chainman.m_blockman.ReadBlock(read, *index));
+    BOOST_CHECK(read.ext == honest.ext);
+    // Once it is stored, a block with another signature is still a mutated one.
+    {
+        BlockValidationState state;
+        BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.AcceptBlock(std::make_shared<const CBlock>(swapped), state, nullptr, true, nullptr, nullptr, true)));
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_MUTATED);
+        BOOST_CHECK(WITH_LOCK(::cs_main, return index->IsValid(BLOCK_VALID_SCRIPTS)));
+    }
+
+    // A block stored with another signature (as a node could, before this rule) is read with the
+    // signature of its header: the one the node checked.
+    {
+        LOCK(::cs_main);
+        const FlatFilePos pos{chainman.m_blockman.WriteBlock(swapped, index->nHeight)};
+        BOOST_REQUIRE(!pos.IsNull());
+        CBlock raw;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlock(raw, pos, honest.GetHash()));
+        BOOST_CHECK(raw.ext == swapped.ext);
+        const uint256 hash{honest.GetHash()};
+        CBlockIndex stored{honest};
+        stored.phashBlock = &hash;
+        stored.nStatus = BLOCK_HAVE_DATA;
+        stored.nFile = pos.nFile;
+        stored.nDataPos = pos.nPos;
+        CBlock fixed;
+        BOOST_REQUIRE(chainman.m_blockman.ReadBlock(fixed, stored));
+        BOOST_CHECK(fixed.ext == honest.ext);
+        BOOST_CHECK(fixed.vtx.size() == honest.vtx.size() && fixed.GetHash() == hash);
+    }
+
+    // Blocks without the extension are not touched by the rule.
+    sidechain::SetHooks(nullptr);
+    BOOST_CHECK(sidechain::SameExtension(Header(false), CBlockIndex{Header(false)}));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
