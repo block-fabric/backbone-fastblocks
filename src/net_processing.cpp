@@ -2911,6 +2911,11 @@ bool PeerManagerImpl::CheckHeadersPoW(const std::vector<CBlockHeader>& headers, 
 
 arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
 {
+    // On a sidechain whose chain order is not work, a key "near the tip" means nothing: a block whose
+    // parent has a lower key (one anchor fewer, say) is not low-work, and a compact block of it, sent
+    // because we asked for it, must not be dropped as such (the block would stay in flight, and the
+    // node on its branch). Its own header rules keep headers in check (as in ProcessHeadersMessage).
+    if (sidechain::Hooks().CustomChainOrder()) return m_chainman.MinimumChainWork();
     arith_uint256 near_chaintip_work = 0;
     LOCK(cs_main);
     if (m_chainman.ActiveChain().Tip() != nullptr) {
