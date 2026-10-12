@@ -4862,8 +4862,23 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     // The extension of an extended header carries what the block hash does not cover (a signature):
     // a block for a header the node has must carry the extension that header came with, the one its
-    // rules checked. Another one is a mutated block, never a reason to take the header for invalid.
+    // rules checked. Another one is a mutated block, never a reason to take the header for invalid --
+    // unless the sidechain's rules find it as valid (another signature of the same block): the block
+    // is then the same, taken with the extension the node has.
     if (!sidechain::SameExtension(block, *pindex)) {
+        switch (sidechain::Hooks().CheckOtherExtension(block, *pindex)) {
+        case sidechain::OtherExtension::EQUIVALENT: {
+            LogDebug(BCLog::VALIDATION, "%s: block %s carries another valid extension than its header's: taken with its header's\n", __func__, pindex->GetBlockHash().ToString());
+            auto same{std::make_shared<CBlock>(block)};
+            same->ext = *Assert(pindex->m_ext);
+            return AcceptBlock(same, state, ppindex, fRequested, dbp, fNewBlock, min_pow_checked);
+        }
+        case sidechain::OtherExtension::UNKNOWN:
+            LogDebug(BCLog::VALIDATION, "%s: block %s carries another extension than its header's, which cannot be checked yet\n", __func__, pindex->GetBlockHash().ToString());
+            return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "blk-extension-unknown", "another extension than that of the header the node has, not known to be valid yet");
+        case sidechain::OtherExtension::INVALID:
+            break;
+        }
         LogDebug(BCLog::VALIDATION, "%s: block %s does not carry the extension of its header\n", __func__, pindex->GetBlockHash().ToString());
         return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-blk-extension", "the extension is not that of the header the node has");
     }
@@ -4959,10 +4974,28 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     return true;
 }
 
-bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block)
+/**
+ * A block for an extended header the node has, with another extension the sidechain's rules find as
+ * valid (ChainHooks::CheckOtherExtension): the same block with the header's extension, the one the
+ * node keeps. Any other block as it is.
+ */
+static std::shared_ptr<const CBlock> WithHeaderExtension(const ChainstateManager& chainman, const std::shared_ptr<const CBlock>& block) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!block->IsExtended()) return block;
+    const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+    if (!index || !index->m_ext || sidechain::SameExtension(*block, *index)) return block;
+    if (sidechain::Hooks().CheckOtherExtension(*block, *index) != sidechain::OtherExtension::EQUIVALENT) return block;
+    auto same{std::make_shared<CBlock>(*block)};
+    same->ext = *index->m_ext;
+    return same;
+}
+
+bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& block_in, bool force_processing, bool min_pow_checked, bool* new_block)
 {
     AssertLockNotHeld(cs_main);
 
+    // (What is connected and announced is the block as the node keeps it.)
+    std::shared_ptr<const CBlock> block{block_in};
     {
         CBlockIndex *pindex = nullptr;
         if (new_block) *new_block = false;
@@ -4971,6 +5004,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         // CheckBlock() does not support multi-threaded block validation because CBlock::fChecked can cause data race.
         // Therefore, the following critical section must include the CheckBlock() call as well.
         LOCK(cs_main);
+        block = WithHeaderExtension(*this, block);
 
         // Skipping AcceptBlock() for CheckBlock() failures means that we will never mark a block as invalid if
         // CheckBlock() fails.  This is protective against consensus failure if there are any unknown forms of block
