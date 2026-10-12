@@ -75,6 +75,8 @@ public Q_SLOTS:
     void gotoReceiveCoinsPage();
     /** Switch to sidechain page */
     void gotoSidechainPage();
+    /** Switch to the staking page */
+    void gotoStakingPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

@@ -218,6 +218,8 @@ if(ENABLE_WALLET)
       sendcoinsentry.h
       sidechainpage.cpp
       sidechainpage.h
+      stakingpage.cpp
+      stakingpage.h
       signverifymessagedialog.cpp
       signverifymessagedialog.h
       transactiondesc.cpp

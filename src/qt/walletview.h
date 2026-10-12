@@ -15,6 +15,7 @@ class OverviewPage;
 class PlatformStyle;
 class ReceiveCoinsDialog;
 class SidechainPage;
+class StakingPage;
 class SendCoinsDialog;
 class SendCoinsRecipient;
 class TransactionView;
@@ -63,6 +64,7 @@ private:
     QWidget *transactionsPage;
     ReceiveCoinsDialog *receiveCoinsPage;
     SidechainPage* sidechainPage;
+    StakingPage* stakingPage;
     SendCoinsDialog *sendCoinsPage;
     AddressBookPage *usedSendingAddressesPage;
     AddressBookPage *usedReceivingAddressesPage;
@@ -81,6 +83,8 @@ public Q_SLOTS:
     void gotoReceiveCoinsPage();
     /** Switch to sidechain page */
     void gotoSidechainPage();
+    /** Switch to the staking page (FastBlocks' blocks of stake) */
+    void gotoStakingPage();
     /** Switch to send coins page */
     void gotoSendCoinsPage(QString addr = "");
 

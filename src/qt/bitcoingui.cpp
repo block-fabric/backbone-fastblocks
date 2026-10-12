@@ -321,6 +321,13 @@ void BitcoinGUI::createActions()
     sidechainAction->setShortcut(QKeySequence(QStringLiteral("Alt+5")));
     tabGroup->addAction(sidechainAction);
 
+    stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/synced"), tr("&Staking"), this);
+    stakingAction->setStatusTip(tr("Blocks of stake: this node as a validator, the validators, anchors and how final your coins are"));
+    stakingAction->setToolTip(stakingAction->statusTip());
+    stakingAction->setCheckable(true);
+    stakingAction->setShortcut(QKeySequence(QStringLiteral("Alt+6")));
+    tabGroup->addAction(stakingAction);
+
 #ifdef ENABLE_WALLET
     // These showNormalIfMinimized are needed because Send Coins and Receive Coins
     // can be triggered from the tray menu, and need to show the GUI to be useful.
@@ -334,6 +341,8 @@ void BitcoinGUI::createActions()
     connect(historyAction, &QAction::triggered, this, &BitcoinGUI::gotoHistoryPage);
     connect(sidechainAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
     connect(sidechainAction, &QAction::triggered, this, &BitcoinGUI::gotoSidechainPage);
+    connect(stakingAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+    connect(stakingAction, &QAction::triggered, this, &BitcoinGUI::gotoStakingPage);
 #endif // ENABLE_WALLET
 
     quitAction = new QAction(tr("E&xit"), this);
@@ -651,6 +660,7 @@ void BitcoinGUI::createMenuBar()
         use->addAction(verifyMessageAction);
         use->addSeparator();
         use->addAction(sidechainAction);
+        use->addAction(stakingAction);
         QAction* merged_mining{use->addAction(tr("Merged M&ining"))};
         merged_mining->setStatusTip(tr("Have the miners of the mainchain mine the blocks of this chain"));
         connect(merged_mining, &QAction::triggered, this, [this] { showNormalIfMinimized(); gotoSidechainPage(); });
@@ -818,6 +828,7 @@ void BitcoinGUI::createToolBars()
 
         section(tr("Chain"));
         entry(sidechainAction);
+        entry(stakingAction);
         window_entry(":/icons/eye", tr("Block Explorer"), tr("Browse blocks and the transactions waiting to be mined"), m_block_explorer);
 
         section(tr("Node"));
@@ -1136,6 +1147,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     receiveCoinsAction->setEnabled(enabled);
     historyAction->setEnabled(enabled && !isPrivacyModeActivated());
     sidechainAction->setEnabled(enabled);
+    stakingAction->setEnabled(enabled);
     encryptWalletAction->setEnabled(enabled);
     backupWalletAction->setEnabled(enabled);
     changePassphraseAction->setEnabled(enabled);
@@ -1308,6 +1320,12 @@ void BitcoinGUI::gotoSidechainPage()
 {
     sidechainAction->setChecked(true);
     if (walletFrame) walletFrame->gotoSidechainPage();
+}
+
+void BitcoinGUI::gotoStakingPage()
+{
+    stakingAction->setChecked(true);
+    if (walletFrame) walletFrame->gotoStakingPage();
 }
 
 void BitcoinGUI::gotoSendCoinsPage(QString addr)
@@ -1615,6 +1633,7 @@ void BitcoinGUI::changeEvent(QEvent *e)
         receiveCoinsAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/receiving_addresses")));
         historyAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/history")));
         sidechainAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/proxy")));
+        stakingAction->setIcon(platformStyle->SingleColorIcon(QStringLiteral(":/icons/synced")));
         for (const auto& [action, icon] : m_sidebar_icons) action->setIcon(platformStyle->SingleColorIcon(QString::fromLatin1(icon)));
     }
 

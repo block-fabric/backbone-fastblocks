@@ -18,6 +18,7 @@
 #ifdef ENABLE_WALLET
 #include <qt/test/addressbooktests.h>
 #include <qt/test/sidechaintests.h>
+#include <qt/test/stakingtests.h>
 #include <qt/test/wallettests.h>
 #endif // ENABLE_WALLET
 
@@ -104,6 +105,9 @@ int main(int argc, char* argv[])
 
         SidechainTests test7(app.node());
         num_test_failures += QTest::qExec(&test7);
+
+        StakingTests test8(app.node());
+        num_test_failures += QTest::qExec(&test8);
 #endif
 
         if (num_test_failures) {

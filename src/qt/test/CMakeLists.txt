@@ -32,6 +32,7 @@ if(ENABLE_WALLET)
     PRIVATE
       addressbooktests.cpp
       sidechaintests.cpp
+      stakingtests.cpp
       wallettests.cpp
       ../../wallet/test/wallet_test_fixture.cpp
   )

@@ -14,6 +14,7 @@
 #include <qt/receivecoinsdialog.h>
 #include <qt/sendcoinsdialog.h>
 #include <qt/sidechainpage.h>
+#include <qt/stakingpage.h>
 #include <qt/signverifymessagedialog.h>
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
@@ -79,6 +80,10 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     sidechainPage->setWalletModel(walletModel);
     addWidget(sidechainPage);
 
+    stakingPage = new StakingPage(platformStyle, this);
+    stakingPage->setWalletModel(walletModel);
+    addWidget(stakingPage);
+
     connect(overviewPage, &OverviewPage::transactionClicked, this, &WalletView::transactionClicked);
     // Clicking on a transaction on the overview pre-selects the transaction on the transaction history page
     connect(overviewPage, &OverviewPage::transactionClicked, transactionView, qOverload<const QModelIndex&>(&TransactionView::focusTransaction));
@@ -126,6 +131,7 @@ void WalletView::setClientModel(ClientModel *_clientModel)
     overviewPage->setClientModel(_clientModel);
     sendCoinsPage->setClientModel(_clientModel);
     sidechainPage->setClientModel(_clientModel);
+    stakingPage->setClientModel(_clientModel);
     walletModel->setClientModel(_clientModel);
 }
 
@@ -168,6 +174,11 @@ void WalletView::gotoReceiveCoinsPage()
 void WalletView::gotoSidechainPage()
 {
     setCurrentWidget(sidechainPage);
+}
+
+void WalletView::gotoStakingPage()
+{
+    setCurrentWidget(stakingPage);
 }
 
 void WalletView::gotoSendCoinsPage(QString addr)
