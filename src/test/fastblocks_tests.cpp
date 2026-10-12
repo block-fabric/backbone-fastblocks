@@ -1423,4 +1423,76 @@ BOOST_FIXTURE_TEST_CASE(moved_commitment, FastBlocksSetup)
     BOOST_CHECK_EQUAL(Key().last_anchor_height, static_cast<uint32_t>(committed_at + 1));
 }
 
+BOOST_AUTO_TEST_CASE(net_anchors)
+{
+    // Anchors of a chain (newest first): C acknowledged at 10 covers up to 9 (commitment 102), A at 7
+    // up to 5 (101), Z at 3 up to 2 (99).
+    std::vector<CBlockIndex> blocks(11);
+    for (int i{0}; i < 11; ++i) blocks[i].nHeight = i;
+    const std::vector<pos::ChainAnchor> anchors{{.block = &blocks[10], .anchored = &blocks[9], .main_height = 102},
+                                                {.block = &blocks[7], .anchored = &blocks[5], .main_height = 101},
+                                                {.block = &blocks[3], .anchored = &blocks[2], .main_height = 99}};
+    // Without commitments skipped: the blocks the anchors anchor.
+    BOOST_CHECK(pos::NetAnchoredHeights(anchors, {}, 3) == (std::vector<int>{9, 5, 2}));
+    // The commitment at 100 skipped: a chain that forks at 6 and acknowledges it and A's ticket (whose
+    // block, 5, it has) has as many anchors as this one after 6 (A and C), the last one earlier (101
+    // against 102): block 8, which only C covers, is not anchored; block 5 is, by one.
+    const std::vector<int> net{pos::NetAnchoredHeights(anchors, {100}, 3)};
+    BOOST_CHECK(net == (std::vector<int>{5, 2, 2}));
+    BOOST_CHECK(pos::FinalityAt(8, 3, net, 3).status == pos::FinalityStatus::SOFT);
+    BOOST_CHECK_EQUAL(pos::FinalityAt(5, 6, net, 3).anchors, 1);
+    // A commitment skipped after C counts against every block C covers.
+    BOOST_CHECK(pos::NetAnchoredHeights(anchors, {103}, 3) == (std::vector<int>{5, 2, 2}));
+    BOOST_CHECK(pos::NetAnchoredHeights({}, {100}, 3).empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(hidden_anchor, FastBlocksSetup)
+{
+    // The order of chains: with as many anchors, the last committed first wins. A bidder that wins one
+    // auction with the ticket of a block it keeps to itself, on a branch of its own, can later show the
+    // branch with that acknowledgement and take back a block of the chain that an anchor committed
+    // after covers. Such a block is not anchored, net of the commitment skipped.
+    StartPos();
+    Take(PosBlock(1));
+    const CBlock hidden{PosBlock(2)};
+    Take(PosBlock(3));
+    Take(PosBlock(4));
+    const CBlockIndex* covered{Tip()};
+    const pos::AnchorTicket kept{Ticket(hidden.GetHash(), script)};
+    Commit(kept.Hash());
+    const int kept_height{Record().Height()};
+    Take(PosBlock(5, Anchor(Ticket(covered->GetBlockHash(), script))));
+    const auto finality{[&](const CBlockIndex* block) { return WITH_LOCK(::cs_main, return pos::FinalityOf(Hooks(), *block, *Tip(), 3)); }};
+    // An anchor covers it, but the commitment skipped before (one this node has no ticket of) may be
+    // the anchor of a chain that leaves it out.
+    BOOST_CHECK(finality(covered).status == pos::FinalityStatus::SOFT);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), 3)).empty() ||
+                WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), 3)).front() < covered->nHeight - 2);
+
+    // And so it is: the branch, with the acknowledgement of the ticket kept, takes over.
+    Submit(hidden);
+    CBlockIndex* fork_child{WITH_LOCK(::cs_main, return Chain().m_chain[covered->nHeight - 1])};
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, fork_child));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    BOOST_REQUIRE(Tip()->GetBlockHash() == hidden.GetHash());
+    const CBlock attack{PosBlock(6, pos::AnchorAck{.ticket = kept, .main_height = kept_height})};
+    WITH_LOCK(::cs_main, Chain().ResetBlockFailureFlags(fork_child));
+    Submit(attack);
+    BOOST_CHECK(Tip()->GetBlockHash() == attack.GetHash());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*covered)));
+
+    // On the branch that won, the commitment of the other branch's ticket is skipped in turn: its
+    // blocks need an anchor more than that to be anchored (conservative: the ticket's block is on no
+    // chain that leaves them out, but a commitment whose ticket nobody showed could be).
+    const CBlockIndex* attacked{Tip()};
+    Take(PosBlock(7, Anchor(Ticket(Tip()->GetBlockHash(), script))));
+    BOOST_CHECK(finality(attacked).status == pos::FinalityStatus::SOFT);
+    Take(PosBlock(8, Anchor(Ticket(Tip()->GetBlockHash(), script))));
+    BOOST_CHECK_EQUAL(finality(attacked).anchors, 1);
+    BOOST_CHECK(finality(attacked).status == pos::FinalityStatus::ANCHORED);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

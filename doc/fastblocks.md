@@ -148,6 +148,16 @@ active chain is
 - **final** once `final_anchors` anchors cover it: 6 on main, 3 on testnet
   and signet, 1 on regtest.
 
+Anchors are counted net of the commitments the chain skipped. With as many
+anchors, the chain whose last commitment came first wins: a commitment on
+record that this chain did not acknowledge (the ticket of another branch, or
+one whose ticket nobody showed: a bidder can keep a branch and its ticket to
+itself) may be the anchor of a chain that leaves a block out. So a block counts
+k anchors when every chain that forks below it has k fewer at most, taking
+every skipped commitment since the last anchor they share as that chain's (the
+newest 4 · `final_anchors` + 8 anchors are looked at). Without skipped
+commitments this is the number of anchors that cover the block.
+
 `getblock` gives a block's `finality` (`status`, `anchors`), and its `kind`
 (`pos` or `bmm`), `slot`, `proposer` and `ack`; `getblockchaininfo` the
 `anchored_tip` and the `final_tip`. In the wallet, `gettransaction` and

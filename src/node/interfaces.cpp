@@ -849,9 +849,7 @@ public:
         Anchors anchors;
         anchors.final_anchors = hooks->Params().final_anchors;
         LOCK(::cs_main);
-        for (const pos::ChainAnchor& anchor : pos::RecentAnchors(*hooks, *chainman().ActiveChain().Tip(), static_cast<size_t>(std::max(anchors.final_anchors, 0)))) {
-            anchors.anchored_heights.push_back(anchor.anchored->nHeight);
-        }
+        anchors.anchored_heights = pos::AnchoredHeights(*hooks, *chainman().ActiveChain().Tip(), anchors.final_anchors);
         return anchors;
     }
     bool shutdownRequested() override { return ShutdownRequested(m_node); }

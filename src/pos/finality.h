@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,9 +33,10 @@ struct ChainAnchor {
 /**
  * How final a block is (doc/fastblocks.md, "Finality"). Not consensus: what wallets show.
  *  - soft: no anchor covers it yet; only blocks of stake (or a BMM block's own commitment) are on it;
- *  - anchored: an anchor covers it (it is at or below the block an anchor anchors): undoing it
- *    takes the mainchain's merged miners, not stake;
- *  - final: final_anchors anchors cover it.
+ *  - anchored: an anchor covers it (it is at or below the block an anchor anchors), net of the
+ *    commitments the chain skipped (AnchoredHeights): undoing it takes the mainchain's merged miners,
+ *    not stake;
+ *  - final: final_anchors anchors cover it, net.
  */
 enum class FinalityStatus : uint8_t { SOFT, ANCHORED, FINAL };
 
@@ -63,6 +65,18 @@ inline std::string FinalityName(FinalityStatus status)
  * lower and lower. Called with cs_main held.
  */
 std::vector<ChainAnchor> RecentAnchors(const FastBlocksHooks& hooks, const CBlockIndex& tip, size_t count, int floor = 0) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+/**
+ * The heights of the blocks the anchors of the chain cover, for FinalityAt, net of the commitments the
+ * chain skipped. By the order of chains, a chain that leaves a block out wins with as many anchors and
+ * an earlier last commitment: every commitment on record this chain did not acknowledge (a ticket of
+ * another branch, or one whose ticket nobody showed) may be such a chain's anchor. So a block is
+ * covered by k anchors net when every chain that leaves it out (forks below it) can have k fewer than
+ * this one at most. Element k-1 is the highest block covered by k (newest first, at most `count`).
+ */
+std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<uint32_t>& skipped, int count);
+/** The same for the chain that ends at `tip`, with the commitments on its node's record (4 × final_anchors + 8 anchors walked). Called with cs_main held. */
+std::vector<int> AnchoredHeights(const FastBlocksHooks& hooks, const CBlockIndex& tip, int final_anchors) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 /** How final `block` is, on the chain that ends at `tip` (which it must be on). Called with cs_main held. */
 Finality FinalityOf(const FastBlocksHooks& hooks, const CBlockIndex& block, const CBlockIndex& tip, int final_anchors) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

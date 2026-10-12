@@ -419,8 +419,9 @@ RPCMethod getanchorinfo()
         result.pushKV("anchors", fast.anchors);
         result.pushKV("finalanchors", final_anchors);
         const auto anchors{pos::RecentAnchors(hooks, tip, std::max<size_t>(count, final_anchors))};
-        const CBlockIndex* anchored{anchors.empty() ? nullptr : anchors.front().anchored};
-        const CBlockIndex* final_block{static_cast<int>(anchors.size()) >= final_anchors && final_anchors > 0 ? anchors[final_anchors - 1].anchored : nullptr};
+        const auto heights{pos::AnchoredHeights(hooks, tip, final_anchors)};
+        const CBlockIndex* anchored{heights.empty() ? nullptr : tip.GetAncestor(heights.front())};
+        const CBlockIndex* final_block{static_cast<int>(heights.size()) >= final_anchors && final_anchors > 0 ? tip.GetAncestor(heights[final_anchors - 1]) : nullptr};
         if (anchored) result.pushKV("anchoredtip", anchored->GetBlockHash().GetHex());
         result.pushKV("anchoredheight", anchored ? anchored->nHeight : -1);
         if (final_block) result.pushKV("finaltip", final_block->GetBlockHash().GetHex());
@@ -693,9 +694,10 @@ void PushPosChainInfo(const ChainstateManager& chainman, UniValue& result)
     if (!hooks) return;
     LOCK(::cs_main);
     const int final_anchors{hooks->Params().final_anchors};
-    const auto anchors{pos::RecentAnchors(*hooks, *chainman.ActiveChain().Tip(), static_cast<size_t>(std::max(final_anchors, 1)))};
-    if (!anchors.empty()) result.pushKV("anchored_tip", anchors.front().anchored->GetBlockHash().GetHex());
-    if (final_anchors > 0 && static_cast<int>(anchors.size()) >= final_anchors) result.pushKV("final_tip", anchors[final_anchors - 1].anchored->GetBlockHash().GetHex());
+    const CBlockIndex& tip{*chainman.ActiveChain().Tip()};
+    const auto heights{pos::AnchoredHeights(*hooks, tip, std::max(final_anchors, 1))};
+    if (!heights.empty()) result.pushKV("anchored_tip", tip.GetAncestor(heights.front())->GetBlockHash().GetHex());
+    if (final_anchors > 0 && static_cast<int>(heights.size()) >= final_anchors) result.pushKV("final_tip", tip.GetAncestor(heights[final_anchors - 1])->GetBlockHash().GetHex());
 }
 
 
