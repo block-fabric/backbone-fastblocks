@@ -10,6 +10,7 @@ from decimal import Decimal
 from io import BytesIO
 
 from .key import TaggedHash, compute_xonly_pubkey, sign_schnorr
+from .segwit_addr import decode_segwit_address
 from .messages import CBlock, CTransaction, deser_compact_size, deser_vector, hash256, ser_compact_size, ser_uint256, ser_vector
 from .util import assert_equal
 
@@ -32,13 +33,14 @@ def escrow_at(main, height):
 
 
 def assert_peg_balance(main, nodes):
-    """Design 6.3: every node's coins (spendable, withdrawals, the pot, payouts owed) are the escrow
-    on the mainchain after the mainchain block it acted on, up to. (The tests leave no fee unclaimed
-    and burn no coins.)"""
+    """Design 6.3: every node's coins (spendable, withdrawals, the pot, bonded and unbonding stake, the
+    pot's reserve of penalties, rewards and payouts owed) are the escrow on the mainchain after the
+    mainchain block it acted on, up to. (The tests leave no fee unclaimed and burn no coins.)"""
     for node in nodes:
         node.syncmainchain()
         balance = node.getsidechainstate()["pegbalance"]
-        assert_equal(balance["total"], balance["utxos"] + balance["withdrawals"] + balance["pot"] + balance["payouts"])
+        parts = ("utxos", "withdrawals", "pot", "bonded", "unbonding", "reserve", "rewards", "payouts")
+        assert_equal(balance["total"], sum(balance[part] for part in parts))
         assert_equal(balance["total"], escrow_at(main, balance["mainheight"]))
     return balance
 
@@ -85,3 +87,11 @@ class PosBlock:
 
     def serialize(self):
         return bytes(self.header) + ser_vector(self.vtx, "serialize_with_witness") + ser_compact_size(len(self.sections)) + self.sections
+
+
+def bond_pop(key, owner_address, genesis_hash, hrp="rsc"):
+    """The proof of possession a bond to `key` owned by `owner_address` (P2WPKH) needs: the key's
+    BIP340 signature of TaggedHash("hpos/bond", owner key hash || genesis hash)."""
+    version, program = decode_segwit_address(hrp, owner_address)
+    assert version == 0 and len(program) == 20
+    return sign_schnorr(key, TaggedHash("hpos/bond", bytes(program) + bytes.fromhex(genesis_hash)[::-1]))

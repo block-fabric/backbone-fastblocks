@@ -8,12 +8,12 @@ fallback. The mainchain anchors the PoS chain through BMM commitments to
 what is built. The fee pot won through BMM bids is inspired by sol-drivechain;
 no code of it is used.
 
-Built so far: phase 2 of the design (a fixed validator set from the chain
-parameters) and phase 4 (RPCs, wallet and GUI finality, the staking page, the
-`fbevidence` and `fbgettickets` messages, headers that wait, catching up from
-tickets). Not yet: phase 3 (bonding and unbonding, epoch snapshots and a
-mainchain seed, slashing): so no `createbond`/`createunbond` either, and evidence
-is found, checked and relayed but not yet put in blocks nor punished.
+Built: phase 2 of the design (blocks of stake, anchors, the order of chains, the
+fee pot), phase 3 (staking: bonds and unbonds, validator sets made at anchors, a
+seed from the mainchain, jailing, slashing), phase 4 (RPCs, wallet and GUI
+finality, the staking page, the `fbevidence` and `fbgettickets` messages,
+headers that wait, catching up from tickets) and phase 5 (tests, fuzzing, the
+audit).
 
 ## Identity
 
@@ -41,7 +41,14 @@ test network and signet only warn (it is 0 there until the slot activates).
 | `stall_seconds` | 1800 | 600 | 30 |
 | Producer share | 50 % | 50 % | 50 % |
 | Anchors that make a block final (wallets) | 6 | 3 | 1 |
-| Validator set | none yet | none yet | `-posvalidators` |
+| Minimum stake | 1 CHN | 0.01 | 0.0001 |
+| Unbonding (anchors) | 2880 (two days) | 120 | 20 |
+| Window for proofs (anchors) | 1440 | 60 | 10 |
+| Seed lookahead | 1200 s | 600 s | 3600 s (`-posseedlookahead`) |
+| Penalty, reporter's share | 10 %, 1/8 | 10 %, 1/8 | 10 %, 1/8 |
+| Jailing | under 50 % of 10 slots or more led: 1 epoch more | same | same |
+| Reserve paid per anchor | 1/1440 | 1/60 | 1/5 |
+| Validators to start with | none | none | `-posvalidators` (a bootstrap) |
 
 Bitcoin's heuristics that count blocks by the target spacing (headers sync and
 block download timeouts, stale tips, verification progress) count a block a
@@ -49,9 +56,14 @@ slot: `nPowTargetSpacing` is 30 s on every 30-second network (60 s before,
 which gave initial block download half the headers timeout it needs).
 
 Without enough validators a network has no PoS blocks: it is the template's
-chain, merged mined only. Regtest takes its fixed set with
+chain, merged mined only (and its BMM blocks carry the transactions). That is
+how the main and test networks start: validators bond, and once a validator set
+made at an anchor has `min_active_validators`, blocks of stake start from the
+epoch after next; they stop again the same way if stake leaves (design 3.5,
+"PoS on and off"). Regtest may also start with a fixed set,
 `-posvalidators=<x-only key hex>[:<stake>],...` (consensus: every node of a
-test network needs the same list).
+test network needs the same list): these genesis validators are in every set
+until jailed or banned, with their stake as weight on top of what they bond.
 
 ## Blocks
 
@@ -63,9 +75,14 @@ the slot, `nBits` the chain's proof-of-work limit (a constant), and `nNonce`
 the mainchain height of the anchor the block acknowledges (0 if none). The
 sections hold the acknowledgement, if any.
 
-**Leader**: picked by stake among the validators sorted by key, from
-`TaggedHash("hpos/leader", seed || slot) mod total`, with
-`seed = TaggedHash("hpos/seed", epoch || genesis hash)`.
+**Leader**: picked by stake among the validators of the slot's epoch sorted
+by key, from `TaggedHash("hpos/leader", seed || slot) mod total`, with
+`seed = TaggedHash("hpos/seed", epoch || h)`: `h` is the hash of the highest
+mainchain block whose median time is at or before the epoch's start less
+`seed_lookahead_seconds` (null if no block on record is that old). A node knows
+it once its record has a later block (median times never go down); validators
+have no say in it, and the stake of the epoch was fixed before it exists (see
+Staking).
 
 **Anchor ticket**: `{version 1, anchored block P, payee script}`; the
 mainchain commits to `h* = TaggedHash("hpos/ticket", ticket)` through
@@ -90,11 +107,12 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 
 | Rule | Reason |
 |---|---|
-| The network has enough validators | `bad-pos-inactive` |
 | `nBits` is the proof-of-work limit | `bad-pos-bits` |
 | `nTime` is the start of a slot after the first block | `bad-pos-time` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
-| Signed by the slot's leader (checked before any rule that reads the chain, or lets the header wait) | `bad-pos-sig` |
+| The epoch's validator set can make blocks of stake | `bad-pos-inactive` |
+| The record has the block that seeds the epoch; may come later | `pos-seed-unknown` |
+| Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later | `pos-time-future` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
 | An acknowledged height has a commitment on record; may come later | `pos-ack-unknown` |
@@ -105,8 +123,8 @@ hours): BMM blocks far ahead would push the median time past, which a block of
 stake's slot must come after, ahead. Without validators, two hours, as the
 template.
 
-A header that may come later (`pos-time-future`, `pos-ack-unknown`, and
-`bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
+A header that may come later (`pos-time-future`, `pos-ack-unknown`,
+`pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
 headers, with the headers a peer sent after it; each is taken in once it and
 every waiting header below it can be, in the order of their heights.
 
@@ -116,7 +134,8 @@ Block (`CheckBlock`):
 |---|---|
 | Only PoS blocks have a fee pot output | `bad-pos-pot-not-pos` |
 | One pot output at most | `bad-pos-pot-multiple` |
-| The sections read (an acknowledgement or nothing; no evidence yet) | `bad-pos-sections` |
+| The sections read (an acknowledgement or none, then 16 proofs at most; nothing is no bytes) | `bad-pos-sections` |
+| Each proof has the form of one (see Evidence) | `bad-pos-evidence-kind`, `-slot`, `-same` |
 | `nNonce` is the acknowledged height, 0 without one | `bad-pos-ack-nonce` |
 | Ticket version 1 | `bad-pos-ticket-version` |
 | The payee is a standard script of 80 bytes or less, not data | `bad-pos-ticket-payee` |
@@ -136,15 +155,17 @@ Every block (state):
 
 | Rule | Reason |
 |---|---|
+| A PoS block is signed by the leader of its slot, as the chain below it and the record say when it is connected (its header may have come before the node knew the epoch's set; the record may have moved the seed since) | `bad-pos-sig`, `bad-pos-inactive`, `pos-seed-unknown`, `bad-pos-set-unknown` (a set the state no longer has) |
 | A PoS block's producer keeps at most 50 % of its fees: all the coinbase but the payouts and the pot ≤ 50 % of that and the pot | `bad-pos-producer-share` |
 | A PoS block comes less than `max_unanchored_slots` after the first PoS block no anchor covers | `bad-pos-unanchored` |
 | A BMM block carries transactions only when the mainchain block before its commitment is `stall_seconds` after the last PoS block | `bad-pos-bmm-not-stalled` |
 | A refund request only in a block that takes the peg actions | `bad-sc-refund-not-peg` (template) |
+| Bonds, unbonds and proofs | see Staking and Evidence |
 | The rules run with a chainstate attached | `bad-pos-context` |
 
 The state of these rules is one entry of the sidechain store (table `0x55`)
-and the pot accrued by height (`0x56`): the store's journal is their undo.
-Amounts are integers throughout.
+and the pot accrued by height (`0x56`); staking's is below. The store's journal
+is their undo. Amounts are integers throughout.
 
 ## Finality
 
@@ -179,22 +200,114 @@ every fork.
 `getbalances` the confirmed coins by finality (`mine.finality.soft`,
 `anchored`, `final`).
 
+## Staking
+
+Validators bond pegged CHN to a key, take it back after an unbonding delay, are
+left out of the validator sets for a while when they miss their slots, and lose
+part of their stake for good when they sign two blocks for a slot.
+
+**Bond** (`createbond`): an output `OP_RETURN 0xDB'STK' | validator x-only key
+(32) | owner key hash (20) | proof of possession (64)` whose value is bonded:
+it leaves circulation into the state, as a withdrawal does. The proof is the
+validator key's BIP340 signature of `TaggedHash("hpos/bond", owner ||
+genesis hash)`: nobody bonds a key not theirs (`signbondpop` on the
+validator's node makes it; `createbond` asks the node's block producer if it
+has the key). The first bond names the owner, who alone may unbond, and who is
+paid what is unbonded (P2WPKH).
+
+**Unbond** (`createunbond`): an output of value 0, `OP_RETURN 0xDC'UNB' |
+validator key | amount (8) | sequence (4) | signature (65)`, the owner's signed
+message `FastBlocks unbond <key> <amount> <sequence> <genesis>`. It takes the
+amount off the stake at once, and pays it to the owner at the peg step of the
+anchor `unbonding_anchors` after (the coinbase's payouts, as refunds); until
+then a proof can still take a share of it. If the mainchain stalls, so does
+unbonding.
+
+| Rule (a transaction; in blocks and the mempool, template hook `ApplyTx`) | Reason |
+|---|---|
+| A bond output reads | `bad-pos-bond` |
+| Its value is positive (and the total within MAX_MONEY) | `bad-pos-bond-amount` |
+| It names an owner, the validator's own if it has one | `bad-pos-bond-owner` |
+| Its proof of possession verifies | `bad-pos-bond-pop` |
+| The key is not banned | `bad-pos-bond-tombstoned` |
+| An unbond output reads | `bad-pos-unbond` |
+| Its value is 0 | `bad-pos-unbond-value` |
+| The validator has an owner | `bad-pos-unbond-unknown` |
+| Its sequence is the validator's next (an unbond counts once) | `bad-pos-unbond-sequence` |
+| Its amount is positive, at most what is bonded | `bad-pos-unbond-amount` |
+| What stays bonded is nothing or at least `min_stake` | `bad-pos-unbond-remainder` |
+| The owner signed it | `bad-pos-unbond-sig` |
+
+A smaller bond than `min_stake` is taken, but the key takes part only with
+`min_stake` bonded (a genesis validator whatever it bonds).
+
+**Validator sets.** Each anchor (the block that takes the peg actions: an
+acknowledgement or a BMM block) makes a set from the state as it is then: the
+eligible validators (not banned, enough stake, not jailed), the
+`max_validators` largest (ties to the lower key), weight = bonded + genesis
+stake. The set of epoch e is the one the newest anchor on the chain whose slot
+(a BMM block's: of its time) is before the start of epoch e − 1 made: the stake
+is fixed at least an epoch before the epoch's seed exists, and a bond counts
+from the epoch after the next anchor's next. The set has blocks of stake if it
+has `min_active_validators`. Sets are kept by version, with each anchor's
+(table `0x5a`, `0x5b`, `0x5c`), and pruned once no block to come can need them
+(older than the window for proofs, and followed by an anchor before the epoch
+before the current one). A node keeps the sets it read in memory too (4096): a
+header of a branch whose anchor's set it never had is taken, and its leader
+checked when its block is connected.
+
+**Seed.** See Leader above. A block of stake waits for its epoch's seed
+(`pos-seed-unknown`). A mainchain reorg that moves the seed of an epoch takes
+the blocks of stake whose leader changed back (as a lost commitment does), and
+gives them back when the record does: the follower checks the leaders of the
+newest blocks of the active chain at each new mainchain tip.
+
+**Jailing.** Each block of stake notes that its leader made one, and that the
+leaders of the slots since the last block of stake (an epoch of them at most)
+made none (table `0x5d`, by epoch). At an anchor, a validator that made less
+than `liveness_min_bps` of the slots it led in an earlier epoch, having led
+`liveness_min_assigned` or more, is jailed: left out of the sets made in the
+next `jail_epochs` + 1 epochs. No coins are lost.
+
+**Slashing.** A block of stake may carry proofs that leaders signed two blocks
+for a slot (below). The offender loses `slash_bps` (10 %) of its stake, bonded
+then unbonding, is banned for good, and the rest of its bond is unbonded; the
+block that carried the proof is owed 1/`reporter_share_divisor` (1/8) of the
+penalty, paid to the script of its coinbase's first output at the next peg
+step (table `0x54`); the rest goes to a reserve that each anchor pays
+1/`pot_reserve_anchors` of (rounded up) with the pot, to the anchor's payee.
+
+**Peg actions of an anchor** (before the template's, `BeforePegStep`): the pot
+and the share of the reserve to the payee; unbonds due and rewards owed; the
+liveness of earlier epochs (jailing); the set of the anchor.
+
+Tables: `0x50` the totals (bonded, unbonding, reserve, rewards owed, the set
+version), `0x53` offences punished, `0x54` rewards owed, `0x57` validators
+(owner, bonded, genesis stake, unbonds, sequence, jail, ban), `0x58` unbonds by
+the anchor they are paid at, `0x59` eligible validators by weight, `0x5a`–`0x5c`
+sets, `0x5d` liveness. (`0x51` and `0x52` are the template's `Q` and `R`.)
+
 ## Evidence
 
 Two headers the leader of a slot signed for that slot prove that it signed
 twice. A node notes the first header signed for each slot it sees (the last
 4000 slots); a second one makes the proof. Proofs are checked, kept (1000, the
-oldest slots go first) and relayed in `fbevidence`:
+oldest slots go first), relayed in `fbevidence`, and put in its blocks of stake
+by a leader (16 at most) while the chain has not punished them:
 
 | Rule | Reason |
 |---|---|
 | Two headers of blocks of stake | `bad-pos-evidence-kind` |
 | Of one slot, at its start | `bad-pos-evidence-slot` |
 | Two different headers | `bad-pos-evidence-same` |
-| Both signed by the slot's leader | `bad-pos-evidence-sig` |
+| Both signed by the slot's leader (on the chain below the block that carries it; for relay, the chain below either header or the active one) | `bad-pos-evidence-sig` |
+| In a block: of a slot not after the block's | `bad-pos-evidence-late` |
+| In a block: at most `evidence_window_anchors` anchors after the anchor that made the set of the offence's epoch (and a set the state still has) | `bad-pos-evidence-old` |
+| In a block: not punished before (one per key and slot) | `bad-pos-evidence-known` |
 
-`submitevidence <hex>` (the two headers, serialized) and `listevidence`.
-Putting proofs in blocks and the penalty come with staking (phase 3).
+`submitevidence <hex>` (the two headers, serialized) and `listevidence`. A
+proof whose leader a node cannot tell yet (`pos-evidence-unknown`) is dropped
+without blaming the peer.
 
 ## P2P
 
@@ -202,7 +315,7 @@ Putting proofs in blocks and the penalty come with staking (phase 3).
 |---|---|---|
 | `fbticket` | A ticket | Kept and relayed if the mainchain committed to it, or if it names a block the node knows: of those, 8 a peer per mainchain block at most (anyone can make them by the thousand) |
 | `fbgettickets` | Up to 16 h* | The node sends the tickets it has; more than 16 is misbehaving |
-| `fbevidence` | Two headers | Kept and relayed if it is a proof (above); a peer that sends one that is not misbehaves |
+| `fbevidence` | Two headers | Kept and relayed if it is a proof (above); a peer that sends one that is not misbehaves (not one whose leader the node cannot tell yet) |
 
 **Catching up.** Headers and blocks come as usual and are checked in full
 (leader signatures included); an acknowledgement waits until the node's own
@@ -215,21 +328,27 @@ last acknowledged one that it has neither a ticket nor a block of.
 
 | RPC | |
 |---|---|
-| `getposinfo` | The validators, slot and leader, anchors, the pot, the producer |
-| `getvalidators [epoch]` | The set, and the slots of the epoch each one leads |
-| `getvalidator <pubkey>` | One validator: stake, slots, next slot, offences known |
+| `getposinfo` | The validators of the current epoch, slot and leader, anchors, the pot and its reserve, staking's totals, the producer |
+| `getvalidators [epoch]` | The set of an epoch as the active chain fixes it (`known`, `seedknown`), and the slots each one leads |
+| `getvalidator <pubkey>` | One validator: stake, slots, next slot, offences known, its bond (owner, bonded, unbonds and when they are paid, jail, ban) |
+| `signbondpop <owner> [pubkey]` | The proof of possession for a bond owned by `owner`, by a key of this node's producer |
 | `getleaderschedule [epoch]` | The leader of each slot of an epoch |
 | `getanchorinfo [count]` | The newest anchors, the anchored and final tips, the commitments the chain skipped, the pot, the tickets known |
 | `getsidechainstate` | Adds `pegbalance`: the coins the chain holds against the escrow (below) |
 | `submitevidence <hex>`, `listevidence` | Evidence (above) |
 | `setstaking true\|false`, `getstakinginfo` | This node as a validator: on or off (on at start), its keys, what it made, its next slot |
+| `createbond <pubkey> <amount> [pop] [owner]` (wallet) | Bond coins of the wallet to a key |
+| `createunbond <pubkey> [amount]` (wallet) | Unbond some or all of the wallet's bond |
+| `listbonds [all]` (wallet) | The wallet's bonds (or every validator's) |
 
 ## The staking page
 
 `fastblocks-qt` has a Staking page (Alt+6): the chain's slot and leader,
 this node as a validator with buttons to start and stop staking, how far the
 chain is anchored and final and the wallet's soft, anchored and final coins,
-the validators of the epoch and the newest anchors.
+the validators of the epoch and the newest anchors, and the wallet's bonds,
+with a key and an amount to bond or unbond (this node's key if none is
+entered; asked before it is sent).
 
 ## Fork choice
 
@@ -256,9 +375,10 @@ value reaches the mainchain's miners.
 
 `getsidechainstate` gives `pegbalance` as of the tip (design §6.3): `utxos`
 (spendable coins), `withdrawals` (coins burned by withdrawals waiting or in a
-bundle: amounts and mainchain fees), `pot` (accrued less paid), `payouts`
-(owed and not paid yet: deposits, refunds, the pot, unbond releases later),
-their `total`, and `mainheight`, the mainchain block the chain acted on up to.
+bundle: amounts and mainchain fees), `pot` (accrued less paid), `bonded` and
+`unbonding` stake, the `reserve` of penalties, the `rewards` owed for proofs,
+`payouts` (owed and not paid yet: deposits, refunds, the pot, unbonds and
+rewards due), their `total`, and `mainheight`, the mainchain block the chain acted on up to.
 Without fees left unclaimed (a producer may claim less than its share; what it
 leaves is lost) and coins burned (`OP_RETURN` outputs), `total` is the escrow
 the mainchain held for slot 5 after the block `mainheight`; with them, less.
@@ -288,8 +408,15 @@ Every FastBlocks functional test checks this on every node after every step
   the template does. It waits for its committed ticket to be acknowledged before
   it makes the next, but not for one that can no longer be.
 - A leader acknowledges the first committed ticket that its block can carry in
-  time (`bad-pos-unanchored`); if the block with the acknowledgement does not
-  pass validation, it makes the block without it rather than none.
+  time (`bad-pos-unanchored`), and puts in the proofs it knows the chain has
+  not punished; if the block with them does not pass validation, it makes the
+  block without them rather than none. It does not acknowledge a commitment
+  whose acknowledging block failed when the record lost the commitment: the
+  follower gives that block back once the record has it again (acknowledging
+  it on a second branch only forked the chain).
+- A peer that sends the header of a block that failed against the record, or of
+  one on it, is not punished (template hook `PardonRecordFailures`): its record
+  may be ahead of this node's.
 - A node keeps at most 1000 tickets; a flood from a peer pushes out the oldest,
   but not the node's own nor those the mainchain committed to. Until its
   committed ticket is acknowledged, the merged miner relays it again once per
@@ -316,9 +443,7 @@ and the producer.
 
 ## Deviations from the design (phase 4)
 
-- Phase 4 came before phase 3: the wallet has no `createbond` and
-  `createunbond` yet (a bond output without the rules that keep it would burn
-  the coins), and evidence is relayed but not yet in blocks.
+- Phase 4 came before phase 3 (bonds and slashing came after it).
 - Finality is shown on the Staking page (the chain and the wallet's coins), and
   by RPC per transaction; not yet as a badge per transaction in the transaction
   list, nor on the Overview page. `getbalance` has no `minfinality`.
@@ -329,6 +454,31 @@ and the producer.
   comes with phase 3).
 - The design's header rule against `P_last` is checked as far as headers tell
   (an acknowledgement's P is in its block): the state checks the rest.
+
+## Deviations from the design (phase 3)
+
+- The set of an anchor is the state's when the anchor's block takes the peg
+  actions (the chain up to its parent), not the state at P: an acknowledgement
+  is at most a few blocks after P, and the set is keyed by the anchor's block
+  on its own branch, so every node of a branch has the same.
+- Regtest's seed lookahead is an hour, not 0 (`-posseedlookahead` sets it):
+  a regtest mainchain's median time lags or leads the clock by minutes as the
+  tests mine it, and blocks of stake would wait for mainchain blocks. The unit
+  tests take it to 0.
+- A header whose epoch's set the node does not know (the anchor that made it is
+  on a branch the node never connected) is taken, and its leader checked when
+  its block is connected, rather than waiting: a waiting header could deadlock
+  a node that needs the branch to learn the set (a partition with anchors on
+  both sides).
+- Proofs are carried by blocks of stake only, not by BMM blocks (design 5.1:
+  a coinbase output in BMM blocks); the window for proofs counts anchors since
+  the anchor that made the set of the offence's epoch.
+- No correlated penalty above 1/3 of the stake, no forced unbond after three
+  jails (design 5.2): not in the decisions of section 13.
+- Liveness charges at most an epoch of empty slots per block of stake; a
+  BMM block's epoch, for jailing and pruning, is taken two hours before its
+  time (it may be that far ahead of the clock).
+- Several proofs of one key for different slots each cost 10 % of what is left.
 
 ## Tests, fuzzing and the audit (phase 5)
 
@@ -343,6 +493,8 @@ after every step:
 | `feature_fastblocks_partition.py` | A leader that signs twice; a partition with an anchor on each side (the earlier one wins); an anchor of a branch the validators left; IBD |
 | `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex` |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
+| `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; an unbond paid unbonding_anchors anchors later |
+| `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
 `pos_evidence`, `pos_state` (a whole chain from fuzzed choices: the state agrees
@@ -383,5 +535,4 @@ What the audit of this round changed (each with a test):
 - Leaders do not move to an anchored branch they left (§4.2): such an anchor
   is acknowledged only by leaders on that branch, and is otherwise void.
   Finality counts it against the blocks it could take back.
-- Nothing of phase 3 (bonding, epoch snapshots, a mainchain seed, slashing):
-  evidence is found and relayed, not punished.
+- (Phase 3 is built since: see Staking.)
