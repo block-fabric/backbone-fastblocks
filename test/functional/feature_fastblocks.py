@@ -22,6 +22,7 @@ import time
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
+from test_framework.fastblocks import assert_peg_balance
 from test_framework.key import compute_xonly_pubkey
 from test_framework.test_node import ErrorMatch
 from test_framework.util import assert_equal, assert_greater_than, rpc_port
@@ -112,6 +113,7 @@ class FastBlocksTest(SidechainTest):
         assert not self.is_pos(n0, first)
         assert_equal(n0.getbalance(), 50)
         assert_equal(n0.getposinfo()["anchors"], 1)
+        assert_peg_balance(main, self.nodes)
 
         self.log.info("Start the validators: a block of stake per slot, by its leader")
         self.payouts = [n.getnewaddress() for n in self.nodes]
@@ -150,6 +152,7 @@ class FastBlocksTest(SidechainTest):
         assert_greater_than(info["tickets"], 0)
         # Every node knows the tickets (relayed).
         self.wait_until(lambda: all(n.getposinfo()["tickets"] >= 2 for n in self.nodes))
+        assert_peg_balance(main, self.nodes)
 
         self.log.info("The fee split: half to the producer, half to the pot")
         txid = n0.sendtoaddress(n1.getnewaddress(), 1)
@@ -171,6 +174,8 @@ class FastBlocksTest(SidechainTest):
         self.anchor()
         self.wait_until(lambda: n0.getposinfo()["pot"]["paid"] == n0.getposinfo()["pot"]["accrued"], timeout=60)
         assert_equal(n0.getreceivedbyaddress(ticket_address, 0) - received, pots[0]["value"])
+        self.wait_in_sync()
+        assert_peg_balance(main, self.nodes)
 
         self.log.info("A withdrawal in a block of stake goes into a bundle at an acknowledgement")
         withdrawal = n0.createwithdrawal(main.getnewaddress(), 3, Decimal("0.01"))
@@ -184,17 +189,20 @@ class FastBlocksTest(SidechainTest):
         bundle = n0.getwithdrawalbundle()
         assert bundle["status"] != "next", bundle
         assert_equal(len({str(n.getwithdrawalbundle()) for n in self.nodes}), 1)
+        # The withdrawal's coins are burned on this chain and still in escrow.
+        assert_equal(assert_peg_balance(main, self.nodes)["withdrawals"], Decimal("3.01"))
 
         self.log.info("Slashing protection: a second node with the same keys does not start")
         self.stop_node(2)
+        # (What it signed before it stopped: read now, as it may sign again as soon as it starts.)
+        with open(n2.chain_path / "validator_protection.dat") as f:
+            signed_before = int(f.read().splitlines()[1].split()[1])
         self.nodes[2].assert_start_raises_init_error(self.validator_args(2, key_index=0), expected_msg="FastBlocks block producer: cannot lock", match=ErrorMatch.PARTIAL_REGEX)
         self.start_node(2, extra_args=self.validator_args(2))
         self.connect_nodes(0, 2)
         self.connect_nodes(1, 2)
         self.wait_in_sync()
         # A restarted validator goes on, after the slots it signed before.
-        with open(n2.chain_path / "validator_protection.dat") as f:
-            signed_before = int(f.read().splitlines()[1].split()[1])
         self.wait_until(lambda: n2.getposinfo()["producer"]["produced"] > 0, timeout=60)
         self.wait_in_sync()
         with open(n2.chain_path / "validator_protection.dat") as f:
@@ -225,6 +233,7 @@ class FastBlocksTest(SidechainTest):
         assert not self.is_pos(n0, blockhash)
         assert_equal(n0.getposinfo()["lastposslot"], last_pos)
         self.wait_in_sync()
+        assert_peg_balance(main, self.nodes)
 
 
 if __name__ == '__main__':

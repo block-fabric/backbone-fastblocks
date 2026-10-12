@@ -89,36 +89,41 @@ std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, con
     return heights;
 }
 
+std::vector<SkippedCommitment> SkippedCommitments(const FastBlocksHooks& hooks, const CBlockIndex& tip, const std::vector<ChainAnchor>& anchors)
+{
+    AssertLockHeld(::cs_main);
+    std::vector<SkippedCommitment> skipped;
+    const ChainstateManager* chainman{hooks.Chainman()};
+    if (anchors.empty() || !chainman || !chainman->m_mainchain) return skipped;
+    std::set<uint32_t> used;
+    for (const ChainAnchor& anchor : anchors) used.insert(anchor.main_height);
+    const sidechain::Mainchain& record{*chainman->m_mainchain};
+    for (int height{static_cast<int>(anchors.back().main_height) + 1}; height <= record.Height(); ++height) {
+        const auto bmm{record.BmmAt(height)};
+        if (!bmm || used.contains(static_cast<uint32_t>(height))) continue;
+        SkippedCommitment commitment{.main_height = static_cast<uint32_t>(height)};
+        // Where a chain that has it leaves this one: at the branch of the block it rests on, if the
+        // node knows it (a BMM block, or the block a ticket names); anywhere otherwise.
+        const CBlockIndex* rests_on{chainman->m_blockman.LookupBlockIndex(*bmm)};
+        if (!rests_on) {
+            if (const auto ticket{hooks.GetTicket(*bmm)}) rests_on = chainman->m_blockman.LookupBlockIndex(ticket->anchored);
+        }
+        if (rests_on && tip.GetAncestor(rests_on->nHeight) == rests_on) {
+            commitment.min_fork = rests_on->nHeight;
+        } else if (rests_on) {
+            commitment.exact_fork = LastCommonAncestor(rests_on, &tip)->nHeight;
+        }
+        skipped.push_back(commitment);
+    }
+    return skipped;
+}
+
 std::vector<int> AnchoredHeights(const FastBlocksHooks& hooks, const CBlockIndex& tip, int final_anchors)
 {
     AssertLockHeld(::cs_main);
     if (final_anchors <= 0) return {};
-    const std::vector<ChainAnchor> anchors{RecentAnchors(hooks, tip, static_cast<size_t>(final_anchors) * 4 + 8)};
-    std::vector<SkippedCommitment> skipped;
-    const ChainstateManager* chainman{hooks.Chainman()};
-    if (!anchors.empty() && chainman && chainman->m_mainchain) {
-        std::set<uint32_t> used;
-        for (const ChainAnchor& anchor : anchors) used.insert(anchor.main_height);
-        const sidechain::Mainchain& record{*chainman->m_mainchain};
-        for (int height{static_cast<int>(anchors.back().main_height) + 1}; height <= record.Height(); ++height) {
-            const auto bmm{record.BmmAt(height)};
-            if (!bmm || used.contains(static_cast<uint32_t>(height))) continue;
-            SkippedCommitment commitment{.main_height = static_cast<uint32_t>(height)};
-            // Where a chain that has it leaves this one: at the branch of the block it rests on, if
-            // the node knows it (a BMM block, or the block a ticket names); anywhere otherwise.
-            const CBlockIndex* rests_on{chainman->m_blockman.LookupBlockIndex(*bmm)};
-            if (!rests_on) {
-                if (const auto ticket{hooks.GetTicket(*bmm)}) rests_on = chainman->m_blockman.LookupBlockIndex(ticket->anchored);
-            }
-            if (rests_on && tip.GetAncestor(rests_on->nHeight) == rests_on) {
-                commitment.min_fork = rests_on->nHeight;
-            } else if (rests_on) {
-                commitment.exact_fork = LastCommonAncestor(rests_on, &tip)->nHeight;
-            }
-            skipped.push_back(commitment);
-        }
-    }
-    return NetAnchoredHeights(anchors, skipped, final_anchors);
+    const std::vector<ChainAnchor> anchors{RecentAnchors(hooks, tip, AnchorsWalked(final_anchors))};
+    return NetAnchoredHeights(anchors, SkippedCommitments(hooks, tip, anchors), final_anchors);
 }
 
 Finality FinalityOf(const FastBlocksHooks& hooks, const CBlockIndex& block, const CBlockIndex& tip, int final_anchors)

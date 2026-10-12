@@ -19,6 +19,7 @@ import os
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
+from test_framework.fastblocks import assert_peg_balance
 from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
 from test_framework.messages import hash256, ser_compact_size
 from test_framework.p2p import MESSAGEMAP, P2PInterface
@@ -147,6 +148,7 @@ class FastBlocksRpcTest(SidechainTest):
         self.mine_main()
         self.wait_until(lambda: all(n.getbestblockhash() == block["hash"] for n in self.validators()))
         assert_equal(n0.getblock(block["hash"])["kind"], "bmm")
+        assert_peg_balance(main, self.validators())
 
         self.log.info("Before any validator runs: the set and the schedule, no staking")
         info = n0.getvalidators()
@@ -259,6 +261,10 @@ class FastBlocksRpcTest(SidechainTest):
         assert_greater_than_or_equal(info["pot"]["accrued"], info["pot"]["paid"])
         assert_greater_than_or_equal(info["pot"]["due"], 0)
         assert_equal(len(n0.getanchorinfo(2)["recent"]), 2)
+        # Nothing skipped: every commitment is an anchor of the chain.
+        assert_equal(info["skipped"], [])
+        self.wait_in_sync()
+        assert_peg_balance(main, self.validators())
         assert_raises_rpc_error(-8, "count must be", n0.getanchorinfo, 101)
 
         self.log.info("The wallet: the transaction is final once an anchor covers it")
@@ -341,6 +347,7 @@ class FastBlocksRpcTest(SidechainTest):
         assert_equal(observer.getanchorinfo()["recent"], n0.getanchorinfo()["recent"])
         tip_hash = observer.getbestblockhash()
         assert_equal(observer.getblock(tip_hash)["finality"], n0.getblock(tip_hash)["finality"])
+        assert_peg_balance(main, self.nodes)
 
 if __name__ == '__main__':
     FastBlocksRpcTest(__file__).main()

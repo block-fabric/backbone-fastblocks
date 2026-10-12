@@ -209,7 +209,8 @@ last acknowledged one that it has neither a ticket nor a block of.
 | `getvalidators [epoch]` | The set, and the slots of the epoch each one leads |
 | `getvalidator <pubkey>` | One validator: stake, slots, next slot, offences known |
 | `getleaderschedule [epoch]` | The leader of each slot of an epoch |
-| `getanchorinfo [count]` | The newest anchors, the anchored and final tips, the pot, the tickets known |
+| `getanchorinfo [count]` | The newest anchors, the anchored and final tips, the commitments the chain skipped, the pot, the tickets known |
+| `getsidechainstate` | Adds `pegbalance`: the coins the chain holds against the escrow (below) |
 | `submitevidence <hex>`, `listevidence` | Evidence (above) |
 | `setstaking true\|false`, `getstakinginfo` | This node as a validator: on or off (on at start), its keys, what it made, its next slot |
 
@@ -240,6 +241,19 @@ circulation into the state. An acknowledgement pays the pot accrued up to P
 to the ticket's payee; a BMM block pays the pot accrued up to its parent to
 its first output's script. Bidders bid for the pot on the mainchain, so its
 value reaches the mainchain's miners.
+
+## Peg balance
+
+`getsidechainstate` gives `pegbalance` as of the tip (design §6.3): `utxos`
+(spendable coins), `withdrawals` (coins burned by withdrawals waiting or in a
+bundle: amounts and mainchain fees), `pot` (accrued less paid), `payouts`
+(owed and not paid yet: deposits, refunds, the pot, unbond releases later),
+their `total`, and `mainheight`, the mainchain block the chain acted on up to.
+Without fees left unclaimed (a producer may claim less than its share; what it
+leaves is lost) and coins burned (`OP_RETURN` outputs), `total` is the escrow
+the mainchain held for slot 5 after the block `mainheight`; with them, less.
+Every FastBlocks functional test checks this on every node after every step
+(`test_framework/fastblocks.py`, `assert_peg_balance`).
 
 ## Producer and anchorer
 

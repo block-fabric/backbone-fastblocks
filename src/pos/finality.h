@@ -88,7 +88,14 @@ struct SkippedCommitment {
     bool UsableAt(int fork) const { return exact_fork ? fork == *exact_fork : (!min_fork || fork >= *min_fork); }
 };
 std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count);
-/** The same for the chain that ends at `tip`, with the commitments on its node's record (4 × final_anchors + 8 anchors walked). Called with cs_main held. */
+/** The anchors AnchoredHeights looks at: forks deeper than these are not looked at. */
+inline size_t AnchorsWalked(int final_anchors) { return static_cast<size_t>(final_anchors) * 4 + 8; }
+/**
+ * The commitments on the node's record, after the oldest of `anchors` (those of the chain that ends
+ * at `tip`, newest first), that the chain does not use. Called with cs_main held.
+ */
+std::vector<SkippedCommitment> SkippedCommitments(const FastBlocksHooks& hooks, const CBlockIndex& tip, const std::vector<ChainAnchor>& anchors) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+/** The same for the chain that ends at `tip`, with the commitments on its node's record (AnchorsWalked anchors). Called with cs_main held. */
 std::vector<int> AnchoredHeights(const FastBlocksHooks& hooks, const CBlockIndex& tip, int final_anchors) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 /** How final `block` is, on the chain that ends at `tip` (which it must be on). Called with cs_main held. */

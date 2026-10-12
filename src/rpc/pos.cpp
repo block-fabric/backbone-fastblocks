@@ -6,6 +6,7 @@
 #include <consensus/amount.h>
 #include <core_io.h>
 #include <kernel/chainparams.h>
+#include <kernel/coinstats.h>
 #include <node/context.h>
 #include <pos/evidence.h>
 #include <pos/finality.h>
@@ -18,6 +19,7 @@
 #include <rpc/server_util.h>
 #include <rpc/util.h>
 #include <sidechain/state.h>
+#include <txdb.h>
 #include <univalue.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -384,6 +386,15 @@ RPCMethod getanchorinfo()
                     {RPCResult::Type::NUM, "mainheight", "Mainchain height of the commitment"},
                 }},
             }},
+            {RPCResult::Type::ARR, "skipped", "Commitments on record after the oldest anchor finality looks at that the active chain does not use: each may be the anchor of a chain that leaves some of its blocks out",
+            {
+                {RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "mainheight", "Mainchain height of the commitment"},
+                    {RPCResult::Type::STR, "fork", "Where a chain with it as an anchor leaves this one: \"any\" (the node does not know its block), \"from\" (at forkheight or above) or \"at\" (at forkheight)"},
+                    {RPCResult::Type::NUM, "forkheight", /*optional=*/true, "The height of that fork"},
+                }},
+            }},
             {RPCResult::Type::OBJ, "pot", "The fee pot",
             {
                 {RPCResult::Type::STR_AMOUNT, "accrued", "Put in the pot since the chain began"},
@@ -437,6 +448,15 @@ RPCMethod getanchorinfo()
             entry.pushKV("mainheight", static_cast<uint64_t>(anchor.main_height));
             recent.push_back(std::move(entry));
         }
+        UniValue skipped(UniValue::VARR);
+        for (const pos::SkippedCommitment& commitment : pos::SkippedCommitments(hooks, tip, pos::RecentAnchors(hooks, tip, pos::AnchorsWalked(final_anchors)))) {
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("mainheight", static_cast<uint64_t>(commitment.main_height));
+            entry.pushKV("fork", commitment.exact_fork ? "at" : commitment.min_fork ? "from" : "any");
+            if (commitment.exact_fork || commitment.min_fork) entry.pushKV("forkheight", commitment.exact_fork ? *commitment.exact_fork : *commitment.min_fork);
+            skipped.push_back(std::move(entry));
+        }
+        result.pushKV("skipped", std::move(skipped));
         pot.pushKV("accrued", ValueFromAmount(fast.pot_accrued));
         pot.pushKV("paid", ValueFromAmount(fast.pot_paid));
         pot.pushKV("due", ValueFromAmount(pos::PotAccruedAt(chainman.ActiveChainstate().SideState().View(), tip.nHeight) - fast.pot_paid));
@@ -700,6 +720,57 @@ void PushPosChainInfo(const ChainstateManager& chainman, UniValue& result)
     if (final_anchors > 0 && static_cast<int>(heights.size()) >= final_anchors) result.pushKV("final_tip", tip.GetAncestor(heights[final_anchors - 1])->GetBlockHash().GetHex());
 }
 
+std::vector<RPCResult> PegBalanceFields()
+{
+    return {
+        {RPCResult::Type::OBJ, "pegbalance", /*optional=*/true, "FastBlocks: the coins the chain holds against the mainchain's escrow, as of the tip", {
+            {RPCResult::Type::STR_HEX, "bestblock", "The block it is as of"},
+            {RPCResult::Type::NUM, "mainheight", "The mainchain block the chain has acted on, up to"},
+            {RPCResult::Type::STR_AMOUNT, "utxos", "Spendable coins (the UTXO set)"},
+            {RPCResult::Type::STR_AMOUNT, "withdrawals", "Coins burned by withdrawals waiting or in a bundle (amounts and mainchain fees)"},
+            {RPCResult::Type::STR_AMOUNT, "pot", "The fee pot: accrued less paid"},
+            {RPCResult::Type::STR_AMOUNT, "payouts", "Payouts owed and not paid yet (deposits, refunds, the pot)"},
+            {RPCResult::Type::STR_AMOUNT, "total", "Their sum: the escrow after the block mainheight, less fees left unclaimed and coins burned"},
+        }},
+    };
+}
+
+void PushPegBalance(ChainstateManager& chainman, UniValue& result)
+{
+    if (!pos::InstalledHooks()) return;
+    CAmount utxos{0}, withdrawals{0}, pot{0}, payouts{0};
+    int main_height;
+    uint256 tip;
+    {
+        // The coins and the sidechain state as of one tip.
+        LOCK(::cs_main);
+        Chainstate& chainstate{chainman.ActiveChainstate()};
+        chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
+        tip = chainstate.m_chain.Tip()->GetBlockHash();
+        const auto stats{kernel::ComputeUTXOStats(kernel::CoinStatsHashType::NONE, chainstate.CoinsDB(), chainman.m_blockman)};
+        if (!stats || !stats->total_amount) throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read the UTXO set");
+        utxos = *stats->total_amount;
+        const sidechain::State side{chainstate.SideState()};
+        side.ForEachWithdrawal([&](const sidechain::Withdrawal& withdrawal) {
+            withdrawals += withdrawal.Burned();
+            return true;
+        });
+        for (const CTxOut& out : side.Queue()) payouts += out.nValue;
+        for (const CTxOut& out : side.TxQueue()) payouts += out.nValue;
+        const pos::FastState fast{pos::GetFastState(chainstate.SideState().View())};
+        pot = fast.pot_accrued - fast.pot_paid;
+        main_height = side.MainHeight();
+    }
+    UniValue balance(UniValue::VOBJ);
+    balance.pushKV("bestblock", tip.GetHex());
+    balance.pushKV("mainheight", main_height);
+    balance.pushKV("utxos", ValueFromAmount(utxos));
+    balance.pushKV("withdrawals", ValueFromAmount(withdrawals));
+    balance.pushKV("pot", ValueFromAmount(pot));
+    balance.pushKV("payouts", ValueFromAmount(payouts));
+    balance.pushKV("total", ValueFromAmount(utxos + withdrawals + pot + payouts));
+    result.pushKV("pegbalance", std::move(balance));
+}
 
 void RegisterPosRPCCommands(CRPCTable& t)
 {

@@ -20,5 +20,14 @@ std::vector<RPCResult> PosBlockFields();
 void PushPosBlockInfo(const ChainstateManager& chainman, const CBlock& block, const CBlockIndex& index, UniValue& result);
 /** Add what getblockchaininfo adds on FastBlocks (the anchored and the final tip), if the FastBlocks hooks are installed. */
 void PushPosChainInfo(const ChainstateManager& chainman, UniValue& result);
+/** What getsidechainstate adds on FastBlocks: pegbalance. */
+std::vector<RPCResult> PegBalanceFields();
+/**
+ * Add pegbalance to getsidechainstate's result, if the FastBlocks hooks are installed: the coins the
+ * chain holds against the mainchain's escrow, as of the tip (design section 6.3): spendable coins,
+ * withdrawals (waiting or in a bundle), the fee pot, and the payouts owed. Without fees left unclaimed
+ * or coins burned, their total is the escrow on the mainchain after the block `mainheight`.
+ */
+void PushPegBalance(ChainstateManager& chainman, UniValue& result);
 
 #endif // BITCOIN_RPC_POS_H

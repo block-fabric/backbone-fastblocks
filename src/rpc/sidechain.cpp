@@ -10,6 +10,7 @@
 #include <core_io.h>
 #include <key_io.h>
 #include <node/context.h>
+#include <rpc/pos.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
@@ -449,6 +450,7 @@ RPCMethod getsidechainstate()
             {RPCResult::Type::STR_HEX, "hash", "The hash of every entry of the state, in key order"},
             {RPCResult::Type::NUM, "entries", "The number of entries"},
             {RPCResult::Type::OBJ_DYN, "tables", "Entries per table, by the table's key byte", {{RPCResult::Type::NUM, "byte", "The number of entries"}}},
+            PegBalanceFields().front(),
         }},
         RPCExamples{HelpExampleCli("getsidechainstate", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -473,6 +475,7 @@ RPCMethod getsidechainstate()
         by_table.pushKV(std::isprint(table) ? std::string(1, static_cast<char>(table)) : strprintf("0x%02x", table), count);
     }
     result.pushKV("tables", std::move(by_table));
+    PushPegBalance(chainman, result);
     return result;
 },
     };
