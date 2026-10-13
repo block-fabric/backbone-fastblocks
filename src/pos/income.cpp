@@ -28,7 +28,7 @@ std::optional<CScript> AnchorPayee(const CBlock& block)
     return sections.ack->ticket.payee;
 }
 
-std::vector<CScript> ReporterScripts(const CBlock& block, const std::optional<uint256>& proposer)
+std::vector<CScript> ReporterScripts(const CBlock& block, const std::optional<uint256>& proposer, const uint256& genesis)
 {
     std::vector<CScript> scripts;
     if (block.vtx.empty() || block.vtx[0]->vout.empty()) return scripts;
@@ -38,7 +38,7 @@ std::vector<CScript> ReporterScripts(const CBlock& block, const std::optional<ui
         if (!PosSections::Decode(block.vSections, sections)) return scripts;
         for (const DoubleProposal& proof : sections.evidence) {
             // A leader carrying a proof against itself is paid nothing for it.
-            if (proposer && CheckBlockSig(proof.a, *proposer)) continue;
+            if (proposer && CheckBlockSig(proof.a, *proposer, genesis)) continue;
             scripts.push_back(reporter);
         }
     } else {

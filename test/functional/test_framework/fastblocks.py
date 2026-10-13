@@ -78,15 +78,22 @@ class PosBlock:
     def hash(self):
         return hash256(bytes(self.header[:112]))[::-1].hex()
 
-    def resign(self, key):
-        """The merkle root of the transactions, and the signature of `key` over the block hash."""
+    def resign(self, key, genesis_hash):
+        """The merkle root of the transactions, and the signature of `key` over the block hash (on the
+        chain of the genesis block `genesis_hash`, hex)."""
         block = CBlock()
         block.vtx = self.vtx
         self.header[36:68] = ser_uint256(block.calc_merkle_root())
-        self.header[112:176] = sign_schnorr(key, TaggedHash("hpos/block", hash256(bytes(self.header[:112]))))
+        self.header[112:176] = sign_schnorr(key, block_sighash(self.header, genesis_hash))
 
     def serialize(self):
         return bytes(self.header) + ser_vector(self.vtx, "serialize_with_witness") + ser_compact_size(len(self.sections)) + self.sections
+
+
+def block_sighash(header, genesis_hash):
+    """What the leader of a slot signs: TaggedHash("hpos/block", block hash || genesis hash), of the
+    first 112 bytes of an extended header; `genesis_hash` in hex, as RPCs give it."""
+    return TaggedHash("hpos/block", hash256(bytes(header[:112])) + bytes.fromhex(genesis_hash)[::-1])
 
 
 def bond_pop(key, owner_address, genesis_hash, hrp="rsc"):

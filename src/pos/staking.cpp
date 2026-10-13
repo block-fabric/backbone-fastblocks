@@ -220,19 +220,24 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const auto before{VALIDATORS.Get(out, bond->pubkey)};
             ValidatorRecord after{before.value_or(ValidatorRecord{})};
             if (after.tombstoned) return Fail(reject_reason, "bad-pos-bond-tombstoned");
-            // The first bond names the owner; more bonds must name the same, and only the owner adds
-            // them: it signs the bond (its amount, and the first coin the transaction spends, so that
-            // the signature serves once). Otherwise anyone could top up a bond, by a satoshi, and so
-            // leave a remainder under the minimum stake to an unbond the owner signed.
-            if (!after.owner.IsNull()) {
-                if (after.owner != bond->owner) return Fail(reject_reason, "bad-pos-bond-owner");
-                CPubKey signer;
-                if (bond->owner_sig.empty() || tx.vin.empty() ||
-                    !signer.RecoverCompact(MessageHash(BondMessage(bond->pubkey, bond->amount, tx.vin[0].prevout, m_genesis)), bond->owner_sig) ||
-                    !signer.IsCompressed() || signer.GetID() != CKeyID{after.owner}) {
-                    return Fail(reject_reason, "bad-pos-bond-owner-sig");
-                }
+            // The first bond names the owner; more bonds must name the same. The owner signs every bond
+            // (its amount, and the first coin the transaction spends, so that the signature serves
+            // once): otherwise anyone could top up a bond, by a satoshi, and so leave a remainder under
+            // the minimum stake to an unbond the owner signed; or copy the public proof of possession of
+            // a first bond into one of its own, mined first, which the owner's unsigned bond would then
+            // need a signature for.
+            const bool top_up{!after.owner.IsNull()};
+            if (top_up && after.owner != bond->owner) return Fail(reject_reason, "bad-pos-bond-owner");
+            CPubKey signer;
+            if (bond->owner_sig.empty() || tx.vin.empty() ||
+                !signer.RecoverCompact(MessageHash(BondMessage(bond->pubkey, bond->amount, tx.vin[0].prevout, m_genesis)), bond->owner_sig) ||
+                !signer.IsCompressed() || signer.GetID() != CKeyID{bond->owner}) {
+                return Fail(reject_reason, "bad-pos-bond-owner-sig");
             }
+            // A top-up moves the unbond sequence on: an unbond the owner signed before it, and that was
+            // not mined (dropped from the mempool, say), is public and could otherwise be mined by
+            // anyone, later, taking what was added too. Adding to a bond cancels the unbonds pending.
+            if (top_up) ++after.unbond_seq;
             after.owner = bond->owner;
             after.bonded += bond->amount;
             if (!MoneyRange(after.bonded)) return Fail(reject_reason, "bad-pos-bond-amount");

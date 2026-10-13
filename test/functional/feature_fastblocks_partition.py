@@ -130,7 +130,7 @@ class FastBlocksPartitionTest(SidechainTest):
         rival = PosBlock(n0.getblock(tip["hash"], 0))
         coinbase = rival.vtx[0]
         coinbase.vin[0] = CTxIn(coinbase.vin[0].prevout, CScript(bytes(coinbase.vin[0].scriptSig) + bytes([1, 0x42])), coinbase.vin[0].nSequence)
-        rival.resign(KEYS[XONLY.index(tip["proposer"])])
+        rival.resign(KEYS[XONLY.index(tip["proposer"])], n0.getblockhash(0))
         assert rival.hash != original.hash
         # A valid block, on the same parent: the node takes it as a branch, and sees two headers its leader signed for one slot.
         # (Valid, and not on the best chain: "inconclusive".)

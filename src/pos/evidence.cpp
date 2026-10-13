@@ -7,6 +7,7 @@
 #include <pos/header.h>
 #include <pos/schedule.h>
 
+#include <hash.h>
 #include <streams.h>
 
 #include <algorithm>
@@ -77,35 +78,56 @@ bool CheckEvidenceForm(const DoubleProposal& proof, const Consensus::PosParams& 
     return true;
 }
 
-std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256& pubkey, const Consensus::PosParams& params, std::string& reason)
+std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256& pubkey, const uint256& genesis, const Consensus::PosParams& params, std::string& reason)
 {
     if (!CheckEvidenceForm(proof, params, reason)) return std::nullopt;
-    if (!CheckBlockSig(proof.a, pubkey) || !CheckBlockSig(proof.b, pubkey)) {
+    if (!CheckBlockSig(proof.a, pubkey, genesis) || !CheckBlockSig(proof.b, pubkey, genesis)) {
         reason = "bad-pos-evidence-sig";
         return std::nullopt;
     }
     return Offence{.pubkey = pubkey, .slot = SlotOf(proof.a.nTime, params)};
 }
 
+uint256 EvidencePool::ProofId(const DoubleProposal& proof)
+{
+    DoubleProposal normal{proof};
+    normal.Normalize();
+    HashWriter hasher{};
+    hasher << normal;
+    return hasher.GetSHA256();
+}
+
 bool EvidencePool::Add(const Offence& offence, DoubleProposal proof)
 {
     proof.Normalize();
+    const uint256 id{ProofId(proof)};
     LOCK(m_mutex);
     if (!m_proofs.emplace(offence, std::move(proof)).second) return false;
+    m_known.emplace(id, offence);
     m_unrelayed.push_back(offence);
     // Bounded: the proofs of the oldest slots go first.
     while (m_proofs.size() > MAX_EVIDENCE) {
         const auto oldest{std::min_element(m_proofs.begin(), m_proofs.end(), [](const auto& x, const auto& y) { return x.first.slot < y.first.slot; })};
         std::erase(m_unrelayed, oldest->first);
+        m_known.erase(ProofId(oldest->second));
         m_proofs.erase(oldest);
     }
     return true;
 }
 
-std::optional<DoubleProposal> EvidencePool::NoteSigned(const CBlockHeader& header, int64_t slot)
+std::optional<Offence> EvidencePool::Known(const DoubleProposal& proof) const
+{
+    const uint256 id{ProofId(proof)};
+    LOCK(m_mutex);
+    const auto found{m_known.find(id)};
+    if (found == m_known.end()) return std::nullopt;
+    return found->second;
+}
+
+std::optional<DoubleProposal> EvidencePool::NoteSigned(const CBlockHeader& header, int64_t slot, const uint256& signer)
 {
     LOCK(m_mutex);
-    const auto [it, inserted]{m_signed.emplace(slot, header)};
+    const auto [it, inserted]{m_signed.emplace(std::make_pair(slot, signer), header)};
     if (inserted) {
         // Bounded: the oldest slots go first (a proof of so old a slot is old news).
         while (m_signed.size() > MAX_SIGNED_HEADERS) m_signed.erase(m_signed.begin());

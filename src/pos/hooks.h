@@ -105,6 +105,10 @@ public:
     const ValidatorSet& GenesisSet() const { return m_genesis_set; }
     const Staking& GetStaking() const { return m_staking; }
     const Consensus::PosParams& Params() const { return m_params; }
+    /** The hash of the chain's genesis block, which the leaders' signatures commit to. */
+    const uint256& Genesis() const { return m_genesis; }
+    /** Forget the validator sets read before (as a node that restarts): tests. */
+    void ForgetKnownSets() const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
 
     /** What the chain says of the leader of a slot. */
     enum class LeaderStatus { OK, INACTIVE, SET_UNKNOWN, SEED_UNKNOWN };
@@ -116,6 +120,8 @@ public:
         std::shared_ptr<const ValidatorSet> set;
         uint64_t set_anchors{0};
         uint256 seed;
+        //! The anchor that made the set (none: the genesis set, or none found).
+        const CBlockIndex* set_anchor{nullptr};
     };
     /**
      * The slot of an anchor, for the epochs whose set it makes: of its time, or of the median time of
@@ -130,10 +136,11 @@ public:
      * `prev` whose slot (AnchorSlot) is before the epoch before `epoch` made (none: the genesis set). nullptr if this
      * node does not know it: the anchor is on a branch whose blocks it has not connected. `view`: the
      * state of the chain of `prev`, to read the set from (that state alone); none: the sets this node
-     * read before, or else the active chain's state (for headers). Called with cs_main held.
+     * read before, or else the active chain's state (for headers). `anchor`: set to the anchor that made
+     * it (left alone for the genesis set). Called with cs_main held.
      */
-    std::shared_ptr<const ValidatorSet> SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view = nullptr, uint64_t* set_anchors = nullptr) const
-        EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    std::shared_ptr<const ValidatorSet> SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view = nullptr, uint64_t* set_anchors = nullptr,
+                                               const CBlockIndex** anchor = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
     /** The leader of `slot` for a block on top of `prev`: its epoch's set, and seed (from the record). Called with cs_main held. */
     SlotLeader LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
     /** The leader of `slot` on the active chain's tip. */
@@ -166,7 +173,19 @@ public:
      * the leader yet, or did not check the one it has; INVALID otherwise.
      */
     sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override;
-    int64_t MaxFutureBlockTime() const override;
+    /**
+     * 10 minutes while the network has blocks of stake (genesis validators, or the set the newest
+     * anchor of the active chain made is active), Bitcoin's two hours otherwise: from the state of the
+     * tip, so that a node that restarts, or reorgs, agrees with the others.
+     */
+    int64_t MaxFutureBlockTime() const override EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex, !m_staking_mutex);
+    /** FastBlocks' reasons a block fails whatever the record of the mainchain says. */
+    bool RecordIndependent(const std::string& reject_reason) const override;
+    /**
+     * The height of the final block of the active chain (final_anchors anchors cover it, net of the
+     * commitments it skipped: see Finality); -1 if none. Cached by tip and record. Called with cs_main held.
+     */
+    int FinalHeight() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_final_mutex);
 
     bool CustomChainOrder() const override { return true; }
     arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const override;
@@ -193,6 +212,11 @@ public:
     // For the producer, the anchorer and RPC.
     //
 
+    /**
+     * The header rule of acknowledgements (bad-pos-ack-order): a header that acknowledges a commitment
+     * (nNonce) names one after the last anchor of the chain below it, as its chain key says.
+     */
+    static bool AckInOrder(const CBlockIndex& prev, const CBlockHeader& header);
     /** The slot of the last PoS block at or below `index`, if any. */
     static std::optional<int64_t> LastPosSlot(const CBlockIndex* index, const Consensus::PosParams& params);
     /** Note a ticket (`own`: this node's merged miner made it). @return whether it was new */
@@ -281,12 +305,19 @@ private:
 
     const CChainParams& m_chain_params;
     const Consensus::PosParams& m_params;
+    const uint256 m_genesis;
     const ValidatorSet m_genesis_set;
     const Staking m_staking;
     const uint32_t m_pos_bits;
     std::atomic<ChainstateManager*> m_chainman{nullptr};
-    //! Whether this node has seen an active validator set made from the state (blocks of stake on the network).
-    mutable std::atomic<bool> m_staking_seen{false};
+    //! Whether the set the newest anchor of the active chain made is active, as of the tip m_staking_for.
+    mutable Mutex m_staking_mutex;
+    mutable bool m_staking_seen GUARDED_BY(m_staking_mutex){false};
+    mutable uint256 m_staking_for GUARDED_BY(m_staking_mutex);
+    //! The final height of the active chain, as of the tip and the record's tip m_final_for.
+    mutable Mutex m_final_mutex;
+    mutable int m_final_height GUARDED_BY(m_final_mutex){-1};
+    mutable std::pair<uint256, uint256> m_final_for GUARDED_BY(m_final_mutex);
 
     mutable Mutex m_sets_mutex;
     struct KnownSet {

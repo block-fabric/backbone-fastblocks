@@ -95,8 +95,9 @@ public:
     /**
      * Sign a block with `key` (no slashing protection: for the producer, and tests), deterministically:
      * BIP340 with all-zero auxiliary randomness. The same block always gets the same signature.
+     * `genesis`: the genesis block hash of the chain, which the signature commits to.
      */
-    static bool Sign(CBlock& block, const CKey& key);
+    static bool Sign(CBlock& block, const CKey& key, const uint256& genesis);
 
     /**
      * Tests only: a check of the signed block after the node's (a reason makes the block invalid), to

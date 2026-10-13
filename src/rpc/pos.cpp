@@ -203,7 +203,7 @@ std::vector<std::pair<int, int64_t>> BlocksMade(ChainstateManager& chainman, con
         const CBlockIndex& index{*chain[height]};
         if (!index.m_ext) continue;
         const CBlockHeader header{index.GetBlockHeader()};
-        if (std::any_of(keys.begin(), keys.end(), [&](const uint256& key) { return pos::CheckBlockSig(header, key); })) m.made.emplace_back(height, index.GetBlockTime());
+        if (std::any_of(keys.begin(), keys.end(), [&](const uint256& key) { return pos::CheckBlockSig(header, key, chainman.GetConsensus().hashGenesisBlock); })) m.made.emplace_back(height, index.GetBlockTime());
     }
     m.scanned = chain.Tip();
     return m.made;

@@ -933,7 +933,7 @@ public:
                 CBlock before;
                 std::optional<uint256> before_proposer;
                 if (!read(*earlier, before, before_proposer)) break;
-                const auto scripts{pos::ReporterScripts(before, before_proposer)};
+                const auto scripts{pos::ReporterScripts(before, before_proposer, chainman().GetConsensus().hashGenesisBlock)};
                 reporters.insert(reporters.end(), scripts.begin(), scripts.end());
                 if (pos::IsAnchorBlock(before)) break;
             }

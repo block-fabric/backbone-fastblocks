@@ -35,20 +35,20 @@ CTransactionRef SendScript(CWallet& wallet, const CScript& script, CAmount value
 }
 
 /**
- * Make, sign and send a bond to `pubkey` of `amount`, owned by `owner`. With `owner_signs` (a bond to
- * a validator that has an owner), the owner signs it: its amount and the first coin the transaction
- * spends, which only coin selection knows. The transaction is made with a signature of the same size
- * in its place (the fee stays right), then the owner's goes in, then the inputs are signed.
+ * Make, sign and send a bond to `pubkey` of `amount`, owned by `owner`, who signs it: its amount and
+ * the first coin the transaction spends, which only coin selection knows. The transaction is made
+ * with a signature of the same size in its place (the fee stays right), then the owner's goes in,
+ * then the inputs are signed.
  */
-CTransactionRef SendBond(CWallet& wallet, const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop, CAmount amount, bool owner_signs)
+CTransactionRef SendBond(CWallet& wallet, const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop, CAmount amount)
 {
-    const std::vector<unsigned char> placeholder(owner_signs ? CPubKey::COMPACT_SIGNATURE_SIZE : 0, 0);
+    const std::vector<unsigned char> placeholder(CPubKey::COMPACT_SIGNATURE_SIZE, 0);
     std::vector<CRecipient> recipients{{CNoDestination{pos::BondScript(pubkey, owner, pop, placeholder)}, amount, /*fSubtractFeeFromAmount=*/false}};
     CCoinControl coin_control;
     auto res{CreateTransaction(wallet, recipients, /*change_pos=*/std::nullopt, coin_control, /*sign=*/false)};
     if (!res) throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, util::ErrorString(res).original);
     CMutableTransaction tx{*res->tx};
-    if (owner_signs) {
+    {
         std::string signature_base64;
         const SigningResult signing{wallet.SignMessage(pos::BondMessage(pubkey, amount, tx.vin.at(0).prevout, Params().GetConsensus().hashGenesisBlock), PKHash{owner}, signature_base64)};
         if (signing != SigningResult::OK) throw JSONRPCError(RPC_WALLET_ERROR, "This wallet cannot sign for the bond's owner: " + SigningResultString(signing));
@@ -353,8 +353,8 @@ RPCMethod createbond()
     }
     if (!pos::CheckBondPop(pubkey, owner, pop, Params().GetConsensus().hashGenesisBlock)) throw JSONRPCError(RPC_INVALID_PARAMETER, "The proof of possession is not the validator key's signature for this owner");
 
-    // Once a validator has an owner, only the owner adds bonds to it: it signs them.
-    const CTransactionRef tx{SendBond(*pwallet, pubkey, owner, pop, amount, /*owner_signs=*/existing && !existing->owner.IsNull())};
+    // The owner signs every bond (the first one too: its proof of possession is public).
+    const CTransactionRef tx{SendBond(*pwallet, pubkey, owner, pop, amount)};
     if (CommittedTransactionRefused(*pwallet, tx)) {
         pwallet->AbandonTransaction(tx->GetHash());
         throw JSONRPCError(RPC_WALLET_ERROR, "The bond was not accepted into the mempool");

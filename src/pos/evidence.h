@@ -27,7 +27,7 @@ namespace pos {
 inline constexpr const char* MSG_EVIDENCE{"fbevidence"};
 //! Proofs a node keeps, at most: those of the oldest slots go first.
 inline constexpr size_t MAX_EVIDENCE{1000};
-//! Signed headers a node remembers, one per slot, to find a second one: those of the oldest slots go first.
+//! Signed headers a node remembers, one per slot and signer, to find a second one: those of the oldest slots go first.
 inline constexpr size_t MAX_SIGNED_HEADERS{4000};
 
 /**
@@ -81,10 +81,10 @@ bool CheckEvidenceForm(const DoubleProposal& proof, const Consensus::PosParams& 
 /**
  * Check a proof against the leader of its slot, `pubkey` (which the caller finds from the chain: the
  * validator set and seed of the slot's epoch). Reasons: those of CheckEvidenceForm, and
- * bad-pos-evidence-sig (not both signed by `pubkey`).
+ * bad-pos-evidence-sig (not both signed by `pubkey`, on the chain of `genesis`).
  * @return the offence; nothing, with `reason` set, if the proof is not one
  */
-std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256& pubkey, const Consensus::PosParams& params, std::string& reason);
+std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256& pubkey, const uint256& genesis, const Consensus::PosParams& params, std::string& reason);
 
 /**
  * The proofs a node knows, one per offence, and the headers it saw signed, to make proofs of its
@@ -96,10 +96,14 @@ public:
     /** Keep a proof that was checked. @return whether it was new */
     bool Add(const Offence& offence, DoubleProposal proof) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
-     * Note a header whose signature by the leader of its slot was checked. If another one of the
-     * same slot was noted before, the proof that the leader signed both.
+     * Note a header whose signature by `signer`, the leader of its slot, was checked. If `signer`
+     * signed another one of the same slot noted before, the proof that it signed both. (By slot and
+     * signer: two branches, or two records, may give a slot two leaders; the header of one does not
+     * hide the other's two.)
      */
-    std::optional<DoubleProposal> NoteSigned(const CBlockHeader& header, int64_t slot) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    std::optional<DoubleProposal> NoteSigned(const CBlockHeader& header, int64_t slot, const uint256& signer) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** The offence of a proof this node keeps already (in either order), if it does: no signature to check again. */
+    std::optional<Offence> Known(const DoubleProposal& proof) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::vector<std::pair<Offence, DoubleProposal>> All() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::optional<DoubleProposal> Get(const Offence& offence) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     size_t Size() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -111,9 +115,13 @@ public:
 private:
     mutable Mutex m_mutex;
     std::map<Offence, DoubleProposal> m_proofs GUARDED_BY(m_mutex);
+    //! The offence of each proof kept, by the hashes of its two headers (lower first) and their signatures.
+    std::map<uint256, Offence> m_known GUARDED_BY(m_mutex);
     std::vector<Offence> m_unrelayed GUARDED_BY(m_mutex);
-    //! The first header signed for each slot seen.
-    std::map<int64_t, CBlockHeader> m_signed GUARDED_BY(m_mutex);
+    //! The first header each signer signed for each slot seen, by slot and signer.
+    std::map<std::pair<int64_t, uint256>, CBlockHeader> m_signed GUARDED_BY(m_mutex);
+    /** What identifies a proof, in either order. */
+    static uint256 ProofId(const DoubleProposal& proof);
 };
 
 } // namespace pos

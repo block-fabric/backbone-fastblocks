@@ -20,9 +20,9 @@ import os
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
-from test_framework.fastblocks import KEYS, SLOT, XONLY, PosBlock
-from test_framework.key import TaggedHash, sign_schnorr
-from test_framework.messages import hash256, msg_sendcmpct, ser_compact_size
+from test_framework.fastblocks import KEYS, SLOT, XONLY, PosBlock, block_sighash
+from test_framework.key import sign_schnorr
+from test_framework.messages import msg_sendcmpct, ser_compact_size
 from test_framework.p2p import P2PInterface
 from test_framework.util import assert_equal, assert_raises_rpc_error, rpc_port
 
@@ -112,7 +112,7 @@ class FastBlocksSignatureTest(SidechainTest):
         n1.submitheader(bytes(honest.header).hex())
         assert_equal(n1.getblockheader(target)["hash"], target)
 
-        other = self.with_signature(honest, sign_schnorr(KEYS[1], TaggedHash("hpos/block", hash256(bytes(honest.header[:112])))))
+        other = self.with_signature(honest, sign_schnorr(KEYS[1], block_sighash(honest.header, n1.getblockhash(0))))
         zeroed = self.with_signature(honest, bytes(64))
 
         self.log.info("A block with the hash and another key's signature, relayed: a mutated block")
@@ -159,11 +159,11 @@ class FastBlocksSignatureTest(SidechainTest):
         honest2 = PosBlock(n0.getblock(n0.getblockhash(height + 1), 0))
         honest3 = PosBlock(n0.getblock(n0.getblockhash(height + 2), 0))
         for block in (honest, honest2, honest3):
-            assert_equal(bytes(block.header[112:176]), sign_schnorr(KEYS[0], TaggedHash("hpos/block", hash256(bytes(block.header[:112])))))
+            assert_equal(bytes(block.header[112:176]), sign_schnorr(KEYS[0], block_sighash(block.header, n1.getblockhash(0))))
 
         def resigned(block):
             """The block with another valid signature of its leader: other auxiliary randomness."""
-            again = self.with_signature(block, sign_schnorr(KEYS[0], TaggedHash("hpos/block", hash256(bytes(block.header[:112]))), aux=os.urandom(32)))
+            again = self.with_signature(block, sign_schnorr(KEYS[0], block_sighash(block.header, n1.getblockhash(0)), aux=os.urandom(32)))
             assert again.header[112:176] != block.header[112:176]
             return again
         other2, other3 = resigned(honest2), resigned(honest3)

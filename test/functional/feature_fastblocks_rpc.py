@@ -19,7 +19,7 @@ import os
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
-from test_framework.fastblocks import assert_peg_balance
+from test_framework.fastblocks import assert_peg_balance, block_sighash
 from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
 from test_framework.messages import hash256, ser_compact_size
 from test_framework.p2p import MESSAGEMAP, P2PInterface
@@ -312,7 +312,7 @@ class FastBlocksRpcTest(SidechainTest):
         signer = KEYS[XONLY.index(tip["proposer"])]
         rival = bytearray(header)
         rival[36:68] = bytes(range(32))
-        sighash = TaggedHash("hpos/block", hash256(bytes(rival[:112])))
+        sighash = block_sighash(rival, n1.getblockhash(0))
         rival[112:176] = sign_schnorr(signer, sighash)
         proof = (header + bytes(rival)).hex()
         result = n1.submitevidence(proof)

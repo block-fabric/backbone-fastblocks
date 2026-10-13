@@ -260,13 +260,13 @@ std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAc
     return block;
 }
 
-bool Producer::Sign(CBlock& block, const CKey& key)
+bool Producer::Sign(CBlock& block, const CKey& key, const uint256& genesis)
 {
     // Deterministic: BIP340 with the auxiliary randomness all zero, so that the nonce depends on the
     // key and the message alone (BIP340's own derivation). A block signed twice gets the same
     // signature, and no peer holds a copy with another one. (The auxiliary randomness only guards the
     // nonce against side channels on the signing machine; a validator key signs nothing else.)
-    return key.SignSchnorr(BlockSigHash(block), block.ext.sig, /*merkle_root=*/nullptr, uint256::ZERO);
+    return key.SignSchnorr(BlockSigHash(block, genesis), block.ext.sig, /*merkle_root=*/nullptr, uint256::ZERO);
 }
 
 std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
@@ -349,7 +349,7 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     // The slot is noted on disk before the signature exists.
     std::string protection_error;
     if (!m_protection->MaySign(leader_key, slot, protection_error)) return fail("slashing protection: " + protection_error);
-    if (!Sign(*block, *key)) return fail("signing failed");
+    if (!Sign(*block, *key, chainman.GetConsensus().hashGenesisBlock)) return fail("signing failed");
 
     // The block is not made again without what made it invalid: the node checked the signed header
     // (and noted it, to find leaders that sign twice), and a second block of the slot would be a

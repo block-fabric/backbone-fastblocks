@@ -69,8 +69,10 @@ until jailed or banned, with their stake as weight on top of what they bond.
 
 **PoS block**: an extended block of the template (`BLOCK_EXTENSION_BIT`). The
 header carries `hashSections` and a BIP340 signature by the leader of the slot
-over `TaggedHash("hpos/block", hash)`; the hash covers the 80 bytes and
-`hashSections`, not the signature. The producer signs deterministically (BIP340
+over `TaggedHash("hpos/block", hash || genesis hash)`; the hash covers the 80
+bytes and `hashSections`, not the signature. (The genesis hash: the networks'
+slots line up, and a header signed on one is no signature on another, nor half
+of a proof that its signer signed twice.) The producer signs deterministically (BIP340
 with all-zero auxiliary randomness): one block, one signature. In the 80 bytes: `nTime` is the start of
 the slot, `nBits` the chain's proof-of-work limit (a constant), and `nNonce`
 the mainchain height of the anchor the block acknowledges (0 if none). The
@@ -110,11 +112,13 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 |---|---|
 | `nBits` is the proof-of-work limit | `bad-pos-bits` |
 | `nTime` is the start of a slot after the first block | `bad-pos-time` |
-| Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
+| An acknowledgement (`nNonce`) names a commitment after the last anchor's of the chain below it (its chain key's): one anchor per commitment, in order | `bad-pos-ack-order` |
 | The epoch's validator set can make blocks of stake | `bad-pos-inactive` |
-| The record has the block that seeds the epoch; may come later | `pos-seed-unknown` |
+| The record has the block that seeds the epoch; may come later (not a slot to come: below) | `pos-seed-unknown` |
 | Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
-| The slot has started (± `max_future_seconds`, 2 s); may come later | `pos-time-future` |
+| A header whose epoch's set the node does not know: the branch leaves the active chain at or above its final block, and the anchor that made the set is not on the active chain (the state pruned that one's set). Not punished | `bad-pos-fork-too-deep` |
+| The slot has started (± `max_future_seconds`, 2 s); may come later if its leader signed it; one whose leader the node cannot tell (set or seed unknown) does not wait, nor is punished | `pos-time-future`, `pos-time-future-unchecked` |
+| Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
 | An acknowledged height has a commitment on record; may come later | `pos-ack-unknown` |
 
@@ -122,7 +126,28 @@ While the network has validators, any block (a BMM block too) may be at most
 10 minutes ahead of the node's clock (`time-too-new`, Bitcoin's rule with two
 hours): BMM blocks far ahead would push the median time past, which a block of
 stake's slot must come after, ahead. Without validators, two hours, as the
-template.
+template. "Has validators": genesis validators, or the set the newest anchor of
+the active chain made is active -- the state of the tip, so that a node that
+restarts or reorgs agrees with the others.
+
+**Headers the node cannot check yet.** A node that catches up has the headers
+of the chain before its blocks: the set of an epoch is made by an anchor it has
+not connected, and the signature of such a header is checked when its block is
+(as is every block's). What such a header can do to the order of chains is
+bounded: it counts one anchor at most, for a commitment on record after the last
+anchor below it (`bad-pos-ack-order`); its branch has an anchor the node took in
+checked (a signed acknowledgement, or a BMM block, which costs a commitment of
+its own), since the sets of the first epochs after a fork are those of anchors
+below it; and it does not take back a final block nor reach below the window of
+sets the state keeps (`bad-pos-fork-too-deep`). So a branch of headers nobody
+checked counts at most as many anchors as the commitments it names, after one it
+paid for; when its first block is connected, the signature fails and the node is
+back on its chain. A header taken with a signature that turns out invalid (the
+block hash does not cover it: a peer can send the honest header with another)
+is replaced by the valid one when it comes (template: `CheckOtherExtension`
+says `REPLACE`; the header or block with it replaces the extension, the stored
+block is written again with it, and a failure of the block with the forged one,
+`bad-pos-sig`, is taken back).
 
 A header that may come later (`pos-time-future`, `pos-ack-unknown`,
 `pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
@@ -140,7 +165,7 @@ Block (`CheckBlock`):
 | `nNonce` is the acknowledged height, 0 without one | `bad-pos-ack-nonce` |
 | Ticket version 1 | `bad-pos-ticket-version` |
 | The payee is a standard script of 80 bytes or less, not data | `bad-pos-ticket-payee` |
-| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; one the node cannot check yet (it cannot tell the leader, or did not check its own) is not taken, and not punished either (`blk-extension-unknown`) | `bad-blk-extension` |
+| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; if the node's own is not valid (taken before it could tell the leader), the valid one replaces it (see above); one the node cannot check yet (it cannot tell the leader) is not taken, and not punished either (`blk-extension-unknown`) | `bad-blk-extension` |
 
 Acknowledgement (state):
 
@@ -217,18 +242,23 @@ validator key's BIP340 signature of `TaggedHash("hpos/bond", owner ||
 genesis hash)`: nobody bonds a key not theirs (`signbondpop` on the
 validator's node makes it; `createbond` asks the node's block producer if it
 has the key). The first bond names the owner, who alone may unbond, and who is
-paid what is unbonded (P2WPKH); and who alone adds bonds after: each later bond
-carries the owner's signed message `FastBlocks bond <key> <amount>
-<txid>:<n> <genesis>`, naming the first coin its transaction spends (a coin is
-spent once, so the signature serves once). The proof of possession is public:
-without this, anyone could top up a bond by a satoshi, and leave a remainder
-under the minimum stake to an unbond its owner signed.
+paid what is unbonded (P2WPKH); and who alone adds bonds after. Every bond, the
+first one too, carries the owner's signed message `FastBlocks bond <key>
+<amount> <txid>:<n> <genesis>`, naming the first coin its transaction spends (a
+coin is spent once, so the signature serves once). The proof of possession is
+public: without this, anyone could top up a bond by a satoshi, and leave a
+remainder under the minimum stake to an unbond its owner signed; or copy the
+proof of a pending first bond into a bond of a satoshi of its own, mined first,
+which the owner's would then need a signature for.
 
 **Unbond** (`createunbond`): an output of value 0, `OP_RETURN 0xDC'UNB' |
 validator key | amount (8) | sequence (4) | signature (65)`, the owner's signed
 message `FastBlocks unbond <key> <amount> <sequence> <genesis>`; an amount of 0
-(`all` in the message) unbonds all that is bonded when the unbond is applied,
-whatever was added since it was signed. It takes the
+(`all` in the message) unbonds all that is bonded when the unbond is applied.
+The sequence is the validator's next: an unbond counts once, and each top-up of
+the bond moves it on, so that an unbond signed before a top-up (and not mined:
+dropped from the mempool, say; it is public) is void -- adding to a bond cancels
+the unbonds pending. It takes the
 amount off the stake at once, and pays it to the owner at the peg step of the
 anchor `unbonding_anchors` after (the coinbase's payouts, as refunds); until
 then a proof can still take a share of it. If the mainchain stalls, so does
@@ -239,13 +269,13 @@ unbonding.
 | A bond output reads | `bad-pos-bond` |
 | Its value is positive (and the total within MAX_MONEY) | `bad-pos-bond-amount` |
 | It names an owner, the validator's own if it has one | `bad-pos-bond-owner` |
-| To a validator with an owner: the owner signed it (its amount and the transaction's first input) | `bad-pos-bond-owner-sig` |
+| The owner it names signed it (its amount and the transaction's first input), the first bond too | `bad-pos-bond-owner-sig` |
 | Its proof of possession verifies | `bad-pos-bond-pop` |
 | The key is not banned | `bad-pos-bond-tombstoned` |
 | An unbond output reads | `bad-pos-unbond` |
 | Its value is 0 | `bad-pos-unbond-value` |
 | The validator has an owner | `bad-pos-unbond-unknown` |
-| Its sequence is the validator's next (an unbond counts once) | `bad-pos-unbond-sequence` |
+| Its sequence is the validator's next (an unbond counts once; a top-up moves it on) | `bad-pos-unbond-sequence` |
 | Its amount (all that is bonded, for 0) is positive, at most what is bonded | `bad-pos-unbond-amount` |
 | What stays bonded is nothing or at least `min_stake` | `bad-pos-unbond-remainder` |
 | The owner signed it | `bad-pos-unbond-sig` |
@@ -269,8 +299,9 @@ has `min_active_validators`. Sets are kept by version, with each anchor's
 (table `0x5a`, `0x5b`, `0x5c`), and pruned once no block to come can need them
 (older than the window for proofs, and followed by an anchor before the epoch
 before the current one). A node keeps the sets it read in memory too (4096): a
-header of a branch whose anchor's set it never had is taken, and its leader
-checked when its block is connected.
+header of a branch whose anchor's set it never had is taken (within the bounds
+of "Headers the node cannot check yet"), and its leader checked when its block
+is connected.
 
 **Seed.** See Leader above. A block of stake waits for its epoch's seed
 (`pos-seed-unknown`). A mainchain reorg that moves the seed of an epoch takes
@@ -325,8 +356,9 @@ sets, `0x5d` liveness. (`0x51` and `0x52` are the template's `Q` and `R`.)
 ## Evidence
 
 Two headers the leader of a slot signed for that slot prove that it signed
-twice. A node notes the first header signed for each slot it sees (the last
-4000 slots); a second one makes the proof. proofs are checked, kept (1000, the
+twice. A node notes the first header each leader signed for each slot it sees
+(by slot and signer: two branches, or two records, may give a slot two leaders;
+the last 4000); a second one of the same signer makes the proof. proofs are checked, kept (1000, the
 oldest slots go first), relayed in `fbevidence`, and put in its blocks of stake
 by a leader (16 at most, in the sections) while the chain has not punished
 them, and in its BMM blocks by a merged miner (4 at most from the node, 16 by
@@ -349,7 +381,8 @@ payee, the script of its coinbase's first output:
 
 `submitevidence <hex>` (the two headers, serialized) and `listevidence`. A
 proof whose leader a node cannot tell yet (`pos-evidence-unknown`) is dropped
-without blaming the peer.
+without blaming the peer. One the node keeps already is found before any
+signature is checked, and dropped.
 
 ## P2P
 
@@ -532,7 +565,13 @@ Every FastBlocks functional test checks this on every node after every step
 - A peer that sends the header of a block that failed against the record, or of
   one on it, is not punished (template hook `PardonRecordFailures`, on for
   every sidechain of the template since 2026-10-12): its record may be ahead
-  of this node's.
+  of this node's. A block that breaks a rule of FastBlocks whatever the record
+  says (template hook `RecordIndependent`: the form of its sections, coinbase
+  and proofs, its producer's share, where its acknowledged block is, its chain's
+  time without anchors, the staking rules) did not fail against the record: it
+  is not tried again when the record changes, and headers on it are punished.
+  Not a failure that reads a leader (`bad-pos-sig`: the seed is the record's),
+  a set, a commitment or the mainchain's times.
 - A node keeps at most 1000 tickets; a flood from a peer pushes out the oldest,
   but not the node's own nor those the mainchain committed to. Until its
   committed ticket is acknowledged, the merged miner relays it again once per
@@ -585,7 +624,9 @@ and the producer.
   on a branch the node never connected) is taken, and its leader checked when
   its block is connected, rather than waiting: a waiting header could deadlock
   a node that needs the branch to learn the set (a partition with anchors on
-  both sides).
+  both sides). Since audit 6, only on a branch that leaves the active chain at
+  or above its final block and above the sets the state pruned (see "Headers
+  the node cannot check yet").
 - The window for proofs counts anchors since the anchor that made the set of
   the offence's epoch. (BMM blocks carry proofs too, since 2026-10-12: each in
   a coinbase output of its own, rather than a commitment to their root.)
@@ -737,6 +778,71 @@ functional tests named).
   `createunbond <key>` or `all`) takes all that is bonded when it is applied
   (`bond_griefing`, `bonds`, `unbonds`, `feature_fastblocks_staking.py`).
   Jailing is unchanged.
+
+## Audit 6 (2026-10-13): consensus and network
+
+Each finding was checked first; each fix has a unit test (`fastblocks_tests.cpp`)
+that failed before it. Consensus changes, with no activation height: the test
+network starts again from genesis.
+
+- A header whose leader the node could not tell yet (the set of its epoch made
+  by an anchor it has not connected: every node that catches up) was taken
+  unsigned, and counted as an anchor in the order of chains for any commitment
+  on record. A branch of such headers from deep in the chain outranked it for
+  free (the best header, block download, reorgs back to the fork; the block
+  index grown without bound). Now an acknowledgement names a commitment after
+  the last anchor below it (`bad-pos-ack-order`, a header rule), and a header
+  the node cannot check is refused on a branch that leaves the active chain
+  below its final block, or whose set the state pruned (`bad-pos-fork-too-deep`,
+  not punished): see "Headers the node cannot check yet" (`forged_ack_headers`,
+  `unsigned_ack_header_unknown_set`). Design: the node cannot check these
+  headers (it would need the state of their branch), nor refuse them (it would
+  never catch up), nor count them anew once checked (the order of chains must be
+  one function of the headers on every node); so their weight is bounded.
+- A peer could send the honest headers with forged signatures (the block hash
+  does not cover them) to a node catching up; the honest block was turned away
+  for good after, and with the forged block too, its hash failed for good. Now
+  the valid signature replaces the forged one (template: `REPLACE`,
+  `Chainstate::ReplaceBlockExtension`), and the failure is taken back
+  (`forged_signature_replaced`).
+- Every failure of FastBlocks' rules counted as a failure against the record:
+  retried at each start and recommit, its peers pardoned. Now the template hook
+  `RecordIndependent` names those that are not (`record_independent_failures`).
+- A header of a slot to come whose leader the node could not tell waited (the
+  bounded set of waiting headers; anyone can make them). Now only a header its
+  leader signed waits (`pos-time-future-unchecked`;
+  `future_unsigned_header_not_waiting`).
+- A proof sent again cost two signature checks under `cs_main`: now the pool is
+  looked at first (`evidence_replay_checked_first`).
+- The headers noted to find proofs were keyed by slot: another leader's header
+  of the slot (another branch's) hid a leader's two. Now by slot and signer
+  (`note_signed_per_leader`).
+- A header signed on another network (the slots of the networks line up) made a
+  valid proof here: an operator running one key on two networks was slashed.
+  The block signature commits to the genesis hash (`evidence_other_network`).
+  The other signed messages: bonds' proofs of possession and owners' messages,
+  and unbonds, did already; a ticket names a block of its chain, and the
+  mainchain commits to it in the chain's slot.
+- An unbond the owner signed and that was not mined could be mined by anyone
+  later, after the owner added to the bond, taking that too. A top-up moves the
+  unbond sequence on (`unbond_replay_after_topup`).
+- A stranger could copy the public proof of possession of a pending first bond
+  into a bond of its own, mined first. The owner signs first bonds too
+  (`first_bond_signed`; `createbond` signs every bond).
+- The 10 minute limit on block times (while the network has validators) was
+  known only once a node connected an anchor with an active set: a restarted
+  node took blocks two hours ahead, and the flag never went back on a reorg. Now
+  it is the state of the tip's (`staking_seen_from_the_state`).
+- Fuzzing: `pos_header` checks that headers nobody could check count one anchor
+  at most per new commitment height, and that signatures do not check under
+  another genesis; `pos_state` sends headers from peers (signed or not, sets
+  forgotten as on a restart) and proofs with a header from another network or
+  another leader, and checks that what is taken keeps the rules.
+- Not in this part: the producer's retry within a slot, the place of the
+  slashing protection file (test gaps 3, 4), the wallet's findings. Checked:
+  `WaitingReady` gives a waiting header and its waiting parent different keys
+  (the parent's height plus one), so the template's lost-header case does not
+  arise.
 
 ## Deviations from the design (phase 5)
 

@@ -4,17 +4,20 @@
 
 // FastBlocks under fuzzing (doc/fastblocks.md):
 //  - pos_header: extended headers and blocks read back as written, their hash covers hashSections and
-//    not the signature, sections decode only in their one encoding, slots and the chain key are
-//    consistent, and the context-free block rules never crash;
+//    not the signature (which commits to the genesis block), sections decode only in their one
+//    encoding, slots and the chain key are consistent, the context-free block rules never crash, and
+//    headers nobody could check count one anchor at most per new commitment height;
 //  - pos_ticket: tickets read back, the pool of tickets stays bounded and consistent whatever peers
 //    send, and the count of tickets a peer may send holds;
 //  - pos_evidence: a proof is an offence exactly when two different headers of one slot are signed
 //    by its leader, whichever comes first, and the pool of proofs stays bounded;
 //  - pos_state: a chain of blocks of stake, acknowledgements, BMM blocks, deposits, payments and
-//    withdrawals, bonds, unbonds and leaders that sign twice (and the proofs that punish them), built
-//    by the producer and the template from fuzzed choices: the state agrees with the chain key, the
-//    totals of staking with its validators, the coins of the chain are the deposits (pegbalance), and
-//    taking blocks back and connecting them again comes back to the same state.
+//    withdrawals, bonds, unbonds and leaders that sign twice (and the proofs that punish them, with
+//    headers signed on another network or by another branch's leader among them), headers from peers
+//    (signed or not, whose sets the node may not know), built by the producer and the template from
+//    fuzzed choices: the state agrees with the chain key, the totals of staking with its validators,
+//    the coins of the chain are the deposits (pegbalance), taking blocks back and connecting them
+//    again comes back to the same state, and no header is taken that the rules of headers refuse.
 //  - pos_staking: the staking rules alone on a state (bonds, unbonds, peg steps, liveness, penalties)
 //    with fuzzed parameters: every coin bonded is bonded, unbonding, in the reserve, owed to a
 //    reporter or paid out; the totals agree with the validators; the journal takes each step back.
@@ -192,11 +195,11 @@ CBlockHeader FuzzedPosHeader(FuzzedDataProvider& fdp, const std::vector<CKey>& k
     case 0: {
         const int64_t time_slot{pos::SlotOf(header.nTime, params)};
         if (time_slot > 0) {
-            assert(LeaderKey(keys, time_slot).SignSchnorr(pos::BlockSigHash(header), header.ext.sig, nullptr, uint256{}));
+            assert(LeaderKey(keys, time_slot).SignSchnorr(pos::BlockSigHash(header, Hooks().Genesis()), header.ext.sig, nullptr, uint256{}));
         }
         break;
     }
-    case 1: assert(keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)].SignSchnorr(pos::BlockSigHash(header), header.ext.sig, nullptr, uint256{})); break;
+    case 1: assert(keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)].SignSchnorr(pos::BlockSigHash(header, Hooks().Genesis()), header.ext.sig, nullptr, uint256{})); break;
     default: {
         const auto bytes{fdp.ConsumeBytes<unsigned char>(64)};
         std::copy(bytes.begin(), bytes.end(), header.ext.sig.begin());
@@ -291,16 +294,64 @@ FUZZ_TARGET(pos_header, .init = initialize_pos)
         assert((a.Work() < b.Work()) == (order(a) < order(b)));
     }
 
-    // Signatures: the leader's signature checks for the header it signed, and only for it.
+    // Signatures: the leader's signature checks for the header it signed, and only for it, and only
+    // on this chain (another genesis block, another network).
     {
         static const std::vector<CKey> keys{ValidatorKeys()};
         const CBlockHeader header{FuzzedPosHeader(fdp, keys)};
         for (const CKey& key : keys) {
-            if (pos::CheckBlockSig(header, XOnly(key))) {
+            if (pos::CheckBlockSig(header, XOnly(key), Hooks().Genesis())) {
                 CBlockHeader other{header};
                 other.nNonce ^= 1;
-                assert(!pos::CheckBlockSig(other, XOnly(key)));
+                assert(!pos::CheckBlockSig(other, XOnly(key), Hooks().Genesis()));
+                assert(!pos::CheckBlockSig(header, XOnly(key), ArithToUint256(UintToArith256(Hooks().Genesis()) + 1)));
             }
+        }
+    }
+
+    // Headers whose signature nobody checked yet (their epoch's set unknown: anything may be in them)
+    // under the header rule of acknowledgements: along a chain of them, each adds one anchor at most to
+    // the order of chains, and only for a commitment height after every one before it -- a branch
+    // counts no more anchors than the commitments it names, in order.
+    {
+        std::vector<std::unique_ptr<CBlockIndex>> chain;
+        CBlockHeader genesis;
+        chain.push_back(std::make_unique<CBlockIndex>(genesis));
+        chain.back()->nChainWork = Hooks().ChainWork(nullptr, genesis);
+        std::set<uint32_t> named;
+        uint64_t bmm{0};
+        LIMITED_WHILE(fdp.ConsumeBool(), 100)
+        {
+            const CBlockIndex& prev{*chain.back()};
+            CBlockHeader header;
+            header.hashPrevBlock = ArithToUint256(arith_uint256{chain.size()});
+            const bool pos_block{fdp.ConsumeIntegralInRange<int>(0, 7) != 0};
+            header.nVersion = pos_block ? pos::POS_BLOCK_BIT : 0;
+            header.nNonce = fdp.ConsumeBool() ? 0 : fdp.ConsumeIntegralInRange<uint32_t>(0, 60);
+            // (The rule of headers of blocks of stake: a BMM block's nNonce is its proof of work's.)
+            if (pos_block && !pos::FastBlocksHooks::AckInOrder(prev, header)) {
+                // Refused: an acknowledgement at or below the last anchor's commitment.
+                assert(header.nNonce != 0 && header.nNonce <= pos::ChainKey::FromWork(prev.nChainWork).last_anchor_height);
+                continue;
+            }
+            auto index{std::make_unique<CBlockIndex>(header)};
+            index->pprev = chain.back().get();
+            index->nHeight = prev.nHeight + 1;
+            index->nChainWork = Hooks().ChainWork(&prev, header);
+            const pos::ChainKey before{pos::ChainKey::FromWork(prev.nChainWork)};
+            const pos::ChainKey after{pos::ChainKey::FromWork(index->nChainWork)};
+            assert(index->nChainWork > prev.nChainWork);
+            assert(after.anchors <= before.anchors + 1);
+            if (pos_block && header.nNonce != 0) {
+                assert(after.anchors == before.anchors + 1 && after.last_anchor_height == header.nNonce && header.nNonce > before.last_anchor_height);
+                assert(named.insert(header.nNonce).second);
+            } else if (pos_block) {
+                assert(after.anchors == before.anchors);
+            } else {
+                ++bmm;
+            }
+            assert(after.anchors == named.size() + bmm);
+            chain.push_back(std::move(index));
         }
     }
 }
@@ -395,7 +446,7 @@ FUZZ_TARGET(pos_evidence, .init = initialize_pos)
             b = a;
             b.hashMerkleRoot = ArithToUint256(UintToArith256(a.hashMerkleRoot) + 1);
             const int64_t slot{pos::SlotOf(b.nTime, params)};
-            if (slot > 0) assert(LeaderKey(keys, slot).SignSchnorr(pos::BlockSigHash(b), b.ext.sig, nullptr, uint256{}));
+            if (slot > 0) assert(LeaderKey(keys, slot).SignSchnorr(pos::BlockSigHash(b, Hooks().Genesis()), b.ext.sig, nullptr, uint256{}));
         }
         if (fdp.ConsumeBool()) b.nVersion &= ~pos::POS_BLOCK_BIT;
         const pos::DoubleProposal proof{.a = a, .b = b};
@@ -403,16 +454,16 @@ FUZZ_TARGET(pos_evidence, .init = initialize_pos)
         // Against the leader of the first header's slot (a slot of 0 has none: a null key).
         const int64_t proof_slot{pos::SlotOf(a.nTime, params)};
         const uint256 leader{proof_slot > 0 ? LeaderOf(proof_slot) : uint256{}};
-        const auto offence{pos::CheckEvidence(proof, leader, params, reason)};
+        const auto offence{pos::CheckEvidence(proof, leader, Hooks().Genesis(), params, reason)};
         // Whichever header comes first.
         std::string swapped_reason;
-        const auto swapped{pos::CheckEvidence({.a = b, .b = a}, leader, params, swapped_reason)};
+        const auto swapped{pos::CheckEvidence({.a = b, .b = a}, leader, Hooks().Genesis(), params, swapped_reason)};
         assert(offence.has_value() == swapped.has_value());
         if (offence) {
             assert(*offence == *swapped);
             assert(pos::IsPosHeader(a) && pos::IsPosHeader(b) && a.nTime == b.nTime && a.GetHash() != b.GetHash());
             assert(offence->slot == pos::SlotOf(a.nTime, params) && pos::SlotTime(offence->slot, params) == a.nTime);
-            assert(pos::CheckBlockSig(a, offence->pubkey) && pos::CheckBlockSig(b, offence->pubkey));
+            assert(pos::CheckBlockSig(a, offence->pubkey, Hooks().Genesis()) && pos::CheckBlockSig(b, offence->pubkey, Hooks().Genesis()));
             assert(LeaderOf(offence->slot) == offence->pubkey);
             pos::DoubleProposal normal{proof};
             normal.Normalize();
@@ -431,7 +482,7 @@ FUZZ_TARGET(pos_evidence, .init = initialize_pos)
         }
         // The headers a node notes: a second one for a slot is a proof of two different headers.
         const int64_t slot{fdp.ConsumeIntegralInRange<int64_t>(0, 5000)};
-        if (const auto found{pool.NoteSigned(fdp.ConsumeBool() ? a : b, slot)}) {
+        if (const auto found{pool.NoteSigned(fdp.ConsumeBool() ? a : b, slot, proof_slot > 0 ? leader : uint256{})}) {
             assert(found->a.GetHash() != found->b.GetHash() && found->a.GetHash() < found->b.GetHash());
         }
         if (fdp.ConsumeBool()) {
@@ -668,10 +719,93 @@ struct FastChain {
         coinbase.vout.emplace_back(0, CScript() << OP_RETURN << fdp.ConsumeIntegral<uint8_t>());
         second.vtx[0] = MakeTransactionRef(std::move(coinbase));
         node::RegenerateCommitments(second, Chainman());
-        if (!pos::Producer::Sign(*first, *signer) || !pos::Producer::Sign(second, *signer)) return;
+        // The second header: the leader's, or one signed on another network (another genesis block,
+        // whose slots line up), or by another key (the leader of the slot on another branch, say).
+        const int kind{fdp.ConsumeIntegralInRange<int>(0, 3)};
+        const CKey* second_signer{signer};
+        if (kind == 2) {
+            for (const CKey& k : keys) {
+                if (XOnly(k) != leader.pubkey) second_signer = &k;
+            }
+        }
+        const uint256 second_genesis{kind == 1 ? ArithToUint256(UintToArith256(Genesis()) + 1) : Genesis()};
+        if (!pos::Producer::Sign(*first, *signer, Genesis()) || !pos::Producer::Sign(second, *second_signer, second_genesis)) return;
         if (fdp.ConsumeBool()) Submit(*first);
         std::string reason;
-        Hooks().AddEvidence({.a = *first, .b = second}, reason);
+        const auto offence{Hooks().AddEvidence({.a = *first, .b = second}, reason)};
+        // A proof only of two headers the offender signed for this chain.
+        if (offence) {
+            assert(pos::CheckBlockSig(*first, offence->pubkey, Genesis()) && pos::CheckBlockSig(second, offence->pubkey, Genesis()));
+        }
+        if (kind == 1 || (kind == 2 && second_signer != signer)) assert(!offence);
+    }
+
+    /**
+     * A header from a peer, on a block the node has (of the active chain or not), of a slot that has
+     * started, that claims a commitment on record or not, signed by the slot's leader, another key or
+     * nobody; now and then after the node forgot the sets it read (as on a restart). What is taken
+     * keeps the rules: a header whose leader the node knows is taken only with its signature; one whose
+     * leader it cannot tell, only on a branch that leaves the active chain at or above its final
+     * block, from a set the state did not prune; either counts one anchor at most, for a commitment
+     * after the last one below it.
+     */
+    void PeerHeader(FuzzedDataProvider& fdp)
+    {
+        if (fdp.ConsumeIntegralInRange<int>(0, 3) == 0) Hooks().ForgetKnownSets();
+        const CBlockIndex* prev;
+        {
+            LOCK(::cs_main);
+            std::vector<const CBlockIndex*> known;
+            for (const auto& [_, index] : Chainman().m_blockman.m_block_index) known.push_back(&index);
+            std::sort(known.begin(), known.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return std::make_pair(a->nHeight, a->GetBlockHash()) < std::make_pair(b->nHeight, b->GetBlockHash()); });
+            prev = known[known.size() - 1 - fdp.ConsumeIntegralInRange<size_t>(0, std::min<size_t>(known.size() - 1, 40))];
+        }
+        const Consensus::PosParams& params{Hooks().Params()};
+        CBlockHeader header;
+        header.nVersion = 0x20000000 | pos::POS_BLOCK_BIT;
+        header.hashPrevBlock = prev->GetBlockHash();
+        header.hashMerkleRoot = ArithToUint256(arith_uint256{fdp.ConsumeIntegral<uint64_t>()});
+        const int64_t at{slot - fdp.ConsumeIntegralInRange<int64_t>(0, 3)};
+        header.nTime = static_cast<uint32_t>(pos::SlotTime(at, params));
+        header.nBits = pos::PosBits(Chainman().GetConsensus().powLimit);
+        switch (fdp.ConsumeIntegralInRange<int>(0, 2)) {
+        case 0: header.nNonce = 0; break;
+        case 1: {
+            const int height{fdp.ConsumeIntegralInRange<int>(1, std::max(1, Record().Height()))};
+            header.nNonce = Record().BmmAt(height) ? static_cast<uint32_t>(height) : 0;
+            break;
+        }
+        default: header.nNonce = fdp.ConsumeIntegralInRange<uint32_t>(0, Record().Height() + 2);
+        }
+        header.ext.hashSections = header.nNonce ? uint256{1} : uint256{};
+        const auto leader{WITH_LOCK(::cs_main, return Hooks().LeaderOf(*prev, at))};
+        switch (fdp.ConsumeIntegralInRange<int>(0, 2)) {
+        case 0:
+            for (const CKey& k : keys) {
+                if (leader.status == pos::FastBlocksHooks::LeaderStatus::OK && XOnly(k) == leader.pubkey) assert(k.SignSchnorr(pos::BlockSigHash(header, Genesis()), header.ext.sig, nullptr, uint256{}));
+            }
+            break;
+        case 1: assert(keys[fdp.ConsumeIntegralInRange<size_t>(0, keys.size() - 1)].SignSchnorr(pos::BlockSigHash(header, Genesis()), header.ext.sig, nullptr, uint256{})); break;
+        default: break;
+        }
+        const bool had{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(header.GetHash()) != nullptr)};
+        BlockValidationState state;
+        Chainman().ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state);
+        LOCK(::cs_main);
+        const CBlockIndex* index{Chainman().m_blockman.LookupBlockIndex(header.GetHash())};
+        if (!index || had) return;
+        const pos::ChainKey before{pos::ChainKey::FromWork(prev->nChainWork)};
+        const pos::ChainKey after{pos::ChainKey::FromWork(index->nChainWork)};
+        assert(after.anchors <= before.anchors + 1);
+        if (header.nNonce != 0) assert(header.nNonce > before.last_anchor_height && after.last_anchor_height == header.nNonce);
+        assert(leader.status == pos::FastBlocksHooks::LeaderStatus::OK || leader.status == pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN);
+        if (leader.status == pos::FastBlocksHooks::LeaderStatus::OK) assert(pos::CheckBlockSig(header, leader.pubkey, Genesis()));
+        if (leader.status == pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN) {
+            const CChain& active{Chain().m_chain};
+            assert(!leader.set_anchor || !active.Contains(*leader.set_anchor));
+            const CBlockIndex* fork{active.FindFork(*prev)};
+            assert(!fork || fork == active.Tip() || fork->nHeight >= Hooks().FinalHeight());
+        }
     }
 
     /** The totals of staking agree with its validators and its queue of unbonds; none is negative. */
@@ -766,7 +900,10 @@ FUZZ_TARGET(pos_state)
     chain.Bmm(/*use_mempool=*/false);
     LIMITED_WHILE(fdp.ConsumeBool(), 60)
     {
-        switch (fdp.ConsumeIntegralInRange<int>(0, 10)) {
+        switch (fdp.ConsumeIntegralInRange<int>(0, 11)) {
+        case 11:
+            chain.PeerHeader(fdp);
+            break;
         case 8:
             chain.Bond(fdp);
             break;

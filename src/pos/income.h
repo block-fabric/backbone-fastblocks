@@ -37,8 +37,9 @@ std::optional<CScript> AnchorPayee(const CBlock& block);
 /**
  * The scripts a block's proofs earn a reward for (one per proof, all to its first output's script).
  * @param proposer  for a block of stake, its leader if known: its proofs against itself earn nothing
+ * @param genesis   the chain's genesis block hash (which the leaders' signatures commit to)
  */
-std::vector<CScript> ReporterScripts(const CBlock& block, const std::optional<uint256>& proposer);
+std::vector<CScript> ReporterScripts(const CBlock& block, const std::optional<uint256>& proposer, const uint256& genesis);
 
 /**
  * The role of each output of a block's coinbase.

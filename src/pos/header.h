@@ -96,10 +96,14 @@ struct PosSections {
 
 /** The hash of a block's sections, as its header commits to it. */
 uint256 SectionsHash(std::span<const unsigned char> sections);
-/** What the leader of the slot signs: the block hash, tagged. */
-uint256 BlockSigHash(const CBlockHeader& header);
-/** The leader's signature is valid for this header. */
-bool CheckBlockSig(const CBlockHeader& header, const uint256& xonly_pubkey);
+/**
+ * What the leader of the slot signs: the block hash and the chain's genesis block hash, tagged. (The
+ * genesis hash: a header signed on another network, whose slots line up with this one's, is no
+ * signature here, nor a proof that its signer signed twice.)
+ */
+uint256 BlockSigHash(const CBlockHeader& header, const uint256& genesis);
+/** The leader's signature is valid for this header, on the chain of `genesis`. */
+bool CheckBlockSig(const CBlockHeader& header, const uint256& xonly_pubkey, const uint256& genesis);
 
 /** The script of a coinbase output that puts coins in the fee pot. */
 CScript PotScript();

@@ -120,7 +120,7 @@ class FastBlocksSlashingTest(SidechainTest):
         # Invalid evidence stays refused: the second header signed by another key is no proof.
         forged = PosBlock(n0.getblock(tip["hash"], 0))
         forged.vtx = rival.vtx
-        forged.resign(KEYS[(XONLY.index(offender) + 1) % 3])
+        forged.resign(KEYS[(XONLY.index(offender) + 1) % 3], n0.getblockhash(0))
         assert_raises_rpc_error(-26, "bad-pos-evidence-sig", n0.submitevidence, bytes(original.header).hex() + bytes(forged.header).hex())
         # The rival block, on the same parent: a branch; the node sees two headers its leader signed.
         assert_equal(n1.submitblock(rival.serialize().hex()), "inconclusive")
@@ -310,7 +310,7 @@ class FastBlocksSlashingTest(SidechainTest):
         rival = PosBlock(node.getblock(blockhash, 0))
         coinbase = rival.vtx[0]
         coinbase.vin[0] = CTxIn(coinbase.vin[0].prevout, CScript(bytes(coinbase.vin[0].scriptSig) + bytes([1, 0x42])), coinbase.vin[0].nSequence)
-        rival.resign(KEYS[XONLY.index(node.getblock(blockhash)["proposer"])])
+        rival.resign(KEYS[XONLY.index(node.getblock(blockhash)["proposer"])], node.getblockhash(0))
         assert rival.hash != original.hash
         return original, rival
 

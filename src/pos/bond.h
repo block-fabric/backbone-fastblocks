@@ -24,7 +24,7 @@
 namespace pos {
 
 //! BOND output: OP_RETURN with BOND_TAG | validator x-only key (32) | owner key hash (20) | proof of possession (64)
-//! [| owner signature (65)]: the owner's signature (BondMessage) is due on every bond to a validator that has an owner.
+//! | owner signature (65): the signature (BondMessage) of the owner the bond names, due on every bond (a first one too).
 inline constexpr unsigned char BOND_TAG[4]{0xDB, 'S', 'T', 'K'};
 //! UNBOND output (value 0): OP_RETURN with UNBOND_TAG | validator key (32) | amount (8) | sequence (4) | owner signature (65).
 //! An amount of UNBOND_ALL unbonds all that is bonded when the unbond is applied.
@@ -40,7 +40,7 @@ struct Bond {
     uint160 owner;
     //! BIP340 signature by the validator key of BondPopHash(owner, genesis): no one bonds a key not theirs.
     std::array<unsigned char, 64> pop{};
-    //! The owner's signature of BondMessage, in the format of signed messages: none on a first bond.
+    //! The owner's signature of BondMessage, in the format of signed messages (empty: the bond is refused).
     std::vector<unsigned char> owner_sig;
     CAmount amount{0};
 };
@@ -50,7 +50,7 @@ struct Unbond {
     uint256 pubkey;
     //! UNBOND_ALL: all that is bonded then.
     CAmount amount{0};
-    //! The validator's unbond_seq: an unbond counts once.
+    //! The validator's unbond_seq: an unbond counts once, and a top-up of the bond moves it on.
     uint32_t sequence{0};
     //! Signature of UnbondMessage by the owner key, in the format of signed messages.
     std::vector<unsigned char> signature;
