@@ -793,7 +793,9 @@ void Follower::DropCandidate(const uint256& hash)
 Follower::Mining Follower::GetMining() const
 {
     LOCK(m_mutex);
-    return m_mining;
+    Mining mining{m_mining};
+    mining.candidates = m_candidates.size();
+    return mining;
 }
 
 void Follower::Mine()
@@ -858,6 +860,14 @@ void Follower::Mine()
     LOCK(m_mutex);
     if (m_mining.error != error) LogWarning("Merged mining: %s", error);
     m_mining.error = error;
+    // No commitment was asked for the candidate (a mainchain wallet without the funds, say), and the
+    // next round builds another: it is kept until then, in case the request went through unanswered,
+    // but no longer. Rounds come every second, mainchain blocks every few minutes.
+    if (candidate) {
+        const uint256 hash{candidate->block->GetHash()};
+        if (m_unrequested && *m_unrequested != hash) m_candidates.erase(*m_unrequested);
+        m_unrequested = hash;
+    }
 }
 
 void Follower::Run()
