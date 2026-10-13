@@ -30,6 +30,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -1032,6 +1033,63 @@ BOOST_FIXTURE_TEST_CASE(block_extension_unknown_taken, SidechainSetup)
     BOOST_REQUIRE(chainman.m_blockman.ReadBlock(raw, *index));
     BOOST_CHECK(raw.ext == honest.ext);
     BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.m_other_extensions.contains(honest.GetHash())));
+}
+
+BOOST_FIXTURE_TEST_CASE(header_extension_replaced, SidechainSetup)
+{
+    // A header the node took with a signature it could not check then (forged), and that comes again
+    // with a valid one once the node can tell: the valid one replaces it (CheckOtherExtension REPLACE).
+    // Without the hook (INVALID, the template's), the node keeps the one it has.
+    auto owned{std::make_unique<LateCheckedHooks>()};
+    LateCheckedHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3d};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    CBlock honest{Build()};
+    honest.nVersion |= BLOCK_EXTENSION_BIT;
+    honest.ext.hashSections.SetNull();
+    honest.ext.sig.fill(5);
+    CBlock forged{honest};
+    forged.ext.sig.fill(9);
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{forged}}, /*min_pow_checked=*/true, state), state.ToString());
+    const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return *index->m_ext == forged.ext));
+    hooks.known = true;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{honest}}, /*min_pow_checked=*/true, state), state.ToString());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return *index->m_ext == honest.ext));
+}
+
+/** Hooks that note where the headers they are shown come from. */
+struct SourceHooks : sidechain::ChainHooks {
+    mutable std::vector<int64_t> sources;
+    mutable int open{0};
+    void BeginHeaders(std::span<const CBlockHeader>, int64_t source) const override
+    {
+        sources.push_back(source);
+        ++open;
+    }
+    void EndHeaders() const override { --open; }
+};
+
+BOOST_FIXTURE_TEST_CASE(headers_named_by_source, SidechainSetup)
+{
+    // The hooks are shown each message's headers, and where they come from: the peer, -1 for none.
+    auto owned{std::make_unique<SourceHooks>()};
+    const SourceHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    ChainstateManager& chainman{*m_node.chainman};
+    const CBlock block{Build()};
+    Commit(block.GetHash());
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/5));
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state));
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, nullptr, /*source=*/6));
+    BOOST_CHECK(hooks.sources == (std::vector<int64_t>{5, -1, 6}));
+    BOOST_CHECK_EQUAL(hooks.open, 0);
 }
 
 BOOST_FIXTURE_TEST_CASE(block_extension_equivalent, SidechainSetup)
