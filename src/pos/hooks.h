@@ -264,17 +264,30 @@ public:
     /**
      * Whether a PoS block of `slot` on top of `tip` may acknowledge a ticket, as far as the chain tells
      * (not the record): a ticket of version 1 with a payee, for a block on the chain at or after the
-     * last anchor point, and not so old that the blocks of stake above it would be uncovered for
-     * max_unanchored_slots. Called with cs_main held.
+     * block the last anchor anchored, and not so old that the blocks of stake above it would be
+     * uncovered for max_unanchored_slots. Called with cs_main held.
      */
     bool Acknowledgeable(const AnchorTicket& ticket, const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
     /**
      * The block a ticket made at `slot` would anchor: the block before the tip (ticket depth 1), or the
-     * tip if that one is not after the last anchor point, or if a ticket for it could not be
-     * acknowledged in the next slot (blocks of stake stopped for want of an anchor: nothing is built on
-     * the tip until one comes). Called with cs_main held.
+     * tip if that one is not after the last block anchored (`after_anchor_point`: the last anchor
+     * point, so that its anchor may build a bundle), or if a ticket for it could not be acknowledged
+     * in the next slot (blocks of stake stopped for want of an anchor: nothing is built on the tip
+     * until one comes). Called with cs_main held.
      */
-    const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
+    const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot, bool after_anchor_point = true) const;
+    /**
+     * Where a block on `prev` that acknowledges `ack`, which anchors `anchored`, takes the peg actions:
+     * as if it followed the mainchain up to the block before the commitment, with a bundle of the
+     * withdrawals at or below the block anchored, its hash as the nonce, its height as the lock time
+     * (design 4.3.4) -- and no bundle at all if the block anchored is below the block that took the
+     * last peg actions (a ticket made before the last commitment was acknowledged): a bundle depends
+     * on the block anchored alone only if no peg actions came between it and the acknowledgement.
+     * Called with cs_main held.
+     */
+    sidechain::PegStep AckPegStep(const AnchorAck& ack, const CBlockIndex& anchored, const CBlockIndex& prev) const;
+    /** A validator's own anchorer (-validatoranchorbid): where the pot it wins goes, and its bid; none if off. */
+    std::optional<std::pair<CScript, CAmount>> ValidatorAnchoring() const EXCLUSIVE_LOCKS_REQUIRED(!m_anchor_mutex);
     /**
      * Whether a BMM block built now would be in stall mode (and may take transactions): no active
      * validator set (`pos_active` false), or no block of stake for stall_seconds by `main_time`.

@@ -557,14 +557,30 @@ bool FastBlocksHooks::GetPegStep(const CBlock& block, const sidechain::Mainchain
     if (*committed != ack.main_height) return Fail(reject_reason, "bad-pos-ack-height");
     ChainstateManager* chainman{Chainman()};
     if (!chainman) return Fail(reject_reason, "bad-pos-context");
-    const CBlockIndex* anchored{WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ack.ticket.anchored))};
-    if (!anchored) return Fail(reject_reason, "bad-pos-ack-anchored");
+    LOCK(::cs_main);
+    const CBlockIndex* anchored{chainman->m_blockman.LookupBlockIndex(ack.ticket.anchored)};
+    const CBlockIndex* prev{chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+    if (!anchored || !prev) return Fail(reject_reason, "bad-pos-ack-anchored");
+    step = AckPegStep(ack, *anchored, *prev);
+    return true;
+}
+
+sidechain::PegStep FastBlocksHooks::AckPegStep(const AnchorAck& ack, const CBlockIndex& anchored, const CBlockIndex& prev) const
+{
+    AssertLockHeld(::cs_main);
+    // The block that took the last peg actions on the chain below: the newest acknowledgement or BMM
+    // block (the state's anchor point).
+    const CBlockIndex* point{&prev};
+    while (point && point->m_ext && point->nNonce == 0) point = point->pprev;
     // As if the block followed the mainchain up to the block before the commitment, with the bundle
     // built from the block anchored: its withdrawals, its hash as the nonce, its height as the lock
     // time and as the height a bundle failure counts from (design 4.3.4: every block that
-    // acknowledges the same anchor builds the same bundle, whatever its own height).
-    step = sidechain::PegStep{.main_height = ack.main_height - 1, .nonce = anchored->GetBlockHash(), .max_withdrawal_height = anchored->nHeight, .peg_height = anchored->nHeight};
-    return true;
+    // acknowledges the same anchor builds the same bundle, whatever its own height). That holds only
+    // if no peg actions came between the block anchored and this one (refunds, another bundle): a
+    // ticket made before the last commitment was acknowledged anchors a block below that
+    // acknowledgement, and its anchor builds no bundle (no withdrawal is at or below height -1).
+    const bool after_point{!point || AncestorAt(&anchored, point->nHeight) == point};
+    return sidechain::PegStep{.main_height = ack.main_height - 1, .nonce = anchored.GetBlockHash(), .max_withdrawal_height = after_point ? anchored.nHeight : -1, .peg_height = anchored.nHeight};
 }
 
 bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block, int height, const sidechain::PegStep& step, const Consensus::SidechainParams&,
@@ -589,11 +605,13 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
         const CBlockIndex* target{chainman->m_blockman.LookupBlockIndex(ack.ticket.anchored)};
         // The block anchored is on this chain, at or below the parent.
         if (!target || !Descends(prev, target)) return Fail(reject_reason, "bad-pos-ack-anchored");
-        // ... and it is, or comes after, the block that took the last peg actions: every refund and
-        // every acknowledgement before is at or below it, so the bundle depends on it alone.
-        if (fast.anchor_point_height >= 0) {
-            const CBlockIndex* point{AncestorAt(target, fast.anchor_point_height)};
-            if (!point || point->GetBlockHash() != fast.anchor_point) return Fail(reject_reason, "bad-pos-ack-chain");
+        // ... and it is, or comes after, the block the last anchor anchored: anchors cover the chain in
+        // order. (It may be below the block that took the last peg actions: a ticket made for the
+        // next mainchain block before the last commitment was acknowledged. Its anchor then builds
+        // no bundle: AckPegStep.)
+        if (fast.last_anchored_height >= 0) {
+            const CBlockIndex* last{AncestorAt(target, fast.last_anchored_height)};
+            if (!last || last->GetBlockHash() != fast.last_anchored) return Fail(reject_reason, "bad-pos-ack-chain");
         }
         payee = ack.ticket.payee;
         anchored = target->GetBlockHash();
@@ -1055,12 +1073,13 @@ void FastBlocksHooks::CheckSeeds() const
     }
 }
 
-const CBlockIndex* FastBlocksHooks::TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot) const
+const CBlockIndex* FastBlocksHooks::TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot, bool after_anchor_point) const
 {
     AssertLockHeld(::cs_main);
-    // The block just before the newest (ticket depth 1), unless that is before the last anchor point.
+    // The block just before the newest (ticket depth 1), unless that is before the last anchor point
+    // (or the last block anchored).
     const CBlockIndex* target{tip.pprev ? tip.pprev : &tip};
-    if (target->nHeight < fast.anchor_point_height) return &tip;
+    if (target->nHeight < (after_anchor_point ? fast.anchor_point_height : fast.last_anchored_height)) return &tip;
     // A ticket for it that could not be acknowledged any more (blocks of stake stopped): the tip, which
     // no block will follow before an anchor covers it.
     if (!InTime(tip, *target, slot + 1)) return &tip;
@@ -1084,10 +1103,10 @@ bool FastBlocksHooks::Acknowledgeable(const AnchorTicket& ticket, const CBlockIn
     // On this chain (at or below the tip: the parent of the block that would carry it).
     const CBlockIndex* target{chainman->m_blockman.LookupBlockIndex(ticket.anchored)};
     if (!target || !Descends(&tip, target)) return false;
-    // At or after the block that took the last peg actions (the state checks it: bad-pos-ack-chain).
-    if (fast.anchor_point_height >= 0) {
-        const CBlockIndex* point{AncestorAt(target, fast.anchor_point_height)};
-        if (!point || point->GetBlockHash() != fast.anchor_point) return false;
+    // At or after the block the last anchor anchored (the state checks it: bad-pos-ack-chain).
+    if (fast.last_anchored_height >= 0) {
+        const CBlockIndex* last{AncestorAt(target, fast.last_anchored_height)};
+        if (!last || last->GetBlockHash() != fast.last_anchored) return false;
     }
     // Not so old that the blocks of stake above it would have been uncovered too long (the state
     // checks it: bad-pos-unanchored).

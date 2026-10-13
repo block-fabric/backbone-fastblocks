@@ -977,13 +977,26 @@ BOOST_FIXTURE_TEST_CASE(acknowledgements, FastBlocksSetup)
         const pos::AnchorAck elsewhere{Anchor(Ticket(sibling.GetHash(), payee))};
         BOOST_CHECK_EQUAL(Check(WithAck(PosBlock(4), elsewhere)), "bad-pos-ack-anchored");
     }
-    // Chained: the next ticket anchors the acknowledgement, or a block after it.
+    // Chained: the next ticket anchors the block the last anchor anchored, or a block after it -- one
+    // below the acknowledgement too (a ticket made for the next mainchain block before the last
+    // commitment was acknowledged: anchors need not wait for acknowledgements). Its anchor builds no
+    // bundle (the peg actions of the acknowledgement came between the block it anchors and it); one
+    // that anchors the acknowledgement or a block after it does.
     {
-        const pos::AnchorAck below{Anchor(Ticket(anchored->GetBlockHash(), other_payee))};
+        const pos::AnchorAck below{Anchor(Ticket(anchored->pprev->GetBlockHash(), other_payee))};
         BOOST_CHECK_EQUAL(Check(WithAck(PosBlock(4), below)), "bad-pos-ack-chain");
+        const pos::AnchorAck early{Anchor(Ticket(anchored->GetBlockHash(), other_payee))};
         const pos::AnchorAck chained{Anchor(Ticket(acked.GetHash(), payee))};
-        Take(PosBlock(4, chained));
+        {
+            LOCK(::cs_main);
+            BOOST_CHECK_EQUAL(*Hooks().AckPegStep(early, *anchored, *Tip()).max_withdrawal_height, -1);
+            BOOST_CHECK_EQUAL(*Hooks().AckPegStep(chained, *Tip(), *Tip()).max_withdrawal_height, Tip()->nHeight);
+        }
+        Take(PosBlock(4, early));
         BOOST_CHECK_EQUAL(Key().anchors, before.anchors + 2);
+        BOOST_CHECK(Fast().last_anchored == anchored->GetBlockHash());
+        Take(PosBlock(5, chained));
+        BOOST_CHECK_EQUAL(Key().anchors, before.anchors + 3);
         // Nothing accrued since: nothing paid.
         BOOST_CHECK_EQUAL(Tip()->nTx, 1U);
         BOOST_CHECK_EQUAL(Fast().pot_paid, TX_FEE / 2);
