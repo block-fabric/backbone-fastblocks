@@ -4713,16 +4713,17 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
 }
 
 /**
- * Whether a block marked failed failed against the record of the mainchain: it, or the block it
- * descends from that failed first (descendants of a failed block are marked failed too, unnoted).
+ * Whether a block marked failed failed against the record of the mainchain: the lowest failed block
+ * it descends from (or it), as for ReconsiderRecordFailure. Not the first noted failure below it: a
+ * block on one the operator marked invalid can be noted as failed against the record too, and the
+ * record does not take back what the operator did.
  */
 static bool FailedAgainstRecord(const ChainstateManager& chainman, const CBlockIndex* index) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (!chainman.m_mainchain) return false;
-    for (; index && (index->nStatus & BLOCK_FAILED_VALID); index = index->pprev) {
-        if (const auto failure{chainman.m_mainchain->GetFailure(index->GetBlockHash())}) return *failure == sidechain::Mainchain::Failure::RECORD;
-    }
-    return false;
+    if (!chainman.m_mainchain || !index || !(index->nStatus & BLOCK_FAILED_VALID)) return false;
+    const CBlockIndex* root{index};
+    while (root->pprev && (root->pprev->nStatus & BLOCK_FAILED_VALID)) root = root->pprev;
+    return chainman.m_mainchain->GetFailure(root->GetBlockHash()) == sidechain::Mainchain::Failure::RECORD;
 }
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)

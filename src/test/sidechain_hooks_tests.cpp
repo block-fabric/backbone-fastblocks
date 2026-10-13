@@ -1072,6 +1072,22 @@ BOOST_FIXTURE_TEST_CASE(record_failures_pardoned, SidechainSetup)
     BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(invalidated, failed, /*by_record=*/false));
     BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
     BOOST_CHECK(result(first).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    // The block on it then loses its commitment as well, and is noted as failed against the record:
+    // what fails it is still the operator's (the lowest failed block's), which the record does not take
+    // back. Punishable all the same, and not checked again when the commitment comes back.
+    CBlockIndex* above{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(second.GetHash()))};
+    m_node.chainman->ActiveChainstate().InvalidateBlock(invalidated, above, /*by_record=*/true);
+    BOOST_REQUIRE(Record().GetFailure(second.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+    BOOST_CHECK(Record().GetFailure(first.GetHash()) == sidechain::Mainchain::Failure::MANUAL);
+    BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
+    BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->ActiveChainstate().ReconsiderRecordFailure(above)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return above->nStatus & BLOCK_FAILED_VALID));
+    // Below it, a block that failed with no note, as one that broke a rule of the chain: the same.
+    Record().ForgetFailure(first.GetHash());
+    BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
+    BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->ActiveChainstate().ReconsiderRecordFailure(above)));
 }
 
 BOOST_AUTO_TEST_CASE(peg_height)
