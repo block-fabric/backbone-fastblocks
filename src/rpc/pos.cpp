@@ -145,6 +145,70 @@ UniValue ProofToJSON(const pos::Offence& offence, const pos::DoubleProposal& pro
     return entry;
 }
 
+/** The fields of BondToJSON. */
+std::vector<RPCResult> BondFields()
+{
+    return {
+        {RPCResult::Type::STR, "owner", "The address that may unbond, and is paid what is unbonded (empty for a genesis validator that never bonded)"},
+        {RPCResult::Type::STR_AMOUNT, "bonded", "Coins bonded"},
+        {RPCResult::Type::STR_AMOUNT, "genesisstake", "The stake it starts with as a genesis validator (weight only)"},
+        {RPCResult::Type::STR_AMOUNT, "unbonding", "Coins unbonded, not paid yet"},
+        {RPCResult::Type::ARR, "unbonds", "Them, with the anchor they are paid at",
+        {
+            {RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_AMOUNT, "amount", "The coins"},
+                {RPCResult::Type::NUM, "releaseanchor", "Paid at the anchor with this count"},
+            }},
+        }},
+        {RPCResult::Type::NUM, "unbondsequence", "The sequence its next unbond has"},
+        {RPCResult::Type::BOOL, "eligible", "Whether its stake lets it take part (not banned, enough bonded)"},
+        {RPCResult::Type::NUM, "jaileduntilepoch", "Left out of the sets made before this epoch (0: never jailed)"},
+        {RPCResult::Type::BOOL, "banned", "Signed two blocks for a slot: never in a set again"},
+    };
+}
+
+/**
+ * The blocks of stake this node's validator keys signed on the active chain (their times), counted as
+ * the chain grows: the blocks are looked at once, and again only above the fork of a reorg.
+ */
+struct MadeBlocks {
+    Mutex mutex;
+    std::vector<uint256> keys GUARDED_BY(mutex);
+    //! The block the count is as of: a block of the active chain when it was made.
+    const CBlockIndex* scanned GUARDED_BY(mutex){nullptr};
+    //! The heights and times of the blocks made, in order.
+    std::vector<std::pair<int, int64_t>> made GUARDED_BY(mutex);
+};
+MadeBlocks g_made_blocks;
+
+std::vector<std::pair<int, int64_t>> BlocksMade(ChainstateManager& chainman, const std::vector<uint256>& keys)
+{
+    LOCK2(::cs_main, g_made_blocks.mutex);
+    MadeBlocks& m{g_made_blocks};
+    const CChain& chain{chainman.ActiveChain()};
+    if (m.keys != keys) {
+        m.keys = keys;
+        m.scanned = nullptr;
+        m.made.clear();
+    }
+    if (m.scanned && !chain.Contains(*m.scanned)) {
+        // A reorg: what is above the fork is looked at again.
+        m.scanned = chain.FindFork(*m.scanned);
+        const int fork{m.scanned ? m.scanned->nHeight : -1};
+        std::erase_if(m.made, [&](const auto& block) { return block.first > fork; });
+    }
+    if (keys.empty()) return {};
+    for (int height{m.scanned ? m.scanned->nHeight + 1 : 0}; height <= chain.Height(); ++height) {
+        const CBlockIndex& index{*chain[height]};
+        if (!index.m_ext) continue;
+        const CBlockHeader header{index.GetBlockHeader()};
+        if (std::any_of(keys.begin(), keys.end(), [&](const uint256& key) { return pos::CheckBlockSig(header, key); })) m.made.emplace_back(height, index.GetBlockTime());
+    }
+    m.scanned = chain.Tip();
+    return m.made;
+}
+
 UniValue BondToJSON(const pos::ValidatorRecord& record, const Consensus::PosParams& params)
 {
     UniValue bond(UniValue::VOBJ);
@@ -329,6 +393,8 @@ RPCMethod getvalidators()
                     {RPCResult::Type::NUM, "stake", "Weight in leader selection"},
                     {RPCResult::Type::NUM, "slots", "Slots of the epoch it leads"},
                     {RPCResult::Type::BOOL, "local", "Whether this node holds its key"},
+                    {RPCResult::Type::BOOL, "banned", "Whether the active chain banned it since (it leads no more)"},
+                    {RPCResult::Type::NUM, "jaileduntilepoch", "Left out of the sets made before this epoch, in the state of the active chain (0: never jailed)"},
                 }},
             }},
         }},
@@ -358,6 +424,9 @@ RPCMethod getvalidators()
         entry.pushKV("stake", validator.stake);
         entry.pushKV("slots", slots[i]);
         entry.pushKV("local", std::find(local.begin(), local.end(), validator.pubkey) != local.end());
+        entry.pushKV("banned", schedule.banned.contains(validator.pubkey));
+        const auto record{WITH_LOCK(::cs_main, return pos::GetValidator(chainman.ActiveChainstate().SideState().View(), validator.pubkey))};
+        entry.pushKV("jaileduntilepoch", record ? record->jailed_until_epoch : 0);
         validators.push_back(std::move(entry));
     }
     result.pushKV("validators", std::move(validators));
@@ -384,25 +453,7 @@ RPCMethod getvalidator()
             {RPCResult::Type::NUM, "nextslot", /*optional=*/true, "The next slot it leads (within two epochs)"},
             {RPCResult::Type::BOOL, "local", "Whether this node holds its key"},
             {RPCResult::Type::NUM, "offences", "Proofs this node knows that it signed two blocks for one slot"},
-            {RPCResult::Type::OBJ, "bond", /*optional=*/true, "Its bond, in the state of the active chain",
-            {
-                {RPCResult::Type::STR, "owner", "The address that may unbond, and is paid what is unbonded (empty for a genesis validator that never bonded)"},
-                {RPCResult::Type::STR_AMOUNT, "bonded", "Coins bonded"},
-                {RPCResult::Type::STR_AMOUNT, "genesisstake", "The stake it starts with as a genesis validator (weight only)"},
-                {RPCResult::Type::STR_AMOUNT, "unbonding", "Coins unbonded, not paid yet"},
-                {RPCResult::Type::ARR, "unbonds", "Them, with the anchor they are paid at",
-                {
-                    {RPCResult::Type::OBJ, "", "",
-                    {
-                        {RPCResult::Type::STR_AMOUNT, "amount", "The coins"},
-                        {RPCResult::Type::NUM, "releaseanchor", "Paid at the anchor with this count"},
-                    }},
-                }},
-                {RPCResult::Type::NUM, "unbondsequence", "The sequence its next unbond has"},
-                {RPCResult::Type::BOOL, "eligible", "Whether its stake lets it take part (not banned, enough bonded)"},
-                {RPCResult::Type::NUM, "jaileduntilepoch", "Left out of the sets made before this epoch (0: never jailed)"},
-                {RPCResult::Type::BOOL, "banned", "Signed two blocks for a slot: never in a set again"},
-            }},
+            {RPCResult::Type::OBJ, "bond", /*optional=*/true, "Its bond, in the state of the active chain", BondFields()},
         }},
         RPCExamples{HelpExampleCli("getvalidator", "\"<pubkey>\"")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
@@ -708,7 +759,9 @@ RPCMethod getstakinginfo()
     return RPCMethod{
         "getstakinginfo",
         "Returns what this node does as a validator of FastBlocks: its keys, whether it makes blocks of stake, what it made, and its next slot.",
-        {},
+        {
+            {"since", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "A time (" + UNIX_EPOCH_TIME + "): count the blocks its keys made from then on as well (blocksmadesince)"},
+        },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
             {RPCResult::Type::BOOL, "validator", "Whether the node has validator keys (-validatorkeyfile)"},
@@ -721,11 +774,14 @@ RPCMethod getstakinginfo()
                     {RPCResult::Type::STR_HEX, "pubkey", "x-only key"},
                     {RPCResult::Type::BOOL, "inset", "Whether it is in the validator set"},
                     {RPCResult::Type::NUM, "stake", "Its stake (0 if not in the set)"},
+                    {RPCResult::Type::OBJ, "bond", /*optional=*/true, "Its bond, in the state of the active chain", BondFields()},
                 }},
             }},
             {RPCResult::Type::NUM, "stake", "The stake of its keys in the set"},
             {RPCResult::Type::NUM, "totalstake", "The stake of the whole set"},
             {RPCResult::Type::NUM, "produced", "Blocks made since the node started"},
+            {RPCResult::Type::NUM, "blocksmade", "Blocks of stake on the active chain that its keys signed"},
+            {RPCResult::Type::NUM, "blocksmadesince", /*optional=*/true, "Of which with a time at or after since"},
             {RPCResult::Type::NUM, "acknowledgements", "Of which acknowledgements"},
             {RPCResult::Type::NUM, "failed", "Slots its keys led and it made no block for"},
             {RPCResult::Type::NUM, "lastslot", "Slot of the last block made, -1 if none"},
@@ -759,6 +815,8 @@ RPCMethod getstakinginfo()
         entry.pushKV("pubkey", HexStr(key));
         entry.pushKV("inset", index.has_value());
         entry.pushKV("stake", key_stake);
+        const auto record{WITH_LOCK(::cs_main, return pos::GetValidator(chainman.ActiveChainstate().SideState().View(), key))};
+        if (record) entry.pushKV("bond", BondToJSON(*record, params));
         entries.push_back(std::move(entry));
     }
     result.pushKV("keys", std::move(entries));
@@ -766,6 +824,12 @@ RPCMethod getstakinginfo()
     result.pushKV("totalstake", schedule.set ? schedule.set->TotalStake() : 0);
     const pos::Producer::Status status{producer ? producer->GetStatus() : pos::Producer::Status{}};
     result.pushKV("produced", status.produced);
+    const auto made{BlocksMade(chainman, keys)};
+    result.pushKV("blocksmade", static_cast<uint64_t>(made.size()));
+    if (!request.params[0].isNull()) {
+        const int64_t since{request.params[0].getInt<int64_t>()};
+        result.pushKV("blocksmadesince", static_cast<uint64_t>(std::count_if(made.begin(), made.end(), [&](const auto& block) { return block.second >= since; })));
+    }
     result.pushKV("acknowledgements", status.acknowledgements);
     result.pushKV("failed", status.failed);
     result.pushKV("lastslot", status.last_slot);
@@ -824,6 +888,7 @@ std::vector<RPCResult> PosBlockFields()
         {RPCResult::Type::STR, "kind", /*optional=*/true, "FastBlocks: \"pos\" for a block of stake, \"bmm\" for a merged mined block"},
         {RPCResult::Type::NUM, "slot", /*optional=*/true, "FastBlocks: the slot of a block of stake"},
         {RPCResult::Type::STR_HEX, "proposer", /*optional=*/true, "FastBlocks: the x-only key of the leader that signed a block of stake"},
+        {RPCResult::Type::NUM, "mainheight", /*optional=*/true, "FastBlocks: the height of the mainchain block that committed to a merged mined block (on record)"},
         {RPCResult::Type::OBJ, "ack", /*optional=*/true, "FastBlocks: the anchor a block of stake acknowledges",
         {
             {RPCResult::Type::STR_HEX, "ticket", "h*, what the mainchain committed to"},
@@ -884,6 +949,8 @@ void PushPosBlockInfo(const ChainstateManager& chainman, const CBlock& block, co
             ack.pushKV("mainheight", sections.ack->main_height);
             result.pushKV("ack", std::move(ack));
         }
+    } else if (chainman.m_mainchain && index.nHeight > 0) {
+        if (const auto main_height{chainman.m_mainchain->CommittedHeight(index.GetBlockHash())}) result.pushKV("mainheight", *main_height);
     }
     LOCK(::cs_main);
     const CChain& chain{chainman.ActiveChain()};

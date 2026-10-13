@@ -189,6 +189,9 @@ class FastBlocksSlashingTest(SidechainTest):
             hashes.append(blockhash)
             blockhash = n0.getblock(blockhash)["previousblockhash"]
         assert_equal(sum(self.pays(n0, h, REWARD, reporter) for h in hashes), 1)
+        # The wallet it is paid to (the payout address of the node that made the block) says what it is.
+        reporter_node = self.nodes[XONLY.index(carrying["proposer"])]
+        self.wait_until(lambda: any(t.get("income") == "reporter" and t["amount"] == REWARD for t in reporter_node.listtransactions("*", 1000)), timeout=60)
         staking = n0.getposinfo()["staking"]
         assert_equal(staking["rewardsowed"], 0)
         # The rest of the penalty is in the reserve, paid out a share per anchor with the pot.

@@ -148,6 +148,8 @@ class FastBlocksRpcTest(SidechainTest):
         self.mine_main()
         self.wait_until(lambda: all(n.getbestblockhash() == block["hash"] for n in self.validators()))
         assert_equal(n0.getblock(block["hash"])["kind"], "bmm")
+        # The mainchain block that committed to it.
+        assert_equal(n0.getblock(block["hash"])["mainheight"], main.getblockcount())
         assert_peg_balance(main, self.validators())
 
         self.log.info("Before any validator runs: the set and the schedule, no staking")
@@ -157,6 +159,7 @@ class FastBlocksRpcTest(SidechainTest):
         assert_equal(sorted(v["pubkey"] for v in info["validators"]), sorted(XONLY))
         assert_equal(sum(v["slots"] for v in info["validators"]), 20)
         assert all(not v["local"] for v in info["validators"])
+        assert all(not v["banned"] and v["jaileduntilepoch"] == 0 for v in info["validators"])
         assert_equal(n0.getvalidators(info["epoch"] + 1)["epoch"], info["epoch"] + 1)
         schedule = n0.getleaderschedule(info["epoch"])
         assert_equal(len(schedule["slots"]), 20)
@@ -188,7 +191,15 @@ class FastBlocksRpcTest(SidechainTest):
         staking = n0.getstakinginfo()
         assert_equal(staking["validator"], True)
         assert_equal(staking["enabled"], True)
-        assert_equal(staking["keys"], [{"pubkey": XONLY[0], "inset": True, "stake": 1}])
+        assert_equal([{k: key[k] for k in ("pubkey", "inset", "stake")} for key in staking["keys"]], [{"pubkey": XONLY[0], "inset": True, "stake": 1}])
+        assert_equal(staking["keys"][0]["bond"]["genesisstake"], Decimal("0.00000001"))
+        # The blocks of stake its key signed on the active chain, and of them those since a time.
+        assert_greater_than(staking["blocksmade"], 0)
+        assert "blocksmadesince" not in staking
+        made = n0.getstakinginfo(0)
+        assert_equal(made["blocksmadesince"], made["blocksmade"])
+        assert_greater_than_or_equal(made["blocksmade"], staking["blocksmade"])
+        assert_equal(n0.getstakinginfo(made["nexttime"] + 3600)["blocksmadesince"], 0)
         assert_equal((staking["stake"], staking["totalstake"]), (1, 3))
         assert_greater_than_or_equal(staking["lastsignedslot"], staking["lastslot"])
         assert_greater_than(staking["nextslot"], staking["slot"])
@@ -276,6 +287,15 @@ class FastBlocksRpcTest(SidechainTest):
         assert_greater_than(mine["finality"]["final"], 0)
         assert_equal(mine["finality"]["anchored"], 0)
         assert_equal(mine["finality"]["soft"] + mine["finality"]["final"], mine["trusted"])
+
+        self.log.info("The wallet: what its coinbase outputs pay -- the producer's share of its blocks of stake, the pot to its tickets' payee")
+        def incomes():
+            return {t.get("income") for t in n0.listtransactions("*", 1000)}
+        self.wait_until(lambda: {"staked", "anchor"} <= incomes(), timeout=60)
+        staked = [t for t in n0.listtransactions("*", 1000) if t.get("income") == "staked"]
+        assert all(t["vout"] == 0 and t["address"] == self.payouts[0] for t in staked)
+        anchored = [t for t in n0.listtransactions("*", 1000) if t.get("income") == "anchor"]
+        assert all(t["vout"] > 0 and t["address"] == ticket_address for t in anchored)
 
         self.log.info("Tickets: a peer asks for the ticket of a commitment, and gets it")
         peer = n0.add_p2p_connection(FastBlocksPeer())

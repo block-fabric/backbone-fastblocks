@@ -66,6 +66,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getvalidators", 0, "epoch" },
     { "getleaderschedule", 0, "epoch" },
     { "getanchorinfo", 0, "count" },
+    { "getstakinginfo", 0, "since" },
     { "setstaking", 0, "enabled" },
     { "requestbmmblock", 1, "amount" },
     { "createwithdrawal", 1, "amount" },
