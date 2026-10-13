@@ -114,6 +114,15 @@ public:
      * knows more is BLOCK_TIME_FUTURE, with a reason that IsWaitReason accepts. Called with cs_main held.
      */
     virtual bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const;
+    /**
+     * The headers of one message (ChainstateManager::ProcessNewBlockHeaders: a headers message, a
+     * compact block's header), before CheckHeader is called for each of them; EndHeaders after. A
+     * chain may weigh a header by the chain the message claims it leads to (where a header of a
+     * branch it cannot check yet is taken only if it leads to more than the best header: the
+     * branch's first headers are not). Called with cs_main held.
+     */
+    virtual void BeginHeaders(std::span<const CBlockHeader> headers) const {}
+    virtual void EndHeaders() const {}
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
