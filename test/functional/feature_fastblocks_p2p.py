@@ -242,8 +242,9 @@ class FastBlocksP2PTest(SidechainTest):
             self.connect_nodes(3, i)
         # The attacker holds the first blocks, which the node asked it for. The blocks of stake after
         # them come from the honest nodes with the leaders' signatures, which the node cannot check
-        # before it has connected the chain below (blk-extension-unknown): it does not ask for them
-        # again until then (it did, as fast as the peers sent them).
+        # before it has connected the chain below: it takes them with its headers' signatures, and
+        # does not ask for them again (it did, as fast as the peers sent them, when it turned them
+        # away: blk-extension-unknown).
         time.sleep(5)
         with open(late.debug_log_path, encoding="utf-8") as log:
             assert_greater_than(100, log.read().count("state=blk-extension-unknown"))

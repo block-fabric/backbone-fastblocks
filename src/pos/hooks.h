@@ -184,6 +184,8 @@ public:
      * the leader yet, or did not check the one it has; INVALID otherwise.
      */
     sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override;
+    //! A block of stake whose signature fails: its header may have come with a forged one.
+    bool OtherExtensionMayFix(const std::string& reject_reason) const override { return reject_reason == "bad-pos-sig"; }
     /**
      * 10 minutes while the network has blocks of stake (genesis validators, or the set the newest
      * anchor of the active chain made is active), Bitcoin's two hours otherwise: from the state of the
