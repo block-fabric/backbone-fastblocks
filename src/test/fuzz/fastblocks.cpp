@@ -18,6 +18,10 @@
 //    fuzzed choices: the state agrees with the chain key, the totals of staking with its validators,
 //    the coins of the chain are the deposits (pegbalance), taking blocks back and connecting them
 //    again comes back to the same state, and no header is taken that the rules of headers refuse.
+//  - pos_cold_hooks: the same chain, hooks rebuilt from it mid-chain (a node that restarted) against
+//    those that saw it from the start: the same state transition for every block to come, the same
+//    time limit of blocks, final height, chain key of headers, and leaders and header outcomes where
+//    both can tell the leader (the warm ones may know more sets, from memory, and no less).
 //  - pos_staking: the staking rules alone on a state (bonds, unbonds, peg steps, liveness, penalties)
 //    with fuzzed parameters: every coin bonded is bonded, unbonding, in the reserve, owed to a
 //    reporter or paid out; the totals agree with the validators; the journal takes each step back.
@@ -121,12 +125,14 @@ const std::vector<std::string> VALIDATOR_XONLY{
     "57a62b05e99914350ce87639a68d0f3dd588e98afaf6c1131235a855d41962f3",
 };
 
-/** The chain parameters of a regtest sidechain in slot 5 with the three validators. */
-std::unique_ptr<const CChainParams> FastParams()
+/** The chain parameters of a regtest sidechain in slot 5 with the three validators (or none: validators bond). */
+std::unique_ptr<const CChainParams> FastParams(bool genesis_validators = true)
 {
     CChainParams::RegTestOptions options;
     options.sidechain_slot = 5;
-    for (const std::string& hex : VALIDATOR_XONLY) options.pos_validators.push_back({.pubkey = uint256{std::span<const unsigned char>{ParseHex(hex)}}, .stake = 1});
+    if (genesis_validators) {
+        for (const std::string& hex : VALIDATOR_XONLY) options.pos_validators.push_back({.pubkey = uint256{std::span<const unsigned char>{ParseHex(hex)}}, .stake = 1});
+    }
     return CChainParams::RegTest(options);
 }
 
@@ -496,9 +502,13 @@ FUZZ_TARGET(pos_evidence, .init = initialize_pos)
 
 namespace {
 
-/** A chain of a regtest sidechain with the three validators and a producer, and the record of its mainchain the target writes. */
+/**
+ * A chain of a regtest sidechain with the three validators (or none: then validators bond, and blocks
+ * of stake start once a set made at an anchor has one) and a producer, and the record of its
+ * mainchain the target writes.
+ */
 struct FastChain {
-    std::unique_ptr<const CChainParams> params{FastParams()};
+    std::unique_ptr<const CChainParams> params;
     std::unique_ptr<TestingSetup> setup;
     std::unique_ptr<pos::Producer> producer;
     std::vector<CKey> keys{[] {
@@ -512,14 +522,16 @@ struct FastChain {
     //! Coins of `key`: what the coinbases and payments of the chain paid it.
     std::map<COutPoint, CTxOut> coins;
 
-    FastChain()
+    explicit FastChain(bool genesis_validators = true) : params{FastParams(genesis_validators)}
     {
         // Mock time from the start: the chain is made at a slot of its own.
         slot = pos::SlotOf(1800000000, params->GetConsensus().pos);
         SetMockTime(std::chrono::seconds{pos::SlotTime(slot, params->GetConsensus().pos)});
         pos::InstallHooks(*params);
         static const std::string validators_arg{"-posvalidators=" + VALIDATOR_XONLY[0] + "," + VALIDATOR_XONLY[1] + "," + VALIDATOR_XONLY[2]};
-        setup = MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST, {.extra_args = {"-sidechainslot=5", validators_arg.c_str()}});
+        std::vector<const char*> args{"-sidechainslot=5"};
+        if (genesis_validators) args.push_back(validators_arg.c_str());
+        setup = MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST, {.extra_args = args});
         Hooks().Attach(setup->m_node.chainman.get());
         std::vector<unsigned char> secret(32, 0x42);
         key.Set(secret.begin(), secret.end(), /*fCompressedIn=*/true);
@@ -969,6 +981,246 @@ FUZZ_TARGET(pos_state)
         chain.CheckStake();
     }
     chain.CheckPegBalance();
+}
+
+namespace {
+
+/**
+ * FastBlocks hooks rebuilt mid-chain (a node that restarted: nothing in memory but what it reads from
+ * the chain's state) against those that saw the chain from its start: the rules of blocks (all of a
+ * block's state transition), the time limit of blocks, the final height, the chain key of a header and
+ * the leaders a header is checked against must be the same. Only what the warm hooks know from memory
+ * (the sets of anchors they read before, which the state may have pruned) may make them tell a leader
+ * the cold ones cannot.
+ */
+struct ColdHooks {
+    FastChain& chain;
+    std::unique_ptr<sidechain::ChainHooks> owner;
+    pos::FastBlocksHooks* cold{nullptr};
+
+    explicit ColdHooks(FastChain& c) : chain{c} {}
+    ~ColdHooks() { Reset(); }
+
+    void Reset()
+    {
+        if (cold) cold->Attach(nullptr);
+        cold = nullptr;
+        owner.reset();
+    }
+    void Rebuild()
+    {
+        Reset();
+        auto hooks{std::make_unique<pos::FastBlocksHooks>(*chain.params)};
+        hooks->Attach(&chain.Chainman());
+        for (const pos::AnchorTicket& ticket : Hooks().Tickets()) hooks->AddTicket(ticket);
+        cold = hooks.get();
+        owner = std::move(hooks);
+    }
+
+    /** The state transition of `block` on the tip, with the installed hooks or the cold ones: its outcome and the state after. */
+    std::pair<std::string, uint256> Connect(const CBlock& block, bool use_cold)
+    {
+        // (The template reads the hooks through sidechain::Hooks(): the cold ones are put in its place for the call.)
+        std::unique_ptr<sidechain::ChainHooks> warm;
+        if (use_cold) warm = sidechain::SetHooks(std::move(owner));
+        std::pair<std::string, uint256> result;
+        {
+            LOCK(::cs_main);
+            const sidechain::StoreView& base{chain.Chain().SideCache()};
+            sidechain::StoreOverlay overlay{base};
+            sidechain::State state{overlay};
+            CAmount minted{0};
+            std::string reason;
+            const bool ok{state.ConnectBlock(block, chain.Tip()->nHeight + 1, chain.Chainman().GetConsensus().sidechain, chain.Record(), minted, reason)};
+            result = {ok ? "" : reason, ok ? sidechain::StoreHash(overlay) : uint256{}};
+        }
+        if (use_cold) owner = sidechain::SetHooks(std::move(warm));
+        return result;
+    }
+
+    void CompareBlock(const CBlock& block)
+    {
+        assert(Connect(block, /*use_cold=*/false) == Connect(block, /*use_cold=*/true));
+    }
+
+    /** A block of stake the producer would make for a slot to come (with an acknowledgement if one is due), signed by its leader. */
+    std::optional<CBlock> PosCandidate(int64_t slot)
+    {
+        std::optional<pos::AnchorAck> ack;
+        pos::FastBlocksHooks::SlotLeader leader;
+        {
+            LOCK(::cs_main);
+            const CBlockIndex* tip{chain.Tip()};
+            ack = Hooks().NextAck(*tip, pos::GetFastState(chain.Chain().SideCache()), slot);
+            leader = Hooks().LeaderOf(*tip, slot);
+        }
+        if (leader.status != pos::FastBlocksHooks::LeaderStatus::OK) return std::nullopt;
+        std::string error;
+        auto block{chain.producer->Build(slot, ack, error)};
+        if (!block && ack) block = chain.producer->Build(slot, std::nullopt, error);
+        if (!block) return std::nullopt;
+        for (const CKey& k : chain.keys) {
+            if (XOnly(k) == leader.pubkey && pos::Producer::Sign(*block, k, chain.Genesis())) return block;
+        }
+        return std::nullopt;
+    }
+
+    void Compare(FuzzedDataProvider& fdp)
+    {
+        assert(Hooks().MaxFutureBlockTime() == cold->MaxFutureBlockTime());
+        const Consensus::PosParams& params{Hooks().Params()};
+        {
+            LOCK(::cs_main);
+            // (Finality is what a node knows: the cold hooks have the tickets the warm ones have, as a
+            // node that restarted asks its peers for them.)
+            assert(Hooks().FinalHeight() == cold->FinalHeight());
+            // Leaders of slots now and to come, on the tip and on blocks below it or off the active chain.
+            std::vector<const CBlockIndex*> known;
+            for (const auto& [_, index] : chain.Chainman().m_blockman.m_block_index) known.push_back(&index);
+            std::sort(known.begin(), known.end(), [](const CBlockIndex* a, const CBlockIndex* b) { return std::make_pair(a->nHeight, a->GetBlockHash()) < std::make_pair(b->nHeight, b->GetBlockHash()); });
+            for (int n{0}; n < 3; ++n) {
+                const CBlockIndex* prev{known[known.size() - 1 - fdp.ConsumeIntegralInRange<size_t>(0, std::min<size_t>(known.size() - 1, 40))]};
+                const int64_t at{chain.slot + fdp.ConsumeIntegralInRange<int64_t>(-3, 3 * params.slots_per_epoch)};
+                if (at <= 0) continue;
+                const auto warm_leader{Hooks().LeaderOf(*prev, at)};
+                const auto cold_leader{cold->LeaderOf(*prev, at)};
+                // (Either may know a set the other does not, from memory: the warm hooks forget too, now and then.)
+                if (warm_leader.status != pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN && cold_leader.status != pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN) {
+                    assert(warm_leader.status == cold_leader.status);
+                    assert(warm_leader.pubkey == cold_leader.pubkey && warm_leader.seed == cold_leader.seed);
+                }
+                // A header on it, signed by the leader or another key or nobody, claiming a commitment or not:
+                // the same outcome where both tell its leader, and the same chain key.
+                CBlockHeader header;
+                header.nVersion = 0x20000000 | pos::POS_BLOCK_BIT;
+                header.hashPrevBlock = prev->GetBlockHash();
+                header.hashMerkleRoot = ArithToUint256(arith_uint256{fdp.ConsumeIntegral<uint64_t>()});
+                header.nTime = static_cast<uint32_t>(pos::SlotTime(at, params));
+                header.nBits = pos::PosBits(chain.Chainman().GetConsensus().powLimit);
+                header.nNonce = fdp.ConsumeBool() ? 0 : fdp.ConsumeIntegralInRange<uint32_t>(0, chain.Record().Height() + 1);
+                header.ext.hashSections = header.nNonce ? uint256{1} : uint256{};
+                const CKey& signer{chain.keys[fdp.ConsumeIntegralInRange<size_t>(0, chain.keys.size() - 1)]};
+                for (const CKey& k : chain.keys) {
+                    if (warm_leader.status == pos::FastBlocksHooks::LeaderStatus::OK && XOnly(k) == warm_leader.pubkey && fdp.ConsumeBool()) {
+                        assert(k.SignSchnorr(pos::BlockSigHash(header, chain.Genesis()), header.ext.sig, nullptr, uint256{}));
+                    }
+                }
+                if (fdp.ConsumeIntegralInRange<int>(0, 3) == 0) assert(signer.SignSchnorr(pos::BlockSigHash(header, chain.Genesis()), header.ext.sig, nullptr, uint256{}));
+                assert(Hooks().ChainWork(prev, header) == cold->ChainWork(prev, header));
+                if (warm_leader.status == pos::FastBlocksHooks::LeaderStatus::OK && cold_leader.status == pos::FastBlocksHooks::LeaderStatus::OK) {
+                    BlockValidationState warm_state, cold_state;
+                    const bool warm_ok{Hooks().CheckHeader(header, *prev, chain.Chainman(), warm_state)};
+                    const bool cold_ok{cold->CheckHeader(header, *prev, chain.Chainman(), cold_state)};
+                    assert(warm_ok == cold_ok && warm_state.GetRejectReason() == cold_state.GetRejectReason());
+                }
+            }
+        }
+        // Blocks to come: a block of stake, a BMM block (with or without the mempool).
+        if (const auto block{PosCandidate(chain.slot + fdp.ConsumeIntegralInRange<int64_t>(1, 3))}) CompareBlock(*block);
+        if (fdp.ConsumeBool()) {
+            std::unique_ptr<interfaces::BlockTemplate> block_template;
+            try {
+                block_template = interfaces::MakeMining(chain.setup->m_node)->createNewBlock({.use_mempool = fdp.ConsumeBool(), .coinbase_output_script = chain.script, .test_block_validity = false}, /*cooldown=*/false);
+            } catch (const std::exception&) {
+            }
+            if (block_template) {
+                CBlock block{block_template->getBlock()};
+                block.hashMerkleRoot = BlockMerkleRoot(block);
+                CompareBlock(block);
+            }
+        }
+    }
+};
+
+} // namespace
+
+FUZZ_TARGET(pos_cold_hooks)
+{
+    SeedRandomStateForTest(SeedRand::ZEROS);
+    FuzzedDataProvider fdp{buffer.data(), buffer.size()};
+    // With genesis validators, or without (validators bond, and blocks of stake start once a set made
+    // at an anchor has one: the network's time limit of blocks comes from the state then).
+    FastChain chain{/*genesis_validators=*/fdp.ConsumeBool()};
+    ColdHooks hooks{chain};
+    chain.Main([&](sidechain::MainBlock& block) {
+        sidechain::MainDeposit deposit;
+        deposit.destination = EncodeDestination(WitnessV0KeyHash{chain.key.GetPubKey()});
+        deposit.amount = 10 * COIN;
+        deposit.txid = uint256{0xde};
+        block.deposits.push_back(deposit);
+    });
+    chain.Bmm(/*use_mempool=*/false);
+    hooks.Rebuild();
+    LIMITED_WHILE(fdp.remaining_bytes() > 0, 60)
+    {
+        switch (fdp.ConsumeIntegralInRange<int>(0, 11)) {
+        case 0:
+            // A restart: the hooks rebuilt from the chain as it is now (the installed ones forget what
+            // they read too, now and then).
+            hooks.Rebuild();
+            if (fdp.ConsumeBool()) Hooks().ForgetKnownSets();
+            break;
+        case 1:
+        case 2:
+            chain.Produce(fdp.ConsumeIntegralInRange<int>(1, 4));
+            break;
+        case 3: {
+            pos::AnchorTicket ticket;
+            const CBlockIndex* tip{chain.Tip()};
+            const CBlockIndex* target{WITH_LOCK(::cs_main, return tip->GetAncestor(std::max(0, tip->nHeight - fdp.ConsumeIntegralInRange<int>(0, 3))))};
+            ticket.anchored = target->GetBlockHash();
+            ticket.payee = fdp.ConsumeBool() ? chain.script : FuzzedPayee(fdp);
+            chain.Commit(ticket.Hash());
+            if (fdp.ConsumeBool()) {
+                Hooks().AddTicket(ticket);
+                if (hooks.cold) hooks.cold->AddTicket(ticket);
+            }
+            break;
+        }
+        case 4:
+            chain.Main([&](sidechain::MainBlock& block) {
+                sidechain::MainDeposit deposit;
+                deposit.destination = EncodeDestination(WitnessV0KeyHash{chain.key.GetPubKey()});
+                deposit.amount = fdp.ConsumeIntegralInRange<CAmount>(1, 10 * COIN);
+                deposit.txid = ArithToUint256(arith_uint256{static_cast<uint64_t>(chain.Record().Height() + 1)});
+                block.deposits.push_back(deposit);
+            });
+            break;
+        case 5:
+            chain.Bmm(fdp.ConsumeBool());
+            break;
+        case 6:
+            chain.Pay(fdp);
+            break;
+        case 7:
+            chain.Bond(fdp);
+            break;
+        case 8:
+            chain.Unbond(fdp);
+            break;
+        case 9:
+            chain.SignTwice(fdp, fdp.ConsumeIntegralInRange<int>(1, 4));
+            break;
+        case 10:
+            chain.Main();
+            break;
+        default: {
+            // A block taken back and connected again.
+            CBlockIndex* tip{WITH_LOCK(::cs_main, return chain.Chain().m_chain.Tip())};
+            if (tip->nHeight == 0) break;
+            BlockValidationState state;
+            chain.Chain().InvalidateBlock(state, tip);
+            if (hooks.cold) hooks.Compare(fdp);
+            {
+                LOCK(::cs_main);
+                chain.Chain().ResetBlockFailureFlags(tip);
+                chain.Chainman().RecalculateBestHeader();
+            }
+            chain.Chain().ActivateBestChain(state);
+        }
+        }
+        if (hooks.cold) hooks.Compare(fdp);
+    }
 }
 
 namespace {

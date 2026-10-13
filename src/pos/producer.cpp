@@ -139,7 +139,8 @@ std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const Fast
     // The slashing protection lives next to the key file (named after it), so that wiping the data
     // directory to sync again keeps it; the file of older versions, in the data directory, counts too.
     const std::string key_name{fs::PathToString(key_path.filename())};
-    auto protection{SlashingProtection::Open(key_path.parent_path() / fs::PathFromString(key_name + ".protection"), key_path.parent_path(),
+    const fs::path key_dir{key_path.parent_path()};
+    auto protection{SlashingProtection::Open(key_dir / fs::PathFromString(key_name + ".protection"), key_dir,
                                              fs::PathFromString(key_name + ".lock"), error, std::vector<fs::path>{args.GetDataDirNet() / fs::u8path("validator_protection.dat")})};
     if (!protection) return nullptr;
     LogInfo("FastBlocks: block producer with %u validator key(s)", keys.size());
