@@ -98,7 +98,11 @@ as its nonce and P's height as its lock time, refunds, payouts. The peg actions
 count at P's height (template hook `PegStep::peg_height`): a bundle failure Q
 sees is noted at P's height, and the retry delay counts from it. So every block
 that acknowledges the same anchor builds the same bundle, whatever its own
-height (design §4.3.4).
+height (design §4.3.4). P is at or after the block the last anchor anchored; it
+may be below the block that took the last peg actions (a ticket made for the
+next mainchain block before the last commitment was acknowledged): then Q builds
+no bundle (no peg actions may come between P and Q for the bundle to be P's
+alone), and the next anchor whose P is at or after that block does.
 
 **BMM block**: the template's. It anchors its parent, takes the peg actions,
 and its first coinbase output's script is paid the pot. It carries
@@ -165,7 +169,10 @@ that the node cannot check yet (the chain below is not connected) is taken, with
 its header's signature, and the other one kept (one per peer, for 1000 blocks):
 when the block is connected, where the node can tell, a valid one replaces an
 invalid one the header had (template: `ChainstateManager::m_other_extensions`).
-The block hash covers all but the signature: it is the same block.
+The block hash covers all but the signature: it is the same block. A block that
+fails its signature when connected (`bad-pos-sig`: it came whole with the forged
+one) is asked for once from each peer that has it (template hook
+`OtherExtensionMayFix`): a copy with the valid signature replaces it.
 
 A header that may come later (`pos-time-future`, `pos-ack-unknown`,
 `pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
@@ -193,7 +200,7 @@ Acknowledgement (state):
 | ... first, at the height said | `bad-pos-ack-height` |
 | After the last anchor's commitment | `bad-pos-ack-order` |
 | P is known, and at or below the parent | `bad-pos-ack-anchored` |
-| P is, or descends from, the last block that took the peg actions | `bad-pos-ack-chain` |
+| P is, or descends from, the block the last anchor anchored (if P is below the block that took the last peg actions, Q builds no bundle) | `bad-pos-ack-chain` |
 
 Every block (state):
 
@@ -467,7 +474,7 @@ block are cached (10000 blocks).
 
 The wallet's transactions carry the roles (`interfaces::WalletTx::
 txout_coinbase_role`); the GUI's transaction list labels such outputs "Staked",
-"Anchor reward" and "Slashing reward" instead of "Mined", and its type filter
+"BMM reward" and "Slashing reward" instead of "Mined", and its type filter
 has the three. The wallet RPCs give a coinbase output's `income`.
 
 ## The staking page
@@ -477,19 +484,19 @@ under the other in a narrow window. Its data comes from the RPCs above, fetched
 off the GUI thread every 3 s while it is shown (`NodeRpc::RunAsync`), and from
 the wallet's transactions:
 
-- the chain: slot and leader, anchors;
+- the chain: slot and leader, BMM commitments (anchors);
 - this node as a validator: staking on or off (buttons), its keys, their bonded,
   unbonding and eligible stake, whether they are in the set, jailed or banned,
   their share of the set's stake (the share of slots to expect), the next slot
   they lead and when, the blocks of stake they made today and on the active
   chain (`blocksmade`, `blocksmadesince` local midnight) and since the node
   started, and the slots they missed since it started;
-- staking income of the wallet, today and in all: staked, anchor rewards,
+- staking income of the wallet, today and in all: staked, BMM rewards,
   slashing rewards (the transaction list's records of these types);
-- the wallet's coins by finality (soft, anchored, final), and how far the chain
-  is anchored and final;
+- the wallet's coins by finality (soft, BMM-confirmed, final), and how far the
+  chain is BMM-confirmed and final;
 - the validator set of the epoch (key, stake, share, slots, status: this node,
-  in the set, jailed, banned) and the newest anchors;
+  in the set, jailed, banned) and the newest BMM blocks;
 - the wallet's bonds, with a key (the bond selected, or this node's first key,
   if none is entered) and an amount: Bond, Add to bond (to a bond the wallet
   has), Unbond (the amount, at most what is bonded) and Unbond all. Each asks
@@ -500,15 +507,20 @@ the wallet's transactions:
 ## The block explorer
 
 The block explorer lists the newest blocks (up to 1000) with, after the height,
-their kind: **PoS** (a block of stake, a blue disc) or **PoW** (a merged mined
-block, an amber diamond; the marks are drawn with an outline, by shape as well
-as colour, so that they read on every theme). Then the slot and producer of a
-block of stake ("this node" for one of this node's keys, else the key
-shortened, in full in the tooltip), the mainchain block that committed to a
-merged mined block, and its finality (soft, anchored, final; as of the anchored
+their kind: **PoS** (a block of stake, a blue disc), **BMM** (a block of stake
+that records a BMM commitment, an acknowledgement: the disc with an amber
+diamond) or **PoW** (a merged mined block, an amber diamond; the marks are drawn
+with an outline, by shape as well as colour, so that they read on every theme).
+Then the slot and producer of a block of stake ("this node" for one of this
+node's keys, else the key shortened, in full in the tooltip), the mainchain
+block whose BMM commitment a BMM block records or that committed to a merged
+mined block, and its finality (soft, BMM-confirmed, final; as of the anchored
 and final tips of `getanchorinfo`). A block's details start with a summary
-(kind, slot and producer, the anchor it acknowledges or makes, finality,
-proofs) above the whole of `getblock`. Everything is fetched off the GUI thread
+(kind, slot and producer, the BMM commitment it records or makes, finality,
+proofs) above the whole of `getblock`. (The GUI says "BMM" where the RPCs and
+this document say anchor and acknowledgement: what ties the chain to the
+mainchain, and where deposits and withdrawals happen; the RPC names are
+unchanged.) Everything is fetched off the GUI thread
 (`NodeRpc::RunAsync`, `CallAsync`); blocks already read are not read again. On
 a chain without blocks of stake the FastBlocks columns are hidden.
 
@@ -586,14 +598,32 @@ Every FastBlocks functional test checks this on every node after every step
   the WIF is the key's 32 bytes in Base58Check with the chain's secret key
   prefix and the compressed flag `01`. `getstakinginfo` (`payout`) and the
   staking page ("Fees paid to") show where it goes.
-- With `setbmm`, while PoS blocks come, the node's merged miner makes a ticket
-  per mainchain block (P is the block before its tip, or the last
-  acknowledgement, or the tip itself once a ticket for the block before it
-  could no longer be acknowledged in time: blocks of stake stopped for want of
-  anchors), relays it, and bids for its commitment (what the pot will pay, less
-  1 %); after `stall_seconds` without PoS blocks, it merged mines BMM blocks as
-  the template does. It waits for its committed ticket to be acknowledged before
-  it makes the next, but not for one that can no longer be.
+- The anchorer: with `setbmm`, the node's merged miner; else, on a validator (a
+  node with `-validatorkeyfile`), its own anchorer, on by default
+  (`-validatoranchorbid=<amount>`, in coins of the mainchain: 0.00001 by default,
+  1000 satoshis, about five times the relay fee of a request; 0 turns it off; off
+  on regtest unless given), which pays the pot it wins to the producer's payout
+  (`-validatorpayout`). It comes from the options, so a restart keeps it, with no
+  `setbmm` to call again. While PoS blocks come, it makes a ticket for every
+  mainchain block, as soon as it sees the block, and bids for its commitment
+  (what the pot will pay, less 1 %; a validator at least its own bid, fees or no
+  fees; `setbmm`'s `always` its amount). P is the block before its tip, or the
+  tip itself once a ticket for the block before it could no longer be
+  acknowledged in time (blocks of stake stopped for want of anchors); after the
+  block P of a commitment of the last mainchain block still waiting for its
+  acknowledgement (one ticket committed twice is one anchor: two mainchain
+  blocks within a slot, the second gets the tip; none, if the tip is that P,
+  until a block comes). It does not wait for that acknowledgement: the next
+  mainchain block may come first, and would have no commitment of this chain
+  (on the test network, with 30-second slots and mainchain blocks about a minute
+  apart, a commitment in 62 % of mainchain blocks). Such a ticket's anchor builds
+  no bundle (see Blocks): once the acknowledgement is in, if a bundle could
+  start, the ticket is made again for a block after it, bidding 500 satoshis
+  more, once. A request made as the mainchain moved on is kept (its ticket is
+  for whatever mainchain block it follows). After `stall_seconds` without PoS
+  blocks, it merged mines BMM blocks as the template does; a validator's own
+  anchorer too, for its bid whatever the fees (a BMM block starts blocks of
+  stake again).
 - A leader acknowledges the first committed ticket that its block can carry in
   time (`bad-pos-unanchored`), and puts in the proofs it knows the chain has
   not punished. If the signed block does not pass validation, the slot is lost:
@@ -696,6 +726,7 @@ after every step:
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; a stranger's top-up of a satoshi refused, the owner's taken; an unbond of all paid unbonding_anchors anchors later |
 | `feature_fastblocks_p2p.py` | Peers of the test framework that misbehave: forged signatures sent first to a node catching up, then the honest nodes (it reaches their tip; the honest blocks are not fetched again and again meanwhile); 5000 unsigned siblings of its newest header, and a message padded with more (the peer's budget taken, no more); about 70 unsigned acknowledging headers from deep in the chain, on a validator that knows the sets (`bad-pos-sig`) and on one restarted whose state pruned them (`bad-pos-fork-too-deep`: no new tip, no reorg); 5000 siblings of a deep block; tickets 8 a peer per mainchain block; `fbgettickets` of 17 entries (misbehaving); one proof sent 200 times (kept once, the peer kept) |
 | `feature_fastblocks_fork.py` | A fork whose overtaking block a node has the header of with a forged signature, and cannot check before it connects the fork: it syncs, the leader's signature replacing the forged one |
+| `feature_fastblocks_idle.py` | Validators only, no fees, no `setbmm`, 30-second slots on mock time: an hour and more of blocks of stake and anchors; mainchain blocks in pairs, a commitment in at least 90 % of them, each acknowledged; staking off everywhere, the validators merge mine; restarted, they bid again |
 | `feature_fastblocks_restart.py` | A validator restarted refuses a BMM block 30 minutes ahead as the others do; every validator restarted while a committed ticket waits asks for it and acknowledges it; a validator whose data directory is wiped does not sign a slot it signed again; one killed between signing and relaying (`-posfaultaftersign`) does not sign that slot again |
 | `feature_fastblocks_soak.py` (extended) | 30-second slots (`-posslotseconds=30`), `--duration` minutes of rounds: restarts and kills, partitions, mainchain reorgs, bonds, unbonds, payments, withdrawals; after each, one tip, `pegbalance`, no node down, few failed slots |
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; a BMM block carries a proof (all validators stopped), its payee rewarded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
@@ -985,6 +1016,53 @@ What they found, each fixed with the test that failed before:
   kills, 5 partitions, 2 mainchain reorgs, 18 bonds and unbonds, 10 payments
   and withdrawals): one tip after every round, `pegbalance` on every node, no
   evidence, no failed slot. `pos_cold_hooks` ran 10 minutes without a finding.
+
+### Review of audit 6 (2026-10-13)
+
+`~/skydoge/audit/2026-10-13-audit-6-review-findings.md`, each finding checked
+first; each fix with a test that failed before it.
+
+- A block a node held back (`blk-extension-unknown`: another signature than its
+  header's, which the node cannot check before it connects the chain below) was
+  asked for again only once its parent was connected. When that block is the one
+  that makes a fork overtake, the parent is never connected: the fork's download
+  stalled for good, from every peer, after one peer sent the header with a forged
+  signature. Now no block is held back: it is taken with the header's signature,
+  the other one kept and tried when the block is connected (see "Headers the node
+  cannot check yet"; `block_extension_unknown_taken`, `feature_fastblocks_fork.py`).
+  A block stored with a forged signature (sent whole) that fails when connected is
+  asked for again from the peers that have it (`feature_fastblocks_p2p.py`, which
+  then stalled now and then).
+- `pos-unchecked-low-work` compared what unchecked headers claim with the best
+  header, both of which an attacker sets: a padded message passed it, and an
+  inflated best header turned away an honest node's headers. Now a count of such
+  headers per peer, given back as they are checked (`pos-unchecked-budget`;
+  `unchecked_siblings_not_taken`, `unchecked_headers_checked_give_room`, the p2p
+  test).
+- Checked: no `TMP_` or other in-memory consensus flag is in the code (`grep -rn
+  TMP_ src/` finds only the SHA-256 assembly's macros); the 10-minute limit on
+  block times (`MaxFutureBlockTime`) is read from the state of the tip, cached by
+  the tip's hash only.
+- An idle chain halted: tickets were bid only for blocks with fees (`setbmm`
+  without `always`), and `setbmm` did not outlive a restart; without anchors,
+  blocks of stake stop after `max_unanchored_slots`, and BMM blocks needed fees
+  too. Now a validator's own anchorer bids for every mainchain block whatever the
+  fees, on by default (`-validatoranchorbid`), and merge mines when blocks of
+  stake stall (`feature_fastblocks_idle.py`, which fails with it off).
+- The anchorer waited for its committed ticket's acknowledgement before it made
+  the next: every mainchain block that came before it had no commitment of the
+  chain (62 % on the test network). It bids at once now; consensus lets a ticket
+  anchor a block below the last acknowledgement (at or after the block the last
+  anchor anchored), whose anchor then builds no bundle (`acknowledgements`, unit
+  test; `feature_fastblocks_idle.py`: a commitment in at least 90 % of mainchain
+  blocks that come in pairs, 50 % with the wait put back). Two more found on the
+  way: a ticket made again for the same block and payee was the same ticket,
+  committed twice, one anchor; and a request made as the mainchain moved on was
+  in its mempool, but its ticket was dropped, so its commitment was one nobody
+  could acknowledge.
+- The GUI calls a block of stake that records a BMM commitment a "BMM" block,
+  the states soft, BMM-confirmed and final, and the anchor's pot "BMM reward(s)";
+  the RPCs keep their names.
 
 ## Deviations from the design (phase 5)
 
