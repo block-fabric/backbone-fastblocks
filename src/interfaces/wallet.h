@@ -394,6 +394,8 @@ struct WalletTx
     std::optional<std::string> comment;
     std::optional<std::string> comment_to;
     bool is_coinbase;
+    //! FastBlocks: what each output of a confirmed coinbase pays (Chain::getCoinbaseRoles); empty if not known.
+    std::vector<Chain::CoinbaseRole> txout_coinbase_role;
 
     bool operator<(const WalletTx& a) const { return tx->GetHash() < a.tx->GetHash(); }
 };

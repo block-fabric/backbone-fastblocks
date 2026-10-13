@@ -14,6 +14,7 @@
 #include <common/signmessage.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <interfaces/chain.h>
 #include <interfaces/mining.h>
 #include <kernel/chainparams.h>
 #include <key.h>
@@ -24,6 +25,7 @@
 #include <pos/forkchoice.h>
 #include <pos/header.h>
 #include <pos/hooks.h>
+#include <pos/income.h>
 #include <pos/producer.h>
 #include <pos/protection.h>
 #include <pos/schedule.h>
@@ -2305,6 +2307,7 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
     pos::PosSections sections;
     BOOST_REQUIRE(pos::PosSections::Decode(carrying.vSections, sections));
     BOOST_REQUIRE_EQUAL(sections.evidence.size(), 1U);
+    const uint256 carrying_hash{carrying.GetHash()};
     const CAmount penalty{bond / 10};
     const auto record{Validator(offender)};
     BOOST_REQUIRE(record);
@@ -2341,6 +2344,29 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
     BOOST_CHECK(Pays(bmm, CTxOut{due + release, CScript() << OP_TRUE}));
     MineBmm(bmm);
     BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    // What a wallet shows of them (not consensus): the reward to the reporter, the pot to the payee;
+    // the first output of the block of stake that carried the proof, its producer's share.
+    {
+        using Role = interfaces::Chain::CoinbaseRole;
+        const auto chain{interfaces::MakeChain(m_node)};
+        const auto roles{chain->getCoinbaseRoles(bmm.GetHash())};
+        const auto& vout{bmm.vtx[0]->vout};
+        BOOST_REQUIRE_EQUAL(roles.size(), vout.size());
+        size_t rewards{0}, pots{0};
+        for (size_t i{0}; i < vout.size(); ++i) {
+            const Role expected{i > 0 && vout[i] == CTxOut{penalty / 8, reporter} ? Role::REPORTER :
+                                i > 0 && vout[i] == CTxOut{due + release, CScript() << OP_TRUE} ? Role::ANCHOR : Role::OTHER};
+            BOOST_CHECK(roles[i] == expected);
+            rewards += roles[i] == Role::REPORTER;
+            pots += roles[i] == Role::ANCHOR;
+        }
+        BOOST_CHECK_EQUAL(rewards, 1U);
+        BOOST_CHECK_EQUAL(pots, 1U);
+        const auto carried{chain->getCoinbaseRoles(carrying_hash)};
+        BOOST_REQUIRE(!carried.empty());
+        BOOST_CHECK(carried[0] == Role::STAKED);
+        BOOST_CHECK(chain->getCoinbaseRoles(uint256::ONE).empty());
+    }
     BOOST_CHECK_EQUAL(Stake().pot_reserve, reserve - release);
     // The sets made from then on leave the offender out.
     const auto set{WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), pos::EpochOf(pos::SlotOf(Tip()->nTime, Pos()), Pos()) + 2))};
@@ -2353,6 +2379,37 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
     Take(late_a);
     for (int64_t i{0}; i <= Pos().evidence_window_anchors; ++i) MineBmm(BmmBlock(/*use_mempool=*/false));
     BOOST_CHECK_EQUAL(Check(WithEvidence(60, {{.a = late_a, .b = late_b}})), "bad-pos-evidence-old");
+}
+
+BOOST_AUTO_TEST_CASE(coinbase_roles)
+{
+    // A merged mined block that pays, after its first output (the payee's): a deposit to the payee,
+    // the pot to the payee, an unbond, a reward to the payee and one to another reporter, a refund.
+    const CScript payee{CScript() << OP_TRUE};
+    const CScript other{CScript() << OP_2};
+    const CScript owner{CScript() << OP_3};
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vout = {CTxOut{0, payee}, CTxOut{5, payee}, CTxOut{7, payee}, CTxOut{3, owner}, CTxOut{1, payee}, CTxOut{2, other}, CTxOut{4, owner},
+                     CTxOut{0, CScript() << OP_RETURN}};
+    CBlock bmm;
+    bmm.vtx.push_back(MakeTransactionRef(coinbase));
+    BOOST_CHECK(pos::IsAnchorBlock(bmm));
+    BOOST_CHECK(pos::AnchorPayee(bmm) == payee);
+    using Role = pos::CoinbaseRole;
+    BOOST_CHECK(pos::CoinbaseRoles(bmm, {payee, other}) == (std::vector<Role>{Role::OTHER, Role::OTHER, Role::ANCHOR, Role::OTHER, Role::REPORTER, Role::REPORTER, Role::OTHER, Role::OTHER}));
+    // No rewards owed: the last payout to the payee is the pot.
+    BOOST_CHECK(pos::CoinbaseRoles(bmm, {}) == (std::vector<Role>{Role::OTHER, Role::OTHER, Role::OTHER, Role::OTHER, Role::ANCHOR, Role::OTHER, Role::OTHER, Role::OTHER}));
+    // Proofs in its coinbase: one reward each, to its first output's script.
+    CMutableTransaction with_proof{coinbase};
+    CBlockHeader a, b;
+    a.nTime = 1;
+    b.nTime = 2;
+    with_proof.vout.emplace_back(0, pos::EvidenceScript({.a = a, .b = b}));
+    CBlock carrying;
+    carrying.vtx.push_back(MakeTransactionRef(with_proof));
+    BOOST_CHECK(pos::ReporterScripts(carrying, std::nullopt) == std::vector<CScript>{payee});
+    BOOST_CHECK(pos::ReporterScripts(bmm, std::nullopt).empty());
 }
 
 BOOST_FIXTURE_TEST_CASE(leader_checked_when_connected, FastBlocksSetup)

@@ -392,6 +392,19 @@ static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, int nM
                 entry.pushKV("label", label);
             }
             entry.pushKV("vout", r.vout);
+            if (wtx.IsCoinBase() && r.vout >= 0) {
+                if (const auto* conf{wtx.state<TxStateConfirmed>()}) {
+                    const auto roles{wallet.chain().getCoinbaseRoles(conf->confirmed_block_hash)};
+                    if (static_cast<size_t>(r.vout) < roles.size()) {
+                        switch (roles[r.vout]) {
+                        case interfaces::Chain::CoinbaseRole::STAKED: entry.pushKV("income", "staked"); break;
+                        case interfaces::Chain::CoinbaseRole::ANCHOR: entry.pushKV("income", "anchor"); break;
+                        case interfaces::Chain::CoinbaseRole::REPORTER: entry.pushKV("income", "reporter"); break;
+                        case interfaces::Chain::CoinbaseRole::OTHER: break;
+                        }
+                    }
+                }
+            }
             entry.pushKV("abandoned", wtx.isAbandoned());
             if (fLong)
                 WalletTxToJSON(wallet, wtx, entry);
@@ -474,6 +487,7 @@ RPCMethod listtransactions()
                                 "for all other categories"},
                             {RPCResult::Type::STR, "label", /*optional=*/true, "A comment for the address/transaction, if any"},
                             {RPCResult::Type::NUM, "vout", "the vout value"},
+                            {RPCResult::Type::STR, "income", /*optional=*/true, "FastBlocks, a coinbase output: \"staked\" (the producer's share of a block of stake), \"anchor\" (the pot paid to an anchor's payee), \"reporter\" (a reward for a proof that a leader signed twice)"},
                             {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the\n"
                                  "'send' category of transactions."},
                         },
@@ -563,6 +577,7 @@ static std::vector<RPCResult> ListSinceBlockTxFields()
             {RPCResult::Type::STR_AMOUNT, "amount", "The amount in " + CURRENCY_UNIT + ". This is negative for the 'send' category, and is positive\n"
                 "for all other categories"},
             {RPCResult::Type::NUM, "vout", "the vout value"},
+            {RPCResult::Type::STR, "income", /*optional=*/true, "FastBlocks, a coinbase output: \"staked\" (the producer's share of a block of stake), \"anchor\" (the pot paid to an anchor's payee), \"reporter\" (a reward for a proof that a leader signed twice)"},
             {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the\n"
                  "'send' category of transactions."},
         },
@@ -732,6 +747,7 @@ RPCMethod gettransaction()
                                 {RPCResult::Type::STR_AMOUNT, "amount", "The amount in " + CURRENCY_UNIT},
                                 {RPCResult::Type::STR, "label", /*optional=*/true, "A comment for the address/transaction, if any"},
                                 {RPCResult::Type::NUM, "vout", "the vout value"},
+                                {RPCResult::Type::STR, "income", /*optional=*/true, "FastBlocks, a coinbase output: \"staked\" (the producer's share of a block of stake), \"anchor\" (the pot paid to an anchor's payee), \"reporter\" (a reward for a proof that a leader signed twice)"},
                                 {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the \n"
                                     "'send' category of transactions."},
                                 {RPCResult::Type::BOOL, "abandoned", "'true' if the transaction has been abandoned (inputs are respendable)."},

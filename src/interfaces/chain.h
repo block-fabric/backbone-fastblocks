@@ -348,6 +348,11 @@ public:
     virtual std::optional<Staking> getStaking() { return std::nullopt; }
     //! FastBlocks: the proof of possession of a validator key this node's block producer holds, for a bond owned by `owner`.
     virtual std::optional<std::array<unsigned char, 64>> signBondPop(const uint256& pubkey, const uint160& owner) { return std::nullopt; }
+    //! FastBlocks: what each output of a block's coinbase pays (pos::CoinbaseRole, not consensus): the
+    //! producer's share of a block of stake, the pot paid to an anchor's payee, a reward for a proof.
+    //! Nothing if the block is not known, or on a chain without blocks of stake.
+    enum class CoinbaseRole : uint8_t { OTHER, STAKED, ANCHOR, REPORTER };
+    virtual std::vector<CoinbaseRole> getCoinbaseRoles(const uint256& block_hash) { return {}; }
 
     //! Check if shutdown requested.
     virtual bool shutdownRequested() = 0;

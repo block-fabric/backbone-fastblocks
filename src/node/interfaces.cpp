@@ -52,6 +52,7 @@
 #include <policy/rbf.h>
 #include <pos/finality.h>
 #include <pos/hooks.h>
+#include <pos/income.h>
 #include <pos/producer.h>
 #include <pos/staking.h>
 #include <primitives/block.h>
@@ -83,6 +84,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -563,6 +565,18 @@ public:
     const CRPCCommand* m_wrapped_command;
 };
 
+//! FastBlocks: the roles of the coinbase outputs of the blocks asked for lately (a block's never change).
+struct CoinbaseRoleCache {
+    static constexpr size_t MAX_BLOCKS{10000};
+    Mutex mutex;
+    std::map<uint256, std::vector<Chain::CoinbaseRole>> roles GUARDED_BY(mutex);
+    std::deque<uint256> order GUARDED_BY(mutex);
+};
+CoinbaseRoleCache g_coinbase_roles;
+
+//! The farthest back a block's roles look for the anchor before it.
+constexpr int MAX_ANCHOR_DISTANCE{10000};
+
 class ChainImpl : public Chain
 {
 public:
@@ -888,6 +902,60 @@ public:
         const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
         if (!hooks || !hooks->GetProducer()) return std::nullopt;
         return hooks->GetProducer()->SignBondPop(pubkey, owner);
+    }
+    std::vector<CoinbaseRole> getCoinbaseRoles(const uint256& block_hash) override
+    {
+        const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
+        if (!hooks) return {};
+        {
+            LOCK(g_coinbase_roles.mutex);
+            if (const auto found{g_coinbase_roles.roles.find(block_hash)}; found != g_coinbase_roles.roles.end()) return found->second;
+        }
+        const node::BlockManager& blockman{chainman().m_blockman};
+        const auto read{[&](const CBlockIndex& index, CBlock& block, std::optional<uint256>& proposer) {
+            if (!blockman.ReadBlock(block, index)) return false;
+            proposer.reset();
+            if (pos::IsPosHeader(block) && index.pprev) {
+                const auto leader{WITH_LOCK(::cs_main, return hooks->LeaderOf(*index.pprev, pos::SlotOf(block.nTime, hooks->Params())))};
+                if (leader.status == pos::FastBlocksHooks::LeaderStatus::OK) proposer = leader.pubkey;
+            }
+            return true;
+        }};
+        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupBlockIndex(block_hash))};
+        CBlock block;
+        std::optional<uint256> proposer;
+        if (!index || index->nHeight == 0 || !read(*index, block, proposer)) return {};
+        // An anchor pays the rewards for the proofs of the blocks since the anchor before it, that one included.
+        std::vector<CScript> reporters;
+        if (pos::IsAnchorBlock(block)) {
+            int distance{0};
+            for (const CBlockIndex* earlier{index->pprev}; earlier && earlier->nHeight > 0 && distance < MAX_ANCHOR_DISTANCE; earlier = earlier->pprev, ++distance) {
+                CBlock before;
+                std::optional<uint256> before_proposer;
+                if (!read(*earlier, before, before_proposer)) break;
+                const auto scripts{pos::ReporterScripts(before, before_proposer)};
+                reporters.insert(reporters.end(), scripts.begin(), scripts.end());
+                if (pos::IsAnchorBlock(before)) break;
+            }
+        }
+        std::vector<CoinbaseRole> roles;
+        for (const pos::CoinbaseRole role : pos::CoinbaseRoles(block, reporters)) {
+            switch (role) {
+            case pos::CoinbaseRole::OTHER: roles.push_back(CoinbaseRole::OTHER); break;
+            case pos::CoinbaseRole::PRODUCER: roles.push_back(CoinbaseRole::STAKED); break;
+            case pos::CoinbaseRole::ANCHOR: roles.push_back(CoinbaseRole::ANCHOR); break;
+            case pos::CoinbaseRole::REPORTER: roles.push_back(CoinbaseRole::REPORTER); break;
+            }
+        }
+        LOCK(g_coinbase_roles.mutex);
+        if (g_coinbase_roles.roles.emplace(block_hash, roles).second) {
+            g_coinbase_roles.order.push_back(block_hash);
+            while (g_coinbase_roles.order.size() > CoinbaseRoleCache::MAX_BLOCKS) {
+                g_coinbase_roles.roles.erase(g_coinbase_roles.order.front());
+                g_coinbase_roles.order.pop_front();
+            }
+        }
+        return roles;
     }
     bool shutdownRequested() override { return ShutdownRequested(m_node); }
     void initMessage(const std::string& message) override { ::uiInterface.InitMessage(message); }

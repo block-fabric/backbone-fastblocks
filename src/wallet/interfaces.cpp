@@ -82,6 +82,9 @@ WalletTx MakeWalletTx(CWallet& wallet, const CWalletTx& wtx)
     result.comment = wtx.m_comment;
     result.comment_to = wtx.m_comment_to;
     result.is_coinbase = wtx.IsCoinBase();
+    if (result.is_coinbase) {
+        if (const auto* conf{wtx.state<TxStateConfirmed>()}) result.txout_coinbase_role = wallet.chain().getCoinbaseRoles(conf->confirmed_block_hash);
+    }
     return result;
 }
 
