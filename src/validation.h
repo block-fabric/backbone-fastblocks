@@ -1221,6 +1221,14 @@ public:
      */
     void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
+     * Try again the waiting headers the record now lets through (sidechain::ChainHooks::WaitingReady), in
+     * the order the hooks give. A header stays waiting, with the peer that sent it, until it is taken in
+     * or turned away for good: one still waiting for its reason, or whose parent is still to come (one
+     * the hooks put after it, or that waits too), is kept.
+     * @return the headers taken in, each with the peer that sent it (-1 if none), in the order taken
+     */
+    std::vector<std::pair<const CBlockIndex*, int64_t>> RetryBmmWaiting() LOCKS_EXCLUDED(::cs_main);
+    /**
      * Other extensions than their header's that blocks came with, which the node could not check when
      * they came (ChainHooks::CheckOtherExtension, UNKNOWN: a sidechain that cannot tell a signer
      * before it connects the chain below), by block and by source (the peer; -1 for none). The block

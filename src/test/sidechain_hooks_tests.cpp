@@ -30,6 +30,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -171,6 +172,14 @@ struct TxRulesHooks : sidechain::ChainHooks {
 /** Hooks that punish peers for headers of or on blocks that failed against the record, as Bitcoin. */
 struct NoPardonHooks : sidechain::ChainHooks {
     bool PardonRecordFailures() const override { return false; }
+};
+
+/**
+ * Hooks that let every waiting header be tried, all with the same key: they are then tried in the order
+ * of their hashes, a child before its parent as often as not.
+ */
+struct SameKeyHooks : sidechain::ChainHooks {
+    std::optional<int64_t> WaitingReady(const CBlockHeader&, const sidechain::Mainchain&) const override { return 0; }
 };
 
 /** Hooks that let blocks be at most a minute ahead of the clock. */
@@ -1026,6 +1035,63 @@ BOOST_FIXTURE_TEST_CASE(block_extension_unknown_taken, SidechainSetup)
     BOOST_CHECK(!WITH_LOCK(::cs_main, return chainman.m_other_extensions.contains(honest.GetHash())));
 }
 
+BOOST_FIXTURE_TEST_CASE(header_extension_replaced, SidechainSetup)
+{
+    // A header the node took with a signature it could not check then (forged), and that comes again
+    // with a valid one once the node can tell: the valid one replaces it (CheckOtherExtension REPLACE).
+    // Without the hook (INVALID, the template's), the node keeps the one it has.
+    auto owned{std::make_unique<LateCheckedHooks>()};
+    LateCheckedHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3d};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    CBlock honest{Build()};
+    honest.nVersion |= BLOCK_EXTENSION_BIT;
+    honest.ext.hashSections.SetNull();
+    honest.ext.sig.fill(5);
+    CBlock forged{honest};
+    forged.ext.sig.fill(9);
+    BlockValidationState state;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{forged}}, /*min_pow_checked=*/true, state), state.ToString());
+    const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(honest.GetHash()))};
+    BOOST_REQUIRE(index);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return *index->m_ext == forged.ext));
+    hooks.known = true;
+    BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders({{honest}}, /*min_pow_checked=*/true, state), state.ToString());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return *index->m_ext == honest.ext));
+}
+
+/** Hooks that note where the headers they are shown come from. */
+struct SourceHooks : sidechain::ChainHooks {
+    mutable std::vector<int64_t> sources;
+    mutable int open{0};
+    void BeginHeaders(std::span<const CBlockHeader>, int64_t source) const override
+    {
+        sources.push_back(source);
+        ++open;
+    }
+    void EndHeaders() const override { --open; }
+};
+
+BOOST_FIXTURE_TEST_CASE(headers_named_by_source, SidechainSetup)
+{
+    // The hooks are shown each message's headers, and where they come from: the peer, -1 for none.
+    auto owned{std::make_unique<SourceHooks>()};
+    const SourceHooks& hooks{*owned};
+    InstallHooks installed{std::move(owned)};
+    ChainstateManager& chainman{*m_node.chainman};
+    const CBlock block{Build()};
+    Commit(block.GetHash());
+    BlockValidationState state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/5));
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders({{block}}, /*min_pow_checked=*/true, state));
+    BOOST_REQUIRE(chainman.ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, nullptr, /*source=*/6));
+    BOOST_CHECK(hooks.sources == (std::vector<int64_t>{5, -1, 6}));
+    BOOST_CHECK_EQUAL(hooks.open, 0);
+}
+
 BOOST_FIXTURE_TEST_CASE(block_extension_equivalent, SidechainSetup)
 {
     // A chain whose signer can sign one block twice: a block for a header the node has, with another
@@ -1142,6 +1208,94 @@ BOOST_FIXTURE_TEST_CASE(record_failures_pardoned, SidechainSetup)
     BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(invalidated, failed, /*by_record=*/false));
     BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
     BOOST_CHECK(result(first).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    // The block on it then loses its commitment as well, and is noted as failed against the record:
+    // what fails it is still the operator's (the lowest failed block's), which the record does not take
+    // back. Punishable all the same, and not checked again when the commitment comes back.
+    CBlockIndex* above{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(second.GetHash()))};
+    m_node.chainman->ActiveChainstate().InvalidateBlock(invalidated, above, /*by_record=*/true);
+    BOOST_REQUIRE(Record().GetFailure(second.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+    BOOST_CHECK(Record().GetFailure(first.GetHash()) == sidechain::Mainchain::Failure::MANUAL);
+    BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
+    BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->ActiveChainstate().ReconsiderRecordFailure(above)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return above->nStatus & BLOCK_FAILED_VALID));
+    // Below it, a block that failed with no note, as one that broke a rule of the chain: the same.
+    Record().ForgetFailure(first.GetHash());
+    BOOST_CHECK(result(next).first == BlockValidationResult::BLOCK_INVALID_PREV);
+    BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return m_node.chainman->ActiveChainstate().ReconsiderRecordFailure(above)));
+}
+
+BOOST_FIXTURE_TEST_CASE(waiting_headers_keep_their_peers, SidechainSetup)
+{
+    // Headers wait for their commitments; the hooks say when, and in what order, to try them again.
+    // None is lost on the way: not a child tried before its parent (the hooks give both the same key),
+    // nor one still waiting, which keeps the peer that sent it (its block is fetched from that peer).
+    InstallHooks installed{std::make_unique<SameKeyHooks>()};
+    ChainstateManager& chainman{*m_node.chainman};
+    auto& waiting{chainman.m_bmm_waiting};
+    WITH_LOCK(::cs_main, waiting.clear());
+    // A header on `prev`; if `before_parent`, one that the store of waiting headers, ordered by hash,
+    // puts before its parent.
+    const auto on{[&](const CBlockHeader& prev, uint32_t salt, bool before_parent = false) {
+        CBlockHeader header;
+        header.nVersion = 0x20000000;
+        header.hashPrevBlock = prev.GetHash();
+        header.hashMerkleRoot = uint256{static_cast<uint8_t>(salt)};
+        header.nTime = prev.nTime + 1;
+        header.nBits = prev.nBits;
+        while (!CheckProofOfWork(header.GetHash(), header.nBits, chainman.GetConsensus()) || (before_parent && !(header.GetHash() < header.hashPrevBlock))) ++header.nNonce;
+        return header;
+    }};
+    // A chain of headers, each sent by its own peer, waiting in the reverse of the chain's order.
+    std::vector<CBlockHeader> chain{CBlockHeader{Build()}};
+    while (chain.size() < 8) chain.push_back(on(chain.back(), chain.size(), /*before_parent=*/true));
+    // A run of headers committed to after the first, which is not: they wait too, and a header whose
+    // parent nobody sent goes.
+    const CBlockHeader uncommitted{on(chain.back(), 0x80)};
+    const CBlockHeader after{on(uncommitted, 0x81)};
+    CBlockHeader stray{on(chain.back(), 0x82)};
+    stray.hashPrevBlock = uint256{0x99};
+    while (!CheckProofOfWork(stray.GetHash(), stray.nBits, chainman.GetConsensus())) ++stray.nNonce;
+    {
+        LOCK(::cs_main);
+        for (size_t i{0}; i < chain.size(); ++i) chainman.AddBmmWaiting(chain[i], /*peer=*/10 + i);
+        chainman.AddBmmWaiting(uncommitted, /*peer=*/30);
+        chainman.AddBmmWaiting(after, /*peer=*/30);
+        chainman.AddBmmWaiting(stray, /*peer=*/31);
+    }
+    for (const CBlockHeader& header : chain) Commit(header.GetHash());
+
+    const auto taken{chainman.RetryBmmWaiting()};
+    BOOST_REQUIRE_EQUAL(taken.size(), chain.size());
+    for (size_t i{0}; i < chain.size(); ++i) {
+        // Parents first, each with its peer.
+        BOOST_CHECK(taken[i].first->GetBlockHash() == chain[i].GetHash());
+        BOOST_CHECK_EQUAL(taken[i].second, int64_t(10 + i));
+    }
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(waiting.size(), 2U);
+        // Still waiting, from the peer that sent it, and so is the header on it.
+        BOOST_REQUIRE(waiting.contains(uncommitted.GetHash()));
+        BOOST_CHECK_EQUAL(waiting.at(uncommitted.GetHash()).peer, 30);
+        BOOST_REQUIRE(waiting.contains(after.GetHash()));
+        BOOST_CHECK_EQUAL(waiting.at(after.GetHash()).peer, 30);
+        BOOST_CHECK(!waiting.contains(stray.GetHash()));
+    }
+    // Tried again and again, the same.
+    BOOST_CHECK(chainman.RetryBmmWaiting().empty());
+    BOOST_CHECK(WITH_LOCK(::cs_main, return waiting.size() == 2 && waiting.at(uncommitted.GetHash()).peer == 30));
+    // Once committed to, both come in, from their peer.
+    Commit(uncommitted.GetHash());
+    Commit(after.GetHash());
+    const auto last{chainman.RetryBmmWaiting()};
+    BOOST_REQUIRE_EQUAL(last.size(), 2U);
+    BOOST_CHECK(last[0].first->GetBlockHash() == uncommitted.GetHash());
+    BOOST_CHECK(last[1].first->GetBlockHash() == after.GetHash());
+    BOOST_CHECK_EQUAL(last[0].second, 30);
+    BOOST_CHECK_EQUAL(last[1].second, 30);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return waiting.empty()));
 }
 
 BOOST_AUTO_TEST_CASE(peg_height)

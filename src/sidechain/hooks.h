@@ -119,7 +119,7 @@ public:
      * compact block's header, a waiting header taken in; ProcessNewBlock: a block's), and where they
      * come from: the peer, -1 for none (the node itself, its operator, its disk). Before CheckHeader
      * is called for each of them; EndHeaders after. A chain may count what each peer makes it take
-     * in (FastBlocks: the headers it cannot check yet). Called with cs_main held.
+     * in (the headers it cannot check yet, say). Called with cs_main held.
      */
     virtual void BeginHeaders(std::span<const CBlockHeader> headers, int64_t source) const {}
     virtual void EndHeaders() const {}
