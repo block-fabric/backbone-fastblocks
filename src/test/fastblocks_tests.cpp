@@ -602,6 +602,14 @@ BOOST_AUTO_TEST_CASE(network_parameters)
     }
     BOOST_CHECK_EQUAL(CChainParams::Main()->GetConsensus().pos.stall_seconds, 30 * 60);
     BOOST_CHECK_EQUAL(Consensus::PosParams{}.slot_seconds * Consensus::PosParams{}.max_unanchored_slots, 60 * 60);
+    // Regtest: one-second slots, stalls of 30 slots; -posslotseconds (a soak test) sets the slot.
+    CChainParams::RegTestOptions options;
+    options.sidechain_slot = 5;
+    BOOST_CHECK_EQUAL(CChainParams::RegTest(options)->GetConsensus().pos.slot_seconds, 1);
+    BOOST_CHECK_EQUAL(CChainParams::RegTest(options)->GetConsensus().pos.stall_seconds, 30);
+    options.pos_slot_seconds = 30;
+    BOOST_CHECK_EQUAL(CChainParams::RegTest(options)->GetConsensus().pos.slot_seconds, 30);
+    BOOST_CHECK_EQUAL(CChainParams::RegTest(options)->GetConsensus().pos.stall_seconds, 30 * 30);
 }
 
 BOOST_AUTO_TEST_CASE(leader_schedule)

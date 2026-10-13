@@ -167,6 +167,8 @@ public:
         std::optional<int64_t> pos_seed_lookahead{};
         //! FastBlocks: how many anchors make a block final (-posfinalanchors; not consensus).
         std::optional<int> pos_final_anchors{};
+        //! FastBlocks: the length of a slot in seconds (-posslotseconds; 1 by default), and of a stall (30 slots).
+        std::optional<int64_t> pos_slot_seconds{};
     };
 
     struct MainNetOptions {

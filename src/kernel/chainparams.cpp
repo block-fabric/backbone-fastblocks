@@ -614,12 +614,13 @@ public:
             consensus.coinbase_maturity = 0;
             // Blocks of stake with the validators given (-posvalidators): a slot every second, so that
             // tests are quick. Without validators, the chain is merged mined only, as the template's.
-            consensus.pos.slot_seconds = 1;
+            // (-posslotseconds: the slots of the real networks, for a soak test.)
+            consensus.pos.slot_seconds = opts.pos_slot_seconds.value_or(1);
             consensus.pos.slots_per_epoch = 20;
             consensus.pos.min_active_validators = 1;
             consensus.pos.max_validators = 8;
             consensus.pos.max_unanchored_slots = 100;
-            consensus.pos.stall_seconds = 30;
+            consensus.pos.stall_seconds = 30 * consensus.pos.slot_seconds;
             consensus.pos.final_anchors = opts.pos_final_anchors.value_or(1);
             consensus.pos.genesis_validators = opts.pos_validators;
             consensus.pos.min_stake = COIN / 10000;

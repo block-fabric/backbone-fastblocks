@@ -141,6 +141,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         if (*final_anchors < 1 || *final_anchors > 100) throw std::runtime_error("Invalid -posfinalanchors");
         options.pos_final_anchors = static_cast<int>(*final_anchors);
     }
+    if (const auto slot_seconds{args.GetIntArg("-posslotseconds")}) {
+        if (*slot_seconds < 1 || *slot_seconds > 600) throw std::runtime_error("Invalid -posslotseconds");
+        options.pos_slot_seconds = *slot_seconds;
+    }
     if (const auto lookahead{args.GetIntArg("-posseedlookahead")}) {
         if (*lookahead < 0 || *lookahead > 365 * 24 * 60 * 60) throw std::runtime_error("Invalid -posseedlookahead");
         options.pos_seed_lookahead = *lookahead;
