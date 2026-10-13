@@ -10,6 +10,7 @@
 #include <pos/schedule.h>
 #include <pos/staking.h>
 #include <sidechain/hooks.h>
+#include <consensus/amount.h>
 #include <kernel/cs_main.h>
 #include <sidechain/store.h>
 #include <sync.h>
@@ -394,7 +395,25 @@ private:
     mutable uint256 m_ticket_relayed_for GUARDED_BY(m_anchor_mutex);
     //! The mainchain block for which missing tickets were last asked for.
     mutable uint256 m_tickets_asked_for GUARDED_BY(m_anchor_mutex);
+    //! The bid of this node's anchorer for the next mainchain block, the one after `main_tip`.
+    struct Bid {
+        uint256 main_tip;
+        CAmount offer{0};
+        //! Whether its ticket's block is at or after the anchor point its acknowledgement will follow (its anchor may build a bundle).
+        bool after_anchor_point{false};
+        //! Whether it was made again (once) for a block after the anchor point.
+        bool again{false};
+        //! Whether a ticket was made at all (none while there was no block to anchor after the waiting commitment's).
+        bool made{false};
+    };
+    mutable Bid m_bid GUARDED_BY(m_anchor_mutex);
+    //! A validator's own anchorer (-validatoranchorbid): the payee (the producer's payout) and the bid.
+    mutable std::optional<CScript> m_validator_payee GUARDED_BY(m_anchor_mutex);
+    mutable CAmount m_validator_bid GUARDED_BY(m_anchor_mutex){0};
 };
+
+/** What a validator's anchorer bids for a commitment by default, in satoshis of the mainchain (not on regtest: 0, off). */
+inline constexpr CAmount DEFAULT_VALIDATOR_ANCHOR_BID{1000};
 
 /** The FastBlocks hooks installed, if they are. */
 FastBlocksHooks* InstalledHooks();

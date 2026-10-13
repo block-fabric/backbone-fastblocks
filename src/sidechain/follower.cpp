@@ -769,7 +769,7 @@ std::optional<std::string> Follower::RequestCommitment(const uint256& commitment
     try {
         const UniValue result{m_client.Call("createbmmrequest", Params({static_cast<uint64_t>(m_node.chainman->GetConsensus().sidechain.slot), commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
         // The request names the mainchain block it has to follow; it has to be the one the commitment was made for.
-        if (Hash256(result["prevblockhash"]) != main_prev_hash) {
+        if (!main_prev_hash.IsNull() && Hash256(result["prevblockhash"]) != main_prev_hash) {
             error = "The mainchain moved while the request was made";
             return std::nullopt;
         }
@@ -820,6 +820,19 @@ void Follower::Mine()
         LOCK(m_mutex);
         mining = m_mining;
         settings = m_mining_settings;
+    }
+    Mine(mining, settings);
+}
+
+void Follower::MineWith(const Mining& mining)
+{
+    Mine(mining, WITH_LOCK(m_mutex, return m_mining_settings));
+}
+
+void Follower::Mine(const Mining& mining, uint64_t settings)
+{
+    {
+        LOCK(m_mutex);
         if (!mining.enabled) return;
         // One request per mainchain block.
         if (m_mining_requested_for == m_node.chainman->m_mainchain->TipHash() && !m_mining_requested_for.IsNull()) return;

@@ -5,6 +5,7 @@
 #include <pos/hooks.h>
 
 #include <arith_uint256.h>
+#include <common/args.h>
 #include <chain.h>
 #include <consensus/validation.h>
 #include <kernel/chainparams.h>
@@ -19,7 +20,9 @@
 #include <sidechain/state.h>
 #include <sidechain/store.h>
 #include <streams.h>
+#include <util/chaintype.h>
 #include <util/strencodings.h>
+#include <util/moneystr.h>
 #include <util/time.h>
 #include <validation.h>
 
@@ -1410,44 +1413,111 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
         tip = chainman->ActiveChain().Tip();
         fast = FAST_STATE.Get(chainman->ActiveChainstate().SideState().View());
     }
+    // Who bids: the merged miner of this node (setbmm), or else a validator's own anchorer
+    // (-validatoranchorbid, on by default for validators): anchors must not wait for fees, nor for an
+    // operator, or an idle chain halts (blocks of stake stop at max_unanchored_slots).
+    const auto validator{ValidatorAnchoring()};
     // No PoS blocks for a while (or none at all on this chain, or no active validator set): merged mined
-    // blocks, as the template's.
-    if (Stalled(fast, main_block->time, PosActiveNow())) return false;
-    // Otherwise anchors: a ticket per mainchain block, for the merged miner of this node.
-    if (!mining.enabled) return true;
-    {
-        LOCK(m_anchor_mutex);
-        if (m_ticket_requested_for == main_tip) return true;
+    // blocks, as the template's -- by a validator too, for its bid whatever the fees (a BMM block
+    // starts blocks of stake again).
+    if (Stalled(fast, main_block->time, PosActiveNow())) {
+        if (mining.enabled || !validator) return false;
+        sidechain::Follower::Mining own;
+        own.enabled = true;
+        own.coinbase_script = validator->first;
+        own.always = true;
+        own.amount = validator->second;
+        follower.MineWith(own);
+        return true;
     }
-    // A ticket of the last mainchain block is acknowledged first: the next one must anchor that
-    // acknowledgement or a block after it. Until then this node's ticket goes to its peers again, once
-    // per mainchain block, in case the leaders lost it. (Not a ticket that cannot be acknowledged any
-    // more, as one made before blocks of stake stopped for want of anchors: waiting for it would
-    // wait for ever.)
+    // Otherwise anchors: a ticket per mainchain block.
+    if (!mining.enabled && !validator) return true;
+    const CScript payee{mining.enabled ? mining.coinbase_script : validator->first};
+    if (!IsValidPayee(payee)) return true;
     const int64_t slot{SlotOf(TicksSinceEpoch<std::chrono::seconds>(NodeClock::now()), m_params)};
-    if (const auto last{record.BmmAt(main_height)}; last && fast.last_main_height < main_height) {
-        const auto ticket{GetTicket(*last)};
-        if (ticket && WITH_LOCK(::cs_main, return Acknowledgeable(*ticket, *tip, fast, slot + 1))) {
+    // A commitment of the last mainchain block not acknowledged yet. If it is this node's ticket, it goes
+    // to the peers again, once per mainchain block, in case the leaders lost it.
+    const bool pending{record.BmmAt(main_height) && fast.last_main_height < main_height};
+    if (pending) {
+        const uint256 last{*record.BmmAt(main_height)};
+        const auto ticket{GetTicket(last)};
+        if (ticket && WITH_LOCK(m_tickets_mutex, return m_own_tickets.contains(last))) {
             LOCK(m_anchor_mutex);
-            if (m_ticket_relayed_for != main_tip && WITH_LOCK(m_tickets_mutex, return m_own_tickets.contains(*last))) {
+            if (m_ticket_relayed_for != main_tip) {
                 m_ticket_relayed_for = main_tip;
                 RelayTicket(*ticket);
             }
+        }
+    }
+    // A ticket for the next mainchain block, at once: not after the acknowledgement of the last one,
+    // which may come after the mainchain's next block (then that block had no commitment of this
+    // chain). Its block must be at or after the last block anchored; while a commitment waits for its
+    // acknowledgement, below it, and its anchor builds no bundle (AckPegStep). So once that
+    // acknowledgement is in, if a bundle could start, the ticket is made again for a block after it,
+    // bidding a little more, once.
+    bool again{false};
+    CAmount last_offer{0};
+    {
+        LOCK(m_anchor_mutex);
+        // (No ticket yet, for want of a block to anchor after the waiting commitment's: tried again
+        // at each round, as blocks come.)
+        if (m_bid.main_tip == main_tip && m_bid.made) {
+            if (pending || m_bid.after_anchor_point || m_bid.again) return true;
+            again = true;
+            last_offer = m_bid.offer;
+        }
+    }
+    if (again) {
+        const bool bundle{WITH_LOCK(::cs_main, return chainman->ActiveChainstate().SideState().NextBundle(tip->nHeight + 1, tip->GetBlockHash(), chainman->GetConsensus().sidechain).has_value())};
+        if (!bundle) {
+            LOCK(m_anchor_mutex);
+            m_bid.again = true;
             return true;
         }
     }
 
     AnchorTicket ticket;
-    ticket.anchored = WITH_LOCK(::cs_main, return TicketTarget(*tip, fast, slot)->GetBlockHash());
-    ticket.payee = mining.coinbase_script;
-    if (!IsValidPayee(ticket.payee)) return true;
-    // Bid what the pot will pay, but the operator's share, or what the operator said (for tests).
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* target{TicketTarget(*tip, fast, slot, /*after_anchor_point=*/!pending)};
+        // After the block the waiting commitment's ticket anchors, if this node knows it: anchors are
+        // acknowledged in the order of their commitments, each at or after the block the one before
+        // anchored -- and one ticket committed twice is one anchor (the second commitment is
+        // skipped). Two mainchain blocks within a slot: the tip, the second time.
+        if (const auto waiting{pending ? GetTicket(*record.BmmAt(main_height)) : std::nullopt}) {
+            const CBlockIndex* before{chainman->m_blockman.LookupBlockIndex(waiting->anchored)};
+            if (before && target->nHeight <= before->nHeight) target = tip;
+            if (before && target->nHeight <= before->nHeight) {
+                LOCK(m_anchor_mutex);
+                m_bid = Bid{.main_tip = main_tip, .made = false};
+                return true;
+            }
+        }
+        ticket.anchored = target->GetBlockHash();
+    }
+    ticket.payee = payee;
+    // Bid what the pot will pay, but the operator's share, or what the operator said (for tests); a
+    // validator at least its own bid.
     const int64_t expected{WITH_LOCK(::cs_main, return PotAccruedAt(chainman->ActiveChainstate().SideState().View(),
                                                                     chainman->m_blockman.LookupBlockIndex(ticket.anchored)->nHeight)) - fast.pot_paid};
-    CAmount offer{mining.always ? mining.amount : sidechain::Follower::Offer(expected)};
-    if (!mining.always && offer < sidechain::Follower::MIN_OFFER) return true;
+    CAmount offer{mining.enabled && mining.always ? mining.amount : sidechain::Follower::Offer(expected)};
+    if (!(mining.enabled && mining.always) && validator) offer = std::max(offer, validator->second);
+    // (Made again: more than the bid it replaces in the mainchain's mempool.)
+    if (again) offer = std::max(offer, last_offer + sidechain::Follower::MIN_OFFER);
+    {
+        LOCK(m_anchor_mutex);
+        if (again) {
+            m_bid.again = true;
+        } else {
+            m_bid = Bid{.main_tip = main_tip, .offer = offer, .after_anchor_point = !pending, .made = true};
+        }
+    }
+    if (offer < sidechain::Follower::MIN_OFFER) return true;
     std::string error;
-    const auto request{follower.RequestCommitment(ticket.Hash(), main_tip, offer, error)};
+    // (Whatever mainchain block the request follows: a ticket does not depend on it. A request made as
+    // the mainchain moved on is in its mempool all the same, for the next block: its ticket must be
+    // known, or that block's commitment is one nobody can acknowledge.)
+    const auto request{follower.RequestCommitment(ticket.Hash(), uint256{}, offer, error)};
     {
         LOCK(m_anchor_mutex);
         m_ticket_requested_for = main_tip;
@@ -1456,10 +1526,21 @@ bool FastBlocksHooks::FollowerRound(sidechain::Follower& follower) const
         LogDebug(BCLog::NET, "FastBlocks: no anchor ticket for mainchain block %s: %s\n", main_tip.ToString(), error);
         return true;
     }
+    {
+        LOCK(m_anchor_mutex);
+        m_bid.offer = offer;
+    }
     AddTicket(ticket, /*own=*/true);
     RelayTicket(ticket);
-    LogInfo("FastBlocks: anchor ticket %s for block %s, %d offered", ticket.Hash().ToString(), ticket.anchored.ToString(), offer);
+    LogInfo("FastBlocks: anchor ticket %s for block %s, %d offered%s", ticket.Hash().ToString(), ticket.anchored.ToString(), offer, again ? " (again, for a block after the last acknowledgement)" : "");
     return true;
+}
+
+std::optional<std::pair<CScript, CAmount>> FastBlocksHooks::ValidatorAnchoring() const
+{
+    LOCK(m_anchor_mutex);
+    if (!m_validator_payee || m_validator_bid <= 0) return std::nullopt;
+    return std::make_pair(*m_validator_payee, m_validator_bid);
 }
 
 void FastBlocksHooks::StartServices(node::NodeContext& node) const
@@ -1472,7 +1553,28 @@ void FastBlocksHooks::StartServices(node::NodeContext& node) const
         LogError("FastBlocks: no block producer: %s", error);
         return;
     }
-    if (m_producer) m_producer->Start();
+    if (m_producer) {
+        m_producer->Start();
+        // Its own anchorer: a ticket for every mainchain block, its bid whatever the fees, the pot to the producer's payout.
+        CAmount bid{m_chain_params.GetChainType() == ChainType::REGTEST ? 0 : DEFAULT_VALIDATOR_ANCHOR_BID};
+        if (node.args && node.args->IsArgSet("-validatoranchorbid")) {
+            const auto parsed{ParseMoney(node.args->GetArg("-validatoranchorbid", ""))};
+            if (!parsed || *parsed < 0) {
+                LogError("FastBlocks: -validatoranchorbid is not an amount: the validator's anchorer is off");
+                bid = 0;
+            } else {
+                bid = *parsed;
+            }
+        }
+        if (bid > 0 && bid < sidechain::Follower::MIN_OFFER) {
+            LogWarning("FastBlocks: -validatoranchorbid below %s does not pay for a request's place in a mainchain block: %s bid", FormatMoney(sidechain::Follower::MIN_OFFER), FormatMoney(sidechain::Follower::MIN_OFFER));
+            bid = sidechain::Follower::MIN_OFFER;
+        }
+        LOCK(m_anchor_mutex);
+        m_validator_bid = bid;
+        m_validator_payee = m_producer->Payout();
+        if (bid > 0) LogInfo("FastBlocks: the validator's anchorer bids %s a mainchain block at least (-validatoranchorbid)", FormatMoney(bid));
+    }
     // The acknowledgements of the recent blocks of the active chain, so that a commitment the mainchain
     // drops takes the blocks that rest on it with it.
     if (ChainstateManager* chainman{Chainman()}) {
@@ -1491,6 +1593,11 @@ void FastBlocksHooks::StartServices(node::NodeContext& node) const
 void FastBlocksHooks::StopServices(node::NodeContext&) const
 {
     if (m_producer) m_producer->Stop();
+    {
+        LOCK(m_anchor_mutex);
+        m_validator_payee.reset();
+        m_validator_bid = 0;
+    }
     m_producer.reset();
     m_node = nullptr;
 }

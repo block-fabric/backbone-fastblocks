@@ -89,6 +89,8 @@ public:
     /**
      * The same for any hash the mainchain is to commit to, in the mainchain block after `main_prev_hash`
      * (which the request must follow): a block of this chain, or what a sidechain's own rules commit to.
+     * A null `main_prev_hash`: whatever mainchain block the request follows (a commitment that does not
+     * depend on it, as a FastBlocks ticket).
      */
     std::optional<std::string> RequestCommitment(const uint256& commitment, const uint256& main_prev_hash, CAmount amount, std::string& error) const;
 
@@ -127,6 +129,11 @@ public:
     /** Give up a candidate that no commitment will be asked for. */
     void DropCandidate(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     Mining GetMining() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Merged mine one round with these settings in place of those of SetMining (a sidechain's own
+     * bidder: FastBlocks validators merge mine when blocks of stake stall, whatever setbmm says).
+     */
+    void MineWith(const Mining& mining) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
 
     const MainClient& Client() const { return m_client; }
 
@@ -153,6 +160,7 @@ private:
     /** Do what the changes of the record call for. */
     void Act() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     void Mine() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    void Mine(const Mining& mining, uint64_t settings) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
     void SendBundle() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Whether this node is still catching up with its chain: in initial block download, or behind the commitments on record. */
     bool CatchingUp() const;
