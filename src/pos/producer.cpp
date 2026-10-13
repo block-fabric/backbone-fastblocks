@@ -30,6 +30,7 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <cstdlib>
 #include <fstream>
 
 namespace pos {
@@ -142,7 +143,9 @@ std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const Fast
                                              fs::PathFromString(key_name + ".lock"), error, std::vector<fs::path>{args.GetDataDirNet() / fs::u8path("validator_protection.dat")})};
     if (!protection) return nullptr;
     LogInfo("FastBlocks: block producer with %u validator key(s)", keys.size());
-    return std::make_unique<Producer>(node, hooks, std::move(keys), std::move(payout), std::move(protection));
+    auto producer{std::make_unique<Producer>(node, hooks, std::move(keys), std::move(payout), std::move(protection))};
+    producer->m_fault_after_sign = args.GetBoolArg("-posfaultaftersign", false) && node.chainman->GetParams().GetChainType() == ChainType::REGTEST;
+    return producer;
 }
 
 Producer::Producer(node::NodeContext& node, const FastBlocksHooks& hooks, std::vector<CKey> keys, CScript payout, std::unique_ptr<SlashingProtection> protection)
@@ -431,6 +434,11 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error, Retry
     std::string protection_error;
     if (!m_protection->MaySign(leader_key, slot, protection_error)) return fail("slashing protection: " + protection_error);
     if (!Sign(*block, *key, chainman.GetConsensus().hashGenesisBlock)) return fail("signing failed");
+    if (m_fault_after_sign) {
+        // (Tests: a node killed between the signature and the block's relay.)
+        LogInfo("FastBlocks: -posfaultaftersign: the block of slot %d is signed; the node stops at once", slot);
+        std::_Exit(EXIT_FAILURE);
+    }
 
     // The block is not made again without what made it invalid: the node checked the signed header
     // (and noted it, to find leaders that sign twice), and a second block of the slot would be a

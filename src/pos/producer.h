@@ -136,6 +136,8 @@ private:
     const std::vector<CKey> m_keys;
     const CScript m_payout;
     const std::unique_ptr<SlashingProtection> m_protection;
+    //! Tests (-posfaultaftersign): stop the node at once after signing a block.
+    bool m_fault_after_sign{false};
 
     mutable Mutex m_mutex;
     std::condition_variable_any m_wake;
