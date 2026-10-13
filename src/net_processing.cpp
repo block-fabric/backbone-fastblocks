@@ -3432,9 +3432,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash());
             } else if (pindexLast && (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE || state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK)) {
                 // The headers taken before the one that failed for a reason that is not the peer's
-                // fault (a header of a slot to come whose signer the node cannot tell yet, a branch it
-                // does not need) are the peer's: without this, a node catching up whose last header
-                // from each peer fails so would fetch no block below it, and never come to tell.
+                // fault (a header too far ahead of the node's clock, one a sidechain cannot check yet,
+                // a branch it does not need) are the peer's: without this, a node catching up whose
+                // last header from each peer fails so would fetch no block below it.
                 LOCK(::cs_main);
                 UpdateBlockAvailability(pfrom.GetId(), pindexLast->GetBlockHash());
             }
