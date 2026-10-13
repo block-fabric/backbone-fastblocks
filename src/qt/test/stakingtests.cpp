@@ -350,7 +350,7 @@ void StakingTests::stakingTests()
     QCOMPARE(label("balanceSoft"), QString{"0.00000000"});
     QCOMPARE(label("balanceAnchored"), QString{"0.00000000"});
     QVERIFY(anchors->rowCount() >= 2);
-    QCOMPARE(anchors->item(0, 1)->text(), QString{"merged mined block"});
+    QCOMPARE(anchors->item(0, 1)->text(), QString{"merged mined block (PoW)"});
 
     // Staking off, from the page: the producer stops; and on again.
     stop->click();
@@ -556,7 +556,7 @@ void StakingTests::stakingTests()
         QTRY_VERIFY_WITH_TIMEOUT(summary_label->text().contains("PoW (merge-mined, committed at mainchain block"), 30000);
         QVERIFY(summary_label->isVisible());
         QVERIFY2(summary_label->text().contains("<b>Finality:</b>"), qPrintable(summary_label->text()));
-        QVERIFY(summary_label->text().contains("<b>Anchor:</b> anchors its parent"));
+        QVERIFY2(summary_label->text().contains("<b>BMM block:</b> a merged mined block"), qPrintable(summary_label->text()));
         SaveScreenshot(explorer, "explorer-fastblocks-pow");
         const CBlockIndex* stake_block{WITH_LOCK(::cs_main, {
             const CBlockIndex* index{context.chainman->ActiveChain().Tip()};
