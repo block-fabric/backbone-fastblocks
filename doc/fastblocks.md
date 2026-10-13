@@ -121,7 +121,7 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | The record has the block that seeds the epoch; may come later (not a slot to come: below) | `pos-seed-unknown` |
 | Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
 | A header whose epoch's set the node does not know: the branch leaves the active chain at or above its final block, and the anchor that made the set is not on the active chain (the state pruned that one's set). Not punished | `bad-pos-fork-too-deep` |
-| ... and the peer that sent it made the node take fewer than `unchecked_headers_per_peer` such headers that are not checked yet (10000; 2000 on regtest; not consensus). Not punished; not for the node's own headers, nor while blocks load from disk | `pos-unchecked-budget` |
+| ... and, from a peer, it fits the budget of headers the node cannot check yet: the peer holds fewer than `unchecked_headers_per_peer` (10000; 2000 on regtest) and the node fewer than `unchecked_headers_total` (50000; 4000 on regtest), or makes room by the rule of "Headers and blocks the node cannot check yet" (template; not consensus). Not punished; asked again once the tip moved | `unchecked-budget` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later if its leader signed it; one whose leader the node cannot tell (set or seed unknown) does not wait, nor is punished | `pos-time-future`, `pos-time-future-unchecked` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
@@ -144,35 +144,10 @@ anchor below it (`bad-pos-ack-order`); its branch has an anchor the node took in
 checked (a signed acknowledgement, or a BMM block, which costs a commitment of
 its own), since the sets of the first epochs after a fork are those of anchors
 below it; and it does not take back a final block nor reach below the window of
-sets the state keeps (`bad-pos-fork-too-deep`). So a branch of headers nobody
-checked counts at most as many anchors as the commitments it names, after one it
-paid for; when its first block is connected, the signature fails and the node is
-back on its chain. And a peer makes the node take at most
-`unchecked_headers_per_peer` such headers that it has not checked since
-(`pos-unchecked-budget`; template hooks `BeginHeaders`, which names the peer a
-message comes from, and `SourceGone`): not siblings by the thousand, which anyone
-can make. A count, not what the headers claim: anyone can claim with them every
-commitment on record, so neither what a message claims nor the best header (which
-such headers may have inflated) measures them; a node that compared the two took
-a padded message whole, and turned away the honest headers of a node catching up
-that led to less than an attacker's inflated best header. Each peer has its own
-count, which its forged headers use up and nobody else's; an honest peer's headers
-give their place back as the node connects their blocks, and the node asks the
-peer for its headers again once its tip moved (template, `net_processing`: after a
-header refused through no fault of the peer's). A header taken with a signature that turns out invalid (the
-block hash does not cover it: a peer can send the honest header with another)
-is replaced by the valid one when it comes (template: `CheckOtherExtension`
-says `REPLACE`; the header or block with it replaces the extension, the stored
-block is written again with it, and a failure of the block with the forged one,
-`bad-pos-sig`, is taken back). A block with another signature than its header's
-that the node cannot check yet (the chain below is not connected) is taken, with
-its header's signature, and the other one kept (one per peer, for 1000 blocks):
-when the block is connected, where the node can tell, a valid one replaces an
-invalid one the header had (template: `ChainstateManager::m_other_extensions`).
-The block hash covers all but the signature: it is the same block. A block that
-fails its signature when connected (`bad-pos-sig`: it came whole with the forged
-one) is asked for once from each peer that has it (template hook
-`OtherExtensionMayFix`): a copy with the valid signature replaces it.
+sets the state keeps (`bad-pos-fork-too-deep`). How many such headers a node
+holds, and what it does with their signatures and blocks, is the next section's
+design: they belong to the peers that sent them (`unchecked-budget`), and a block
+whose signature fails when connected is a failure of that copy, not of the block.
 
 A header that may come later (`pos-time-future`, `pos-ack-unknown`,
 `pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
@@ -190,7 +165,7 @@ Block (`CheckBlock`):
 | `nNonce` is the acknowledged height, 0 without one | `bad-pos-ack-nonce` |
 | Ticket version 1 | `bad-pos-ticket-version` |
 | The payee is a standard script of 80 bytes or less, not data | `bad-pos-ticket-payee` |
-| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; if the node's own is not valid (taken before it could tell the leader), the valid one replaces it (see above); one the node cannot check yet (it cannot tell the leader) is taken with the header's signature, and tried when the block is connected (see above) | `bad-blk-extension` |
+| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; if the node's own is not valid (taken before it could tell the leader), the valid one replaces it; one the node cannot check yet (it cannot tell the leader) is the same block, taken with its header's signature (see "Headers and blocks the node cannot check yet") | `bad-blk-extension` |
 
 Acknowledgement (state):
 
@@ -218,6 +193,165 @@ Every block (state):
 The state of these rules is one entry of the sidechain store (table `0x55`)
 and the pot accrued by height (`0x56`); staking's is below. The store's journal
 is their undo. Amounts are integers throughout.
+
+## Headers and blocks the node cannot check yet
+
+A header of a block of stake is checked against the leader of its slot, whom
+the node knows only from the validator set of the slot's epoch, made by an
+anchor of the header's own chain. When that anchor is on blocks the node has not
+connected (a node that catches up, or a branch it never connected, such as the
+other side of a partition), the node cannot check the signature. It cannot
+refuse the header either: it would never catch up, nor ever leave a branch it
+connected for one with more work whose sets it does not know. So it takes such a
+header unchecked, and checks the signature when the block is connected, as it
+does for every block. The block hash does not cover the signature: anybody can
+send an honest header with a forged one, a forged copy of an honest block, or
+any number of headers nobody can check. This section is the one design for that
+(it replaces the patches of audit 6 and its review: the per-peer count of
+`pos-unchecked-budget` with the hooks `BeginHeaders` and `SourceGone`, the other
+extensions kept by block, `m_other_extensions`, the failed blocks asked for again,
+`m_extension_reask` and `OtherExtensionMayFix`, and before them the message's
+claim of work).
+
+### The design
+
+Words: a header is **checked** when the node verified its signature (it could
+tell the leader when the header came, or its block was connected). A header is
+**unchecked** when the node took it without verifying its signature (template
+hook `HeaderCheckable`: FastBlocks' `LeaderOf` says `SET_UNKNOWN`), and so is
+every header it takes on top of an unchecked one: unchecked headers are the
+newest part of a branch, never below a checked one. A header stays unchecked
+until its block is connected.
+
+1. **Unchecked headers belong to the peers that sent them** (template,
+   `ChainstateManager::m_unchecked`). Each unchecked header has a set of
+   *holders*: the peers that sent it, in a headers message, a compact block or a
+   block, and the peers that sent a header on top of it (a peer that sends a
+   header holds the chain below it too). The accounting is by header: what a
+   peer holds is the headers that have it as a holder.
+2. **Bounds.** A peer holds at most `unchecked_headers_per_peer` headers (10000;
+   2000 on regtest); the node holds at most `unchecked_headers_total` (50000;
+   4000 on regtest). A header that would pass the first is refused
+   (`unchecked-budget`, `BLOCK_HEADER_LOW_WORK`: not punished; the node asks the
+   peer for its headers again once its tip moved, when its connected blocks gave
+   room back). A header that would pass the second makes room: the peer that
+   alone holds the most headers, if it alone holds more than the sender, gives up
+   its newest headers it alone holds; otherwise the header is refused the same
+   way.
+3. **Volatile.** An unchecked header is not written to disk, and leaves the
+   block index, with its block if the node has it, as soon as no peer holds it
+   (its last holder disconnected, or gave it up by the rule above). Deleting
+   from the block index is new to Bitcoin's code: the entries go to a bounded
+   list before they are freed (code that read one without the lock reads a dead
+   entry, never freed memory), and the peers' pointers into them (best known
+   block, blocks in flight) are moved to the nearest block that stays, under the
+   same lock. A header whose block is connected is checked: it leaves the set,
+   is written to disk, and is kept like any other. The node's own headers, and
+   those read from disk or given by RPC, have the node as holder, which never
+   goes.
+4. **One extension a header.** The node keeps one signature for each header:
+   the first that came, until it can tell the leader. Another valid one replaces
+   it if the node's own is not valid (`CheckOtherExtension`, `REPLACE`); a block
+   with another signature the node cannot check yet is the same block, stored
+   with its header's signature (its peer becomes a holder). Nothing else is
+   kept: no list of other extensions.
+5. **A signature that fails is the copy's fault, not the block's.** A block whose
+   header was unchecked and whose signature fails when it is connected
+   (`bad-pos-sig`; template hook `ExtensionFailure`) is an *extension failure*:
+   marked failed in memory only (the header is volatile), `BLOCK_TIME_FUTURE` for
+   the peer that sent it, and for the headers on top of it (`extension-failed`,
+   refused without punishment). Any other signature takes the failure back:
+   `REPLACE` if the node can tell, or any other one if it cannot (the one it has
+   is known bad). And the node asks for the headers again from the block's
+   parent (getheaders), once, from every peer that holds the header or whose best
+   chain has it: one pending request a peer. An honest peer answers with the
+   leader's signature, which replaces the forged one, and the block is connected.
+   The node never asks for a failed block again (`getdata`), nor keeps a list of
+   such blocks.
+6. **Fork choice is unchanged.** Unchecked headers count in the order of chains
+   as before (bounded by `bad-pos-ack-order` and `bad-pos-fork-too-deep`), and may
+   make the best header. Nothing that makes progress waits on the best header:
+   blocks are fetched along each peer's own best chain, connected along the
+   candidate with the most work whose blocks the node has, and initial block
+   download ends by the tip. When the holders of an inflated best header go, it
+   is deleted and the best header computed again.
+
+### The invariants, and why each holds
+
+Each against any number of peers, reconnections and new addresses.
+
+- **Bounded memory.** Unchecked headers in the block index: at most
+  `unchecked_headers_total`, plus the node's own (every admission checks the
+  total, and makes room only by deleting). Reconnecting changes nothing: the count is the
+  number of headers, which leave with their last holder, so a new connection
+  starts with no budget used and no headers left behind either; new addresses
+  only share the same total. Other extensions: none are stored (4). Retry state:
+  one pending getheaders a peer (5), and the template's ask-again-after-the-tip
+  (2), both in the peer's state, gone with it. What may be dropped is only
+  unchecked: checked headers (the whole best chain the node checked), their
+  signatures and their blocks are never deleted nor replaced; a header two peers
+  hold is never dropped to make room; and a header an honest peer alone holds is
+  dropped only if that peer alone holds the most, and more than the sender: a
+  flood from any number of attackers takes room from the attackers first, and
+  never from a peer that holds no more than its share of the total.
+- **No stall.** (a) Checked headers need no budget: a node that catches up takes
+  the honest chain as far as it can check (the sets are known an epoch and more
+  ahead of the connected blocks), connects it, and can check further; whatever
+  fills the budget, it progresses an epoch at a time, and unchecked headers only
+  let it fetch ahead. (b) A branch whose sets the node never had (the other side
+  of a partition) needs the honest peer's unchecked headers: the honest peer has
+  its own budget, which attackers cannot use (each peer's own), take (eviction
+  takes from whoever alone holds the most) nor drop (a header is deleted only
+  without holders, and the honest peer holds what it sent). (c) A forged
+  signature on an honest header fails as an extension failure (5), not the
+  block; the honest peers are asked for the header, whose valid signature
+  replaces the forged one. (d) A forged copy of an honest block: refused as a
+  mutated block if the node can tell (the hash stays valid); taken with the
+  header's signature if it cannot (then (c)). (e) Floods of siblings and padded
+  messages fill the sender's budget only; headers that claim more work than the
+  honest chain and whose blocks the sender withholds: the node asks the sender
+  for them, the block download times it out and disconnects it, and its headers
+  go with it; with blocks, the node tries them, the signature fails (5), and they
+  stay with their holders until those go. Limit: a branch longer than a peer's
+  budget beyond what the node can check (10000 slots, three and a half days) is
+  taken only as the node connects it, which it cannot before the branch leads: a
+  partition that long needs `unchecked_headers_per_peer` raised, or a restart
+  with the other side's peers.
+- **No punishment of honest peers.** A header refused for the budget is
+  `BLOCK_HEADER_LOW_WORK`; one off a branch too deep, too (`bad-pos-fork-too-deep`);
+  an extension failure is `BLOCK_TIME_FUTURE` for the block's sender and for every
+  header or block on it (5); a known header with another signature is never a
+  fault. A peer is punished for a signature only when the node could check it as
+  it came (a bad signature, or a mutated block): an honest peer sends only headers
+  and blocks it connected, whose signatures it checked with the same chain (a
+  record that differs is a failure against the record, pardoned as before). The
+  node no longer asks for failed blocks, so no peer is asked for one.
+- **No consensus divergence.** The rules of a block are unchanged and checked
+  when it is connected, against its own chain's state. What this design decides
+  is only whether and when the node holds a header and which copy of a signature
+  it tries first, as for a block it does not have yet: the block whose valid
+  signature exists connects on every node that gets it. An extension failure is
+  never final (in memory, taken back by any other signature); unchecked headers
+  are not written to disk, so a restart starts with none and takes them again
+  from peers; nothing read from memory (the sets read before) is a rule of a
+  block.
+- **Fork choice.** Unchecked headers can make the best header, but nothing waits
+  on it (6): the honest peers' chains are fetched and connected whatever it is,
+  and it goes with its holders.
+
+FastBlocks' part: `HeaderCheckable` (the leader of the slot is `SET_UNKNOWN`),
+`UncheckedLimits` (`unchecked_headers_per_peer`, `unchecked_headers_total`),
+`ExtensionFailure` (`bad-pos-sig`), and `CheckOtherExtension`. The template's is
+the rest, off unless a chain's `HeaderCheckable` says no. Tests: the template's
+`sidechain_hooks_tests.cpp` (`unchecked_*`, `block_extension_unknown_taken`,
+`extension_failure_not_the_peers_fault`), `fastblocks_tests.cpp`
+(`unchecked_siblings_not_taken`, `unchecked_headers_checked_give_room`,
+`forged_signature_replaced`), `feature_fastblocks_unchecked.py`
+(reconnection loops, many peers, eviction floods, forged copies, an inflated best
+header while the node catches up, no honest peer punished), and the fuzz
+targets `sidechain_unchecked` and `pos_state` (peers that come and go).
+`feature_fastblocks_fork.py` keeps the attacker connected (its forged header would
+otherwise go with it) and sees the forged signature replaced.
 
 ## Finality
 
@@ -1020,7 +1154,9 @@ What they found, each fixed with the test that failed before:
 ### Review of audit 6 (2026-10-13)
 
 `~/skydoge/audit/2026-10-13-audit-6-review-findings.md`, each finding checked
-first; each fix with a test that failed before it.
+first; each fix with a test that failed before it. (The fixes of findings 1, 2,
+6, 7 and 8 below were replaced, after a second review found holes in them, by one
+design: "Headers and blocks the node cannot check yet".)
 
 - A block a node held back (`blk-extension-unknown`: another signature than its
   header's, which the node cannot check before it connects the chain below) was
