@@ -161,6 +161,15 @@ public:
     bool BlockExtensions() const override { return true; }
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
     bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override;
+    /**
+     * The chain a message's headers claim to lead to: the key of the last of the run of them, from the
+     * first, that links up and passes the rules a header can be checked against alone (its time and
+     * slot, its acknowledgement in order and on record, a BMM block's commitment on record). A header
+     * whose signature cannot be checked yet is taken only if it, or the chain its message claims,
+     * leads to more than the best header (pos-unchecked-low-work). Called with cs_main held.
+     */
+    void BeginHeaders(std::span<const CBlockHeader> headers) const override;
+    void EndHeaders() const override;
     bool CheckBlock(const CBlock& block, BlockValidationState& state) const override;
     bool IsWaitReason(const std::string& reject_reason) const override;
     //! A node a little behind on the record after a mainchain reorg must not cut itself off from the peers that took an anchor back first.
@@ -320,6 +329,13 @@ private:
     mutable Mutex m_final_mutex;
     mutable int m_final_height GUARDED_BY(m_final_mutex){-1};
     mutable std::pair<uint256, uint256> m_final_for GUARDED_BY(m_final_mutex);
+
+    //! What the headers of the message being taken in claim (BeginHeaders): the headers of the run, and its key.
+    struct HeadersClaim {
+        std::set<uint256> hashes;
+        arith_uint256 work;
+    };
+    mutable std::optional<HeadersClaim> m_headers_claim GUARDED_BY(::cs_main);
 
     mutable Mutex m_sets_mutex;
     struct KnownSet {

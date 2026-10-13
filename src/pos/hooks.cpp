@@ -154,6 +154,18 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
             // (Not the peer's fault: its chain may be another; this node does not take it.)
             return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "bad-pos-fork-too-deep", "a header whose signature cannot be checked, on a branch that leaves a final block or the window of sets");
         }
+        // ... and it leads to more than the best header, or the chain its message claims does
+        // (BeginHeaders: the first headers of a branch that overtakes come with the rest of it). Not
+        // siblings by the thousand, which anyone can make, nor a branch that overtakes nothing: the
+        // node does not need it until it does. (Not while the node loads blocks from disk: it took
+        // them in before.)
+        if (!chainman.m_blockman.LoadingBlocks() && chainman.m_best_header) {
+            arith_uint256 claim{ChainWork(&prev, header)};
+            if (m_headers_claim && m_headers_claim->hashes.contains(header.GetHash())) claim = std::max(claim, m_headers_claim->work);
+            if (claim <= chainman.m_best_header->nChainWork) {
+                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "pos-unchecked-low-work", "a header whose signature cannot be checked, that leads to no more than the best header");
+            }
+        }
         break;
     }
     case LeaderStatus::OK:
@@ -197,6 +209,55 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
         return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-ack-unknown", "no commitment on record at the height the block acknowledges");
     }
     return true;
+}
+
+void FastBlocksHooks::BeginHeaders(std::span<const CBlockHeader> headers) const
+{
+    AssertLockHeld(::cs_main);
+    m_headers_claim.reset();
+    const ChainstateManager* chainman{Chainman()};
+    // (One header claims what it is.)
+    if (!chainman || headers.size() < 2) return;
+    const CBlockIndex* start{chainman->m_blockman.LookupBlockIndex(headers.front().hashPrevBlock)};
+    if (!start) return;
+    const sidechain::Mainchain* record{chainman->m_mainchain.get()};
+    ChainKey key{ChainKey::FromWork(start->nChainWork)};
+    std::optional<int64_t> last_slot{LastPosSlot(start, m_params)};
+    const auto latest{NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}};
+    uint256 prev{start->GetBlockHash()};
+    HeadersClaim claim;
+    for (const CBlockHeader& header : headers) {
+        if (header.hashPrevBlock != prev) break;
+        key.height = static_cast<uint64_t>(start->nHeight) + claim.hashes.size() + 1;
+        if (IsPosHeader(header)) {
+            const int64_t time{header.nTime};
+            if (header.nBits != m_pos_bits || time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) break;
+            if (header.Time() > latest) break;
+            const int64_t slot{SlotOf(time, m_params)};
+            if (last_slot && slot <= *last_slot) break;
+            last_slot = slot;
+            if (header.nNonce != 0) {
+                if (header.nNonce <= key.last_anchor_height || !record || !record->BmmAt(static_cast<int>(header.nNonce))) break;
+                ++key.anchors;
+                key.last_anchor_height = header.nNonce;
+            }
+        } else {
+            const auto height{record ? record->BmmHeight(header.GetHash()) : std::nullopt};
+            if (!height) break;
+            ++key.anchors;
+            key.last_anchor_height = static_cast<uint32_t>(*height);
+        }
+        prev = header.GetHash();
+        claim.hashes.insert(prev);
+        claim.work = key.Work();
+    }
+    if (!claim.hashes.empty()) m_headers_claim = std::move(claim);
+}
+
+void FastBlocksHooks::EndHeaders() const
+{
+    AssertLockHeld(::cs_main);
+    m_headers_claim.reset();
 }
 
 bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& state) const

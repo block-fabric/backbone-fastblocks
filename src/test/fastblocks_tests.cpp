@@ -3324,6 +3324,52 @@ BOOST_FIXTURE_TEST_CASE(future_unsigned_header_not_waiting, FastBlocksSetup)
     BOOST_CHECK_EQUAL(Waiting(), waiting + 1);
 }
 
+BOOST_FIXTURE_TEST_CASE(unchecked_siblings_not_taken, FastBlocksSetup)
+{
+    // Headers whose leader the node cannot tell yet (a branch with an anchor it never connected, as for
+    // a node that catches up), above the final block: taken only if they lead to more than the best
+    // header. Siblings by the thousand, which anyone can make, are not; a branch whose first headers
+    // overtake nothing is, when its message leads it past the best header.
+    StartPos();
+    Take(PosBlock(1));
+    const CBlockHeader like{Tip()->GetBlockHeader()};
+    const CBlock other{BmmBlock(/*use_mempool=*/false)};
+    Commit(other.GetHash());
+    BOOST_REQUIRE_EQUAL(HeaderReason({other}), "");
+    BOOST_REQUIRE(BestHeader() == other.GetHash());
+    Mock(pos::SlotTime(pos::SlotOf(GetTime(), Pos()) + 2 * Pos().slots_per_epoch, Pos()));
+    Main();
+    const int64_t slot{pos::SlotOf(GetTime(), Pos())};
+    BOOST_REQUIRE(!WITH_LOCK(::cs_main, return Hooks().SetFor(*Index(other.GetHash()), pos::EpochOf(slot - 1, Pos()))));
+    // The first one leads further than the best header: taken.
+    const CBlockHeader first{UnsignedHeader(like, other.GetHash(), slot - 1, 0, 1)};
+    BOOST_CHECK_EQUAL(HeaderReason({first}), "");
+    BOOST_CHECK(BestHeader() == first.GetHash());
+    // Its siblings lead no further: not taken, the peer not punished.
+    for (uint8_t salt{2}; salt < 12; ++salt) {
+        const CBlockHeader sibling{UnsignedHeader(like, other.GetHash(), slot - 1, 0, salt)};
+        BlockValidationState state;
+        BOOST_CHECK(!Chainman().ProcessNewBlockHeaders({{sibling}}, /*min_pow_checked=*/true, state));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "pos-unchecked-low-work");
+        BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK);
+        BOOST_CHECK(!Index(sibling.GetHash()));
+    }
+    // A sibling that comes with a child, which leads further: the message claims that, both taken.
+    const CBlockHeader rival{UnsignedHeader(like, other.GetHash(), slot - 1, 0, 20)};
+    const CBlockHeader child{UnsignedHeader(like, rival.GetHash(), slot, 0, 20)};
+    BOOST_CHECK_EQUAL(HeaderReason({rival, child}), "");
+    BOOST_CHECK(BestHeader() == child.GetHash());
+    // A child that claims what no header can be (a slot to come, a commitment not on record) claims
+    // nothing for the sibling before it.
+    for (const auto& [later_slot, nonce] : {std::pair<int64_t, uint32_t>{slot + 3600, 0}, {slot, 1u << 30}}) {
+        const CBlockHeader sibling{UnsignedHeader(like, other.GetHash(), slot - 1, 0, 30)};
+        const CBlockHeader claims{UnsignedHeader(like, sibling.GetHash(), later_slot, nonce, 30)};
+        BOOST_CHECK_EQUAL(HeaderReason({sibling, claims}), "pos-unchecked-low-work");
+        BOOST_CHECK(!Index(sibling.GetHash()));
+    }
+    BOOST_CHECK(BestHeader() == child.GetHash());
+}
+
 BOOST_FIXTURE_TEST_CASE(record_independent_failures, FastBlocksSetup)
 {
     // A block that breaks a rule of FastBlocks whatever the record says (its producer's share, here)
