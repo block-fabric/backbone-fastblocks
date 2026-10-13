@@ -165,6 +165,8 @@ public:
         //! FastBlocks: the fixed validator set of a regtest sidechain (-posvalidators).
         std::vector<Consensus::PosValidator> pos_validators{};
         std::optional<int64_t> pos_seed_lookahead{};
+        //! FastBlocks: how many anchors make a block final (-posfinalanchors; not consensus).
+        std::optional<int> pos_final_anchors{};
     };
 
     struct MainNetOptions {

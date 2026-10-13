@@ -620,7 +620,7 @@ public:
             consensus.pos.max_validators = 8;
             consensus.pos.max_unanchored_slots = 100;
             consensus.pos.stall_seconds = 30;
-            consensus.pos.final_anchors = 1;
+            consensus.pos.final_anchors = opts.pos_final_anchors.value_or(1);
             consensus.pos.genesis_validators = opts.pos_validators;
             consensus.pos.min_stake = COIN / 10000;
             consensus.pos.unbonding_anchors = 20;

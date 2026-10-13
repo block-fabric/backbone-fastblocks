@@ -204,7 +204,8 @@ active chain is
   anchors (the block a ticket names, or a BMM block's parent). Undoing it takes
   the mainchain's merged miners, not stake;
 - **final** once `final_anchors` anchors cover it: 6 on main, 3 on testnet
-  and signet, 1 on regtest.
+  and signet, 1 on regtest (`-posfinalanchors=<n>` there, not consensus, so that
+  a test sees the anchored state).
 
 Anchors are counted net of the commitments the chain skipped. With as many
 anchors, the chain whose last commitment came first wins: a commitment on
@@ -226,7 +227,10 @@ every fork.
 `anchored_tip` and the `final_tip`. In the wallet, `gettransaction` and
 `listtransactions` give a confirmed transaction's `finality`, and
 `getbalances` the confirmed coins by finality (`mine.finality.soft`,
-`anchored`, `final`).
+`anchored`, `final`). The wallet counts the anchors of its own chain, the one
+that ends at its last block (`interfaces::Chain::getAnchors(block)`, once per
+call): during a reorg the node's tip moves first, and the anchors of the new
+branch must not show a payment the reorg took out as anchored or final.
 
 ## Staking
 
@@ -412,8 +416,8 @@ last acknowledged one that it has neither a ticket nor a block of.
 | `getsidechainstate` | Adds `pegbalance`: the coins the chain holds against the escrow (below) |
 | `submitevidence <hex>`, `listevidence` | Evidence (above) |
 | `setstaking true\|false`, `getstakinginfo [since]` | This node as a validator: on or off (on at start), its keys and their bonds, what it made (`produced` since it started; `blocksmade`, the blocks of stake on the active chain its keys signed, and `blocksmadesince` a time), its next slot |
-| `createbond <pubkey> <amount> [pop] [owner]` (wallet) | Bond coins of the wallet to a key (signed by the owner, to a key that has one) |
-| `createunbond <pubkey> [amount\|"all"]` (wallet) | Unbond some of the wallet's bond, or all of it (the default: all that is bonded when it is mined) |
+| `createbond <pubkey> <amount> [pop] [owner]` (wallet) | Bond coins of the wallet to a key. The owner is the bond's, else that of a bond of this wallet to the key waiting in the mempool (bonding twice before a block names one owner), else the one given, else a new address; with a pop for a first bond, the owner it was signed for must be given. Without a pop, for a key this node does not hold, the error names the owner to have `signbondpop` sign for on the validator's node |
+| `createunbond <pubkey> [amount\|"all"]` (wallet) | Unbond some of the wallet's bond, or all of it (the default: all that is bonded when it is mined). One at a time: an unbond of the key in the mempool (named in the error) waits for a block first |
 | `listbonds [all]` (wallet) | The wallet's bonds (or every validator's) |
 | `listtransactions`, `listsinceblock`, `gettransaction` (wallet) | A coinbase output's `income`: `staked`, `anchor` or `reporter` (below) |
 
@@ -423,8 +427,8 @@ Not consensus: what wallets show. A coinbase output (`pos::CoinbaseRoles`,
 through the chain interface's `getCoinbaseRoles`) is
 
 - **staked**: the first output of a block of stake, the producer's share of
-  its fees (paid to `-validatorpayout`, or the first validator key's P2WPKH
-  address);
+  its fees (paid to `-validatorpayout`, else a new address of the node's first
+  wallet, else the first validator key's P2WPKH address);
 - **anchor**: in a block that takes the peg actions (an acknowledgement, or a
   merged mined block), the pot and the share of the reserve paid to the
   anchor's payee (the ticket's, or the merged mined block's first output);
@@ -530,7 +534,7 @@ Every FastBlocks functional test checks this on every node after every step
 - `-validatorkeyfile=<file>`: 32-byte secret keys in hex, one per line. At
   each slot one of them leads, the node builds a PoS block on its best chain,
   with the acknowledgement of the first committed ticket it can carry, notes
-  the slot in `validator_protection.dat` (synced to disk before signing),
+  the slot in its slashing protection file (synced to disk before signing),
   signs and relays the block. It signs deterministically: BIP340 with the
   auxiliary randomness all zero, so that the nonce comes from the key and the
   message alone (BIP340's own derivation, as RFC 6979 does for ECDSA). A block
@@ -543,7 +547,27 @@ Every FastBlocks functional test checks this on every node after every step
   claims an acknowledgement and keep its block).
 - Acknowledgements are noted (to find the blocks that rest on a commitment the
   mainchain drops) only from blocks signed by the leader of their slot.
-- `-validatorpayout=<address>`: where the producer's share goes.
+- The slots signed are kept in `<key file>.protection`, next to the key file
+  (as is the lock, `<key file>.lock`): wiping the data directory to sync again
+  keeps the key, and so must keep what it signed. The `validator_protection.dat`
+  of older versions, in the data directory, is read too (the highest slot of
+  each key) and its slots written to the new file at start.
+- A slot whose block could not be made before the slashing protection noted it
+  (nothing signed: the node still taking in a block that came as the slot
+  started, the tip moving while the block was built, the seed of the epoch not
+  on record yet) is tried again every half second for a third of the slot (at
+  least a second). It counts once in `failed` if given up. A failure after the
+  slot is noted is not retried: a second block would be a second signature.
+- `-validatorpayout=<address>`: where the producer's share goes. Without it,
+  a new address (label "validator payout") of the first wallet loaded when the
+  node starts, so that the wallet sees the income and keeps it whatever becomes
+  of the key file, which is hot by design. With no wallet, the first validator
+  key's own P2WPKH address, with a warning in the log, which names the address.
+  To see and spend what was paid there, import the key into a wallet: the
+  descriptor `wpkh(<WIF>)` (`importdescriptors`, timestamp 0 to rescan), where
+  the WIF is the key's 32 bytes in Base58Check with the chain's secret key
+  prefix and the compressed flag `01`. `getstakinginfo` (`payout`) and the
+  staking page ("Fees paid to") show where it goes.
 - With `setbmm`, while PoS blocks come, the node's merged miner makes a ticket
   per mainchain block (P is the block before its tip, or the last
   acknowledgement, or the tip itself once a ticket for the block before it
@@ -779,7 +803,7 @@ functional tests named).
   (`bond_griefing`, `bonds`, `unbonds`, `feature_fastblocks_staking.py`).
   Jailing is unchanged.
 
-## Audit 6 (2026-10-13): consensus and network
+## Audit 6 (2026-10-13): consensus, network, producer and wallet
 
 Each finding was checked first; each fix has a unit test (`fastblocks_tests.cpp`)
 that failed before it. Consensus changes, with no activation height: the test
@@ -838,11 +862,51 @@ network starts again from genesis.
   another genesis; `pos_state` sends headers from peers (signed or not, sets
   forgotten as on a restart) and proofs with a header from another network or
   another leader, and checks that what is taken keeps the rules.
-- Not in this part: the producer's retry within a slot, the place of the
-  slashing protection file (test gaps 3, 4), the wallet's findings. Checked:
-  `WaitingReady` gives a waiting header and its waiting parent different keys
-  (the parent's height plus one), so the template's lost-header case does not
-  arise.
+- Checked: `WaitingReady` gives a waiting header and its waiting parent
+  different keys (the parent's height plus one), so the template's lost-header
+  case does not arise.
+
+### Part 2: the producer and the wallet
+
+- The producer tried each slot once: a failure before the slashing protection
+  noted the slot (the node still taking in a block that came as the slot
+  started, the tip moving while the block was built, the seed not on record
+  yet) lost the slot, though nothing was signed. It now tries again for a third
+  of the slot (`producer_retries_before_signing`).
+- The slashing protection was in the data directory, the key elsewhere: wiping
+  the data directory to sync again kept the key and lost the slots it signed.
+  It is now next to the key file, the old file read too
+  (`protection_next_to_the_key_file`).
+- A bond or an unbond was checked against the tip once, as it entered the
+  mempool. A block that moved the state under it (a slash, a second unbond of
+  the same sequence mined, a first bond naming another owner mined) left it
+  there for two weeks, its inputs held, and `createunbond` refused (an unbond
+  waited) and `abandontransaction` too (it was in the mempool). Now the mempool
+  checks such transactions again after every change of its tip, and drops those
+  the next block could no longer take (template hook `HasTxRules`;
+  `mempool_drops_stale_staking_txs`, and the slashing functional test). The
+  wallet's one-unbond-at-a-time check counts only an unbond in the mempool, and
+  names it.
+- `createbond` twice before a block (the button clicked twice) made a second
+  owner, whose bond could never be mined after the first. It now names the
+  owner of a pending bond of the wallet to the same key (staking functional
+  test). With a pop and no owner, a first bond is refused at once (a new
+  address could not match the pop); without a pop, for a key the node does not
+  hold, the error says to run `signbondpop <key> <owner>` and pass that owner.
+- The wallet's finality was computed against the node's tip: during a reorg a
+  payment the reorg took out showed as anchored or final by the other branch's
+  anchors. Now against the wallet's last block, once per call
+  (`wallet_finality_on_its_own_chain`, in `fastblocks_tests.cpp` as it needs
+  the FastBlocks chain).
+- Without `-validatorpayout`, the producer's share went to the hot key's own
+  address, which no wallet saw. Now to a new address of the node's wallet,
+  if one is loaded (`feature_fastblocks.py`); else the key's, with a warning.
+- Wrong: "immature coinbase outputs are in the finality buckets for 100
+  blocks". FastBlocks' coinbase maturity is 0 on every network: a coinbase
+  output is spendable in the next block, and none is ever immature once
+  confirmed. Nothing changed.
+- Tests: `-posfinalanchors` (regtest) lets `feature_fastblocks_rpc.py` show the
+  anchored state on a node that counts three anchors to final.
 
 ## Deviations from the design (phase 5)
 

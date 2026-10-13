@@ -137,6 +137,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
             options.pos_validators.push_back({.pubkey = uint256{std::span<const unsigned char>{*bytes}}, .stake = *stake});
         }
     }
+    if (const auto final_anchors{args.GetIntArg("-posfinalanchors")}) {
+        if (*final_anchors < 1 || *final_anchors > 100) throw std::runtime_error("Invalid -posfinalanchors");
+        options.pos_final_anchors = static_cast<int>(*final_anchors);
+    }
     if (const auto lookahead{args.GetIntArg("-posseedlookahead")}) {
         if (*lookahead < 0 || *lookahead > 365 * 24 * 60 * 60) throw std::runtime_error("Invalid -posseedlookahead");
         options.pos_seed_lookahead = *lookahead;

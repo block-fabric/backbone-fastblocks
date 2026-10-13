@@ -6,7 +6,8 @@
 
   - the validator set, the leader schedule, a validator, staking on and off;
   - anchors and finality: getanchorinfo, getblock's kind, slot, proposer, acknowledgement
-    and finality, getblockchaininfo's anchored and final tips;
+    and finality, getblockchaininfo's anchored and final tips; the anchored state on a node that
+    counts more anchors to final (-posfinalanchors);
   - the wallet: gettransaction, listtransactions and getbalances say how final coins are;
   - evidence: a proof that a leader signed two blocks for one slot, submitted to one node,
     reaches the others; a malformed or false one is refused;
@@ -16,6 +17,7 @@
 """
 
 import os
+import time
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
@@ -187,6 +189,9 @@ class FastBlocksRpcTest(SidechainTest):
             self.restart_node(i, extra_args=self.side_args + [f"-validatorkeyfile={path}", f"-validatorpayout={self.payouts[i]}"])
         self.connect_validators()
         self.wait_until(lambda: all(n.getstakinginfo()["produced"] > 0 for n in self.validators()), timeout=120)
+        self.wait_in_sync()
+        # (A block a validator made before its peers connected may have been left on a branch.)
+        self.wait_until(lambda: n0.getstakinginfo()["blocksmade"] > 0, timeout=60)
         self.wait_in_sync()
         staking = n0.getstakinginfo()
         assert_equal(staking["validator"], True)
@@ -367,6 +372,45 @@ class FastBlocksRpcTest(SidechainTest):
         assert_equal(observer.getanchorinfo()["recent"], n0.getanchorinfo()["recent"])
         tip_hash = observer.getbestblockhash()
         assert_equal(observer.getblock(tip_hash)["finality"], n0.getblock(tip_hash)["finality"])
+        assert_peg_balance(main, self.nodes)
+
+        self.log.info("The anchored state: a node that counts three anchors to final (-posfinalanchors, not consensus)")
+        self.restart_node(3, extra_args=self.side_args + ["-posfinalanchors=3"])
+        for i in range(3):
+            self.connect_nodes(3, i)
+        assert_equal(observer.getanchorinfo()["finalanchors"], 3)
+        for n in self.validators():
+            n.setstaking(True)
+        txid = n0.sendtoaddress(observer.getnewaddress(), 1)
+        self.wait_until(lambda: any(t["txid"] == txid and t["confirmations"] > 0 for t in observer.listtransactions("*", 100)), timeout=60)
+        assert_equal(observer.gettransaction(txid)["finality"], "soft")
+        assert_equal(observer.getbalances()["mine"]["finality"]["soft"], 1)
+        blockhash = observer.gettransaction(txid)["blockhash"]
+        def finality_past(status):
+            def past():
+                self.wait_in_sync(self.nodes)
+                if observer.gettransaction(txid)["finality"] != status:
+                    return True
+                # A mainchain block: it commits to the merged miner's ticket, if it asked yet, and has
+                # it ask for the next.
+                self.mine_main()
+                time.sleep(2)
+                return False
+            return past
+        # (An anchor covers the block its ticket names, which may be an earlier one.)
+        self.wait_until(finality_past("soft"), timeout=180)
+        assert_equal(observer.gettransaction(txid)["finality"], "anchored")
+        assert_equal(observer.getblock(blockhash)["finality"]["status"], "anchored")
+        mine = observer.getbalances()["mine"]
+        assert_equal(mine["finality"]["anchored"], 1)
+        assert_equal(mine["finality"]["final"], 0)
+        # The validators count one: final for them.
+        assert_equal(n1.getblock(blockhash)["finality"]["status"], "final")
+        self.wait_until(finality_past("anchored"), timeout=180)
+        assert_equal(observer.gettransaction(txid)["finality"], "final")
+        assert_equal(observer.getblock(blockhash)["finality"], {"status": "final", "anchors": 3})
+        assert_equal(observer.getbalances()["mine"]["finality"]["final"], 1)
+        self.wait_in_sync(self.nodes)
         assert_peg_balance(main, self.nodes)
 
 if __name__ == '__main__':
