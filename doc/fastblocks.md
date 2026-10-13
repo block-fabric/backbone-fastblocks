@@ -196,7 +196,8 @@ what a node knows: one that never saw a ticket counts its commitment against
 every fork.
 
 `getblock` gives a block's `finality` (`status`, `anchors`), and its `kind`
-(`pos` or `bmm`), `slot`, `proposer` and `ack`; `getblockchaininfo` the
+(`pos` or `bmm`), `slot`, `proposer` and `ack`, and for a merged mined block the
+`mainheight` of the mainchain block that committed to it; `getblockchaininfo` the
 `anchored_tip` and the `final_tip`. In the wallet, `gettransaction` and
 `listtransactions` give a confirmed transaction's `finality`, and
 `getbalances` the confirmed coins by finality (`mine.finality.soft`,
@@ -370,26 +371,91 @@ last acknowledged one that it has neither a ticket nor a block of.
 | RPC | |
 |---|---|
 | `getposinfo` | The validators of the current epoch, slot and leader, anchors, the pot and its reserve, staking's totals, the producer |
-| `getvalidators [epoch]` | The set of an epoch as the active chain fixes it (`known`, `seedknown`), and the slots each one leads |
+| `getvalidators [epoch]` | The set of an epoch as the active chain fixes it (`known`, `seedknown`), the slots each one leads, and whether the active chain banned or jailed it since (`banned`, `jaileduntilepoch`) |
 | `getvalidator <pubkey>` | One validator: stake, slots, next slot, offences known, its bond (owner, bonded, unbonds and when they are paid, jail, ban) |
 | `signbondpop <owner> [pubkey]` | The proof of possession for a bond owned by `owner`, by a key of this node's producer |
 | `getleaderschedule [epoch]` | The leader of each slot of an epoch (a banned one as `banned`: nobody leads the slot) |
 | `getanchorinfo [count]` | The newest anchors, the anchored and final tips, the commitments the chain skipped, the pot, the tickets known |
 | `getsidechainstate` | Adds `pegbalance`: the coins the chain holds against the escrow (below) |
 | `submitevidence <hex>`, `listevidence` | Evidence (above) |
-| `setstaking true\|false`, `getstakinginfo` | This node as a validator: on or off (on at start), its keys, what it made, its next slot |
+| `setstaking true\|false`, `getstakinginfo [since]` | This node as a validator: on or off (on at start), its keys and their bonds, what it made (`produced` since it started; `blocksmade`, the blocks of stake on the active chain its keys signed, and `blocksmadesince` a time), its next slot |
 | `createbond <pubkey> <amount> [pop] [owner]` (wallet) | Bond coins of the wallet to a key (signed by the owner, to a key that has one) |
 | `createunbond <pubkey> [amount\|"all"]` (wallet) | Unbond some of the wallet's bond, or all of it (the default: all that is bonded when it is mined) |
 | `listbonds [all]` (wallet) | The wallet's bonds (or every validator's) |
+| `listtransactions`, `listsinceblock`, `gettransaction` (wallet) | A coinbase output's `income`: `staked`, `anchor` or `reporter` (below) |
+
+## Staking income
+
+Not consensus: what wallets show. A coinbase output (`pos::CoinbaseRoles`,
+through the chain interface's `getCoinbaseRoles`) is
+
+- **staked**: the first output of a block of stake, the producer's share of
+  its fees (paid to `-validatorpayout`, or the first validator key's P2WPKH
+  address);
+- **anchor**: in a block that takes the peg actions (an acknowledgement, or a
+  merged mined block), the pot and the share of the reserve paid to the
+  anchor's payee (the ticket's, or the merged mined block's first output);
+- **reporter**: the reward for a proof that a leader signed twice, paid at the
+  peg step after the block that carried the proof to that block's first
+  output's script.
+
+The rest (a merged mined block's first output, deposits, refunds, unbonds) is
+"mined", as before. A block's payouts come after its first output in this
+order: what the mainchain gave rise to, the pot, unbonds, rewards, refunds. So
+for an anchor block the node reads the blocks back to the anchor before it (that
+one included) for the proofs they carried (a leader's proofs against itself earn
+nothing), takes the last payouts to each reporter's script as its rewards, and
+the last other payout to the payee before them as the pot. This is exact unless
+a block's payouts passed the cap of 1000 (some wait for the next peg step) or a
+refund (or an unbond) goes to the same script in the same block. The roles of a
+block are cached (10000 blocks).
+
+The wallet's transactions carry the roles (`interfaces::WalletTx::
+txout_coinbase_role`); the GUI's transaction list labels such outputs "Staked",
+"Anchor reward" and "Slashing reward" instead of "Mined", and its type filter
+has the three. The wallet RPCs give a coinbase output's `income`.
 
 ## The staking page
 
-`fastblocks-qt` has a Staking page (Alt+6): the chain's slot and leader,
-this node as a validator with buttons to start and stop staking, how far the
-chain is anchored and final and the wallet's soft, anchored and final coins,
-the validators of the epoch and the newest anchors, and the wallet's bonds,
-with a key and an amount to bond or unbond (this node's key if none is
-entered; asked before it is sent).
+`fastblocks-qt` has a Staking page (Alt+6), in a scroll area whose boxes go one
+under the other in a narrow window. Its data comes from the RPCs above, fetched
+off the GUI thread every 3 s while it is shown (`NodeRpc::RunAsync`), and from
+the wallet's transactions:
+
+- the chain: slot and leader, anchors;
+- this node as a validator: staking on or off (buttons), its keys, their bonded,
+  unbonding and eligible stake, whether they are in the set, jailed or banned,
+  their share of the set's stake (the share of slots to expect), the next slot
+  they lead and when, the blocks of stake they made today and on the active
+  chain (`blocksmade`, `blocksmadesince` local midnight) and since the node
+  started, and the slots they missed since it started;
+- staking income of the wallet, today and in all: staked, anchor rewards,
+  slashing rewards (the transaction list's records of these types);
+- the wallet's coins by finality (soft, anchored, final), and how far the chain
+  is anchored and final;
+- the validator set of the epoch (key, stake, share, slots, status: this node,
+  in the set, jailed, banned) and the newest anchors;
+- the wallet's bonds, with a key (the bond selected, or this node's first key,
+  if none is entered) and an amount: Bond, Add to bond (to a bond the wallet
+  has), Unbond (the amount, at most what is bonded) and Unbond all. Each asks
+  before it is sent; what the page can tell is wrong (no amount, not a key, no
+  bond to add to or unbond from, more than is bonded) it says before sending,
+  and the node's error otherwise.
+
+## The block explorer
+
+The block explorer lists the newest blocks (up to 1000) with, after the height,
+their kind: **PoS** (a block of stake, a blue disc) or **PoW** (a merged mined
+block, an amber diamond; the marks are drawn with an outline, by shape as well
+as colour, so that they read on every theme). Then the slot and producer of a
+block of stake ("this node" for one of this node's keys, else the key
+shortened, in full in the tooltip), the mainchain block that committed to a
+merged mined block, and its finality (soft, anchored, final; as of the anchored
+and final tips of `getanchorinfo`). A block's details start with a summary
+(kind, slot and producer, the anchor it acknowledges or makes, finality,
+proofs) above the whole of `getblock`. Everything is fetched off the GUI thread
+(`NodeRpc::RunAsync`, `CallAsync`); blocks already read are not read again. On
+a chain without blocks of stake the FastBlocks columns are hidden.
 
 ## Fork choice
 
