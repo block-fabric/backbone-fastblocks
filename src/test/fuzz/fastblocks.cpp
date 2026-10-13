@@ -764,6 +764,21 @@ struct FastChain {
     void PeerHeader(FuzzedDataProvider& fdp)
     {
         if (fdp.ConsumeIntegralInRange<int>(0, 3) == 0) Hooks().ForgetKnownSets();
+        // From one of four peers (or the node itself); now and then a peer leaves, and what it alone
+        // held (unchecked headers) goes with it.
+        const int64_t source{fdp.ConsumeIntegralInRange<int64_t>(-1, 3)};
+        if (fdp.ConsumeIntegralInRange<int>(0, 7) == 0) {
+            LOCK(::cs_main);
+            const int64_t gone{fdp.ConsumeIntegralInRange<int64_t>(0, 3)};
+            std::vector<uint256> alone;
+            for (const auto& [index, entry] : Chainman().m_unchecked) {
+                if (entry.holders == std::vector<int64_t>{gone}) alone.push_back(index->GetBlockHash());
+            }
+            Chainman().UncheckedSourceGone(gone);
+            for (const uint256& hash : alone) assert(!Chainman().m_blockman.LookupBlockIndex(hash));
+            Chainman().CheckUnchecked();
+        }
+        if (source >= 0) WITH_LOCK(::cs_main, Chainman().UncheckedSourceAdded(source));
         const CBlockIndex* prev;
         {
             LOCK(::cs_main);
@@ -802,10 +817,18 @@ struct FastChain {
         }
         const bool had{WITH_LOCK(::cs_main, return Chainman().m_blockman.LookupBlockIndex(header.GetHash()) != nullptr)};
         BlockValidationState state;
-        Chainman().ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state);
+        const bool prev_unchecked{WITH_LOCK(::cs_main, return prev->m_unchecked)};
+        Chainman().ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, nullptr, source);
         LOCK(::cs_main);
+        // The budget of unchecked headers: each peer's, and the node's in all (but its own).
+        Chainman().CheckUnchecked();
+        const auto limits{Hooks().UncheckedLimits()};
+        for (int64_t peer{0}; peer < 4; ++peer) assert(Chainman().UncheckedHeld(peer) <= limits.per_peer);
+        assert(Chainman().m_unchecked.size() <= limits.total + Chainman().UncheckedHeld(-1));
         const CBlockIndex* index{Chainman().m_blockman.LookupBlockIndex(header.GetHash())};
         if (!index || had) return;
+        // Taken unchecked (its leader unknown, or on an unchecked header): held by its sender.
+        if (leader.status == pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN || prev_unchecked) assert(index->m_unchecked && Chainman().HoldsUnchecked(*index, source));
         const pos::ChainKey before{pos::ChainKey::FromWork(prev->nChainWork)};
         const pos::ChainKey after{pos::ChainKey::FromWork(index->nChainWork)};
         assert(after.anchors <= before.anchors + 1);

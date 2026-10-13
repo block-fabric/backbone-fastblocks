@@ -12,9 +12,10 @@ next epoch is that of its own anchor, which the observer never connected, then a
 block, H, makes side B overtake. A peer gives the observer side B's headers with H's signature forged
 (the block hash does not cover it). Then node 2 connects: the observer cannot check the leader's
 signature of H before it connects side B, nor connect side B without H. It takes H's block with the
-header's signature, keeping the other one, and when it connects side B the valid signature replaces
-the forged one. (It turned H away before, and asked for it again only once its parent was connected,
-which never came: the download of side B stalled for good.)
+header's signature (the attacker stays connected, holding the forged header); when it connects side B
+the forged signature fails, the copy's fault and not the block's, node 2 is asked for its headers
+again, and the leader's signature replaces the forged one. (It turned H away before, and asked for it
+again only once its parent was connected, which never came: the download of side B stalled for good.)
 """
 
 import os
@@ -24,6 +25,7 @@ from decimal import Decimal
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
 from test_framework.fastblocks import (
     KEYS,
+    MsgRawBlock,
     REGTEST_GENESIS_TIME,
     SLOT,
     XONLY,
@@ -50,6 +52,21 @@ class FastBlocksPeer(P2PInterface):
 
     def on_fbevidence(self, message):
         pass
+
+
+class ForgingPeer(FastBlocksPeer):
+    """A peer that serves the blocks it is given (as bytes, by hash): copies of honest blocks, one with
+    its leader's signature forged."""
+
+    def __init__(self, blocks):
+        super().__init__()
+        self.blocks = blocks
+
+    def on_getdata(self, message):
+        for inv in message.inv:
+            raw = self.blocks.get(f"{inv.hash:064x}")
+            if raw is not None:
+                self.send_without_ping(MsgRawBlock(raw))
 
 
 class FastBlocksForkTest(SidechainTest):
@@ -179,19 +196,30 @@ class FastBlocksForkTest(SidechainTest):
         index = [header_hash(x) for x in headers].index(h)
         honest_h = bytes(headers[index])
         headers[index][112:176] = bytes(64)
-        attacker = observer.add_p2p_connection(FastBlocksPeer())
+        # It serves side B's blocks too, H's with the forged signature (the block hash does not cover it).
+        blocks = {}
+        for header in headers:
+            raw = bytearray.fromhex(n2.getblock(header_hash(header), 0))
+            raw[:len(header)] = header
+            blocks[header_hash(header)] = bytes(raw)
+        attacker = observer.add_p2p_connection(ForgingPeer(blocks))
         attacker.send_and_ping(headers_message(headers))
         assert_equal(observer.getblockheader(header_hash(headers[-1]))["height"], n2.getblockcount())
         assert observer.getblockheader(h, False) != honest_h.hex()
-        attacker.peer_disconnect()
-        attacker.wait_for_disconnect()
         assert_equal(observer.getbestblockhash(), n0.getbestblockhash())
 
         self.log.info("Node 2 connects to the observer: it syncs side B, H with its leader's signature")
-        with observer.assert_debug_log(["which cannot be checked yet: taken with its header's"], timeout=60):
+        # (The attacker stays: the headers it alone held would go with it.) H's block, from the attacker
+        # with the forged signature, or from node 2 with the leader's (taken with the header's, the forged
+        # one), fails as H is connected: the copy's fault; node 2 is asked for its headers again, and the
+        # leader's signature replaces the forged one.
+        with observer.assert_debug_log(["its header's extension is replaced by another"], timeout=60):
             self.connect_nodes(3, 2)
             self.wait_until(lambda: observer.getblockheader(h)["confirmations"] > 0, timeout=60)
         assert_equal(observer.getblockheader(h, False), honest_h.hex())
+        assert attacker.is_connected
+        attacker.peer_disconnect()
+        attacker.wait_for_disconnect()
         assert_equal(observer.getblock(h, 0), n2.getblock(h, 0))
 
         self.log.info("The network joins again: one chain, side B's")

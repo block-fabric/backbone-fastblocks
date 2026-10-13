@@ -181,6 +181,7 @@ BASE_SCRIPTS = [
     'feature_fastblocks_fork.py',
     'feature_fastblocks_idle.py',
     'feature_fastblocks_restart.py',
+    'feature_fastblocks_unchecked.py',
     'feature_sidechain_network.py',
     'feature_sidechain_headers.py',
     'feature_sidechain_follower.py',
