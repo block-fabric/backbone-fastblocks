@@ -86,7 +86,7 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
                                   TransactionFilterProxy::TYPE(TransactionRecord::SendToOther));
     typeWidget->addItem(tr("Mined"), TransactionFilterProxy::TYPE(TransactionRecord::Generated));
     typeWidget->addItem(tr("Staked"), TransactionFilterProxy::TYPE(TransactionRecord::Staked));
-    typeWidget->addItem(tr("Anchor reward"), TransactionFilterProxy::TYPE(TransactionRecord::AnchorReward));
+    typeWidget->addItem(tr("BMM reward"), TransactionFilterProxy::TYPE(TransactionRecord::AnchorReward));
     typeWidget->addItem(tr("Slashing reward"), TransactionFilterProxy::TYPE(TransactionRecord::SlashingReward));
     typeWidget->addItem(tr("Other"), TransactionFilterProxy::TYPE(TransactionRecord::Other));
 

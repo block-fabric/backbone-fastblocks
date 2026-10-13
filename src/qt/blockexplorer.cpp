@@ -96,8 +96,8 @@ QIcon KindIcon(const QString& kind)
 
 QString FinalityTip()
 {
-    return QObject::tr("Soft: only blocks of stake are on it. Anchored: the mainchain committed to it or a block after it. "
-                       "Final: enough anchors cover it.");
+    return QObject::tr("Soft: only blocks of stake are on it. BMM-confirmed: a BMM commitment on the mainchain covers it (a BMM block recorded one for it or a block after it). "
+                       "Final: enough BMM commitments cover it.");
 }
 } // namespace
 
@@ -322,11 +322,11 @@ QString BlockExplorer::finalityOf(const BlockRow& row) const
     // As of the last refresh: blocks on the active chain, up to the anchored and final tips.
     if (!row.kind.isEmpty() && m_last.anchored_height && m_last.final_height) {
         if (row.height <= *m_last.final_height) return tr("final");
-        if (row.height <= *m_last.anchored_height) return tr("anchored");
+        if (row.height <= *m_last.anchored_height) return tr("BMM-confirmed");
         return tr("soft");
     }
     if (row.finality == QStringLiteral("final")) return tr("final");
-    if (row.finality == QStringLiteral("anchored")) return tr("anchored");
+    if (row.finality == QStringLiteral("anchored")) return tr("BMM-confirmed");
     if (row.finality == QStringLiteral("soft")) return tr("soft");
     return row.finality;
 }
@@ -348,15 +348,15 @@ void BlockExplorer::applyBlocks(Snapshot snapshot)
         m_blocks->setItem(row, COL_HEIGHT, Item(QString::number(block.height)));
         auto* kind{Item(KindName(block.kind))};
         if (block.kind == QStringLiteral("pos") && block.ack) {
-            kind->setText(tr("PoS + PoW anchor"));
+            kind->setText(tr("BMM"));
             kind->setIcon(ack_icon);
-            kind->setToolTip(tr("A block of stake that acknowledges a merged mined anchor: the mainchain block %1 committed to a ticket of this chain").arg(block.main_height));
+            kind->setToolTip(tr("A BMM block: it records the BMM commitment mainchain block %1 made for this chain, which ties it to the mainchain; deposits and withdrawals happen in it").arg(block.main_height));
         } else if (block.kind == QStringLiteral("pos")) {
             kind->setIcon(pos_icon);
             kind->setToolTip(tr("A block of stake"));
         } else if (block.kind == QStringLiteral("bmm")) {
             kind->setIcon(pow_icon);
-            kind->setToolTip(tr("A merged mined block"));
+            kind->setToolTip(tr("A merged mined block (proof of work): made only while no blocks of stake come"));
         }
         m_blocks->setItem(row, COL_KIND, kind);
         m_blocks->setItem(row, COL_SLOT, Item(block.slot));
@@ -364,7 +364,7 @@ void BlockExplorer::applyBlocks(Snapshot snapshot)
         producer->setToolTip(block.proposer);
         m_blocks->setItem(row, COL_PRODUCER, producer);
         auto* main{Item(block.main_height)};
-        if (block.ack) main->setToolTip(tr("The mainchain block that committed to the anchor this block acknowledges"));
+        if (block.ack) main->setToolTip(tr("The mainchain block whose BMM commitment this BMM block records"));
         m_blocks->setItem(row, COL_MAINCHAIN, main);
         m_blocks->setItem(row, COL_FINALITY, Item(finalityOf(block)));
         m_blocks->setItem(row, COL_TIME, Item(Time(block.time)));
@@ -437,22 +437,22 @@ void BlockExplorer::displayBlock(const QString& hash, const UniValue& block)
         lines << tr("<b>Kind:</b> %1").arg(escape(tr("PoS (slot %1, producer %2)").arg(Text(block.find_value("slot")), who)));
         const UniValue& ack{block.find_value("ack")};
         if (ack.isObject()) {
-            lines << tr("<b>Anchor:</b> %1").arg(escape(tr("acknowledges the anchor committed at mainchain block %1, which anchors block %2; it takes the peg actions and pays the fee pot to the ticket's payee")
+            lines << tr("<b>BMM block:</b> %1").arg(escape(tr("yes: it records the BMM commitment of mainchain block %1, which covers block %2. Deposits and withdrawals happen here, and the fee pot goes to the BMM bidder")
                                                             .arg(Text(ack.find_value("mainheight")), ShortKey(Text(ack.find_value("anchored"))))));
         } else {
-            lines << tr("<b>Anchor:</b> %1").arg(escape(tr("none (it acknowledges no anchor)")));
+            lines << tr("<b>BMM block:</b> %1").arg(escape(tr("no (it records no BMM commitment)")));
         }
     } else if (kind == QStringLiteral("bmm")) {
         const UniValue& main{block.find_value("mainheight")};
         lines << tr("<b>Kind:</b> %1").arg(escape(main.isNum() ? tr("PoW (merge-mined, committed at mainchain block %1)").arg(Text(main)) : tr("PoW (merge-mined)")));
-        lines << tr("<b>Anchor:</b> %1").arg(escape(tr("anchors its parent; it takes the peg actions and pays the fee pot to its first output")));
+        lines << tr("<b>BMM block:</b> %1").arg(escape(tr("a merged mined block, made only while no blocks of stake come: its own BMM commitment covers its parent. Deposits and withdrawals happen here, and the fee pot goes to its first output")));
     }
     if (!kind.isEmpty()) {
         const UniValue& finality{block.find_value("finality")};
         if (finality.isObject()) {
             const QString status{Text(finality.find_value("status"))};
-            const QString word{status == QStringLiteral("final") ? tr("final") : status == QStringLiteral("anchored") ? tr("anchored") : tr("soft")};
-            lines << tr("<b>Finality:</b> %1").arg(escape(tr("%1 (%2 anchor(s) cover it)").arg(word, Text(finality.find_value("anchors")))));
+            const QString word{status == QStringLiteral("final") ? tr("final") : status == QStringLiteral("anchored") ? tr("BMM-confirmed") : tr("soft")};
+            lines << tr("<b>Finality:</b> %1").arg(escape(tr("%1 (%2 BMM commitment(s) cover it)").arg(word, Text(finality.find_value("anchors")))));
         } else {
             lines << tr("<b>Finality:</b> %1").arg(escape(tr("not on the active chain")));
         }

@@ -210,7 +210,7 @@ StakingPage::StakingPage(const PlatformStyle*, QWidget* parent) : QWidget(parent
         income->addWidget(all, row, 2);
     }};
     income_row(1, tr("Staked"), tr("The producer's share of the fees of the blocks of stake made, paid to this wallet"), m_income_staked_today, m_income_staked, "incomeStaked");
-    income_row(2, tr("Anchor rewards"), tr("The fee pot (and a share of the penalties) paid to this wallet as an anchor's payee: a merged mined block, or a ticket it bid for"), m_income_anchor_today, m_income_anchor, "incomeAnchor");
+    income_row(2, tr("BMM rewards"), tr("The fee pot (and a share of the penalties) paid to this wallet for BMM: a BMM commitment it bid for, or a merged mined block"), m_income_anchor_today, m_income_anchor, "incomeAnchor");
     income_row(3, tr("Slashing rewards"), tr("The reporter's share of the penalty of a validator that signed two blocks for a slot, for proofs this wallet's blocks carried"), m_income_slashing_today, m_income_slashing, "incomeSlashing");
     income_row(4, tr("Total"), {}, m_income_total_today, m_income_total, "incomeAll");
     income->setColumnStretch(0, 1);
@@ -221,14 +221,14 @@ StakingPage::StakingPage(const PlatformStyle*, QWidget* parent) : QWidget(parent
     finality_form->setRowWrapPolicy(QFormLayout::WrapLongRows);
     m_finality = Value(finality_box, "finalityStatus");
     m_finality->setToolTip(tr("Soft: only blocks of stake are on it, like an unconfirmed payment with slashing behind it. "
-                              "Anchored: the mainchain committed to a block at or after it; undoing it takes the mainchain's merged miners, not stake. "
-                              "Final: enough anchors cover it."));
+                              "BMM-confirmed: a BMM commitment on the mainchain covers it; undoing it takes the mainchain's merged miners, not stake. "
+                              "Final: enough BMM commitments cover it."));
     finality_form->addRow(m_finality);
     m_balance_soft = Value(finality_box, "balanceSoft");
     m_balance_anchored = Value(finality_box, "balanceAnchored");
     m_balance_final = Value(finality_box, "balanceFinal");
     finality_form->addRow(tr("Soft:"), m_balance_soft);
-    finality_form->addRow(tr("Anchored:"), m_balance_anchored);
+    finality_form->addRow(tr("BMM-confirmed:"), m_balance_anchored);
     finality_form->addRow(tr("Final:"), m_balance_final);
     right->addWidget(finality_box);
     right->addStretch();
@@ -243,9 +243,9 @@ StakingPage::StakingPage(const PlatformStyle*, QWidget* parent) : QWidget(parent
     m_validators->horizontalHeaderItem(2)->setToolTip(tr("Its share of the set's stake: of the slots it is expected to lead"));
     validators_layout->addWidget(m_validators);
     tables->addWidget(validators_box, 3);
-    auto* anchors_box{new QGroupBox(tr("Newest anchors"), content)};
+    auto* anchors_box{new QGroupBox(tr("Newest BMM blocks"), content)};
     auto* anchors_layout{new QVBoxLayout(anchors_box)};
-    m_anchors = MakeTable(anchors_box, "anchors", {tr("Block"), tr("Kind"), tr("Anchors block"), tr("Mainchain block")});
+    m_anchors = MakeTable(anchors_box, "anchors", {tr("Block"), tr("Kind"), tr("Covers block"), tr("Mainchain block")});
     anchors_layout->addWidget(m_anchors);
     tables->addWidget(anchors_box, 2);
     layout->addLayout(tables, 1);
@@ -272,10 +272,10 @@ StakingPage::StakingPage(const PlatformStyle*, QWidget* parent) : QWidget(parent
     m_add_bond_button->setToolTip(tr("Add coins to this wallet's bond to the key"));
     m_unbond_button = new QPushButton(tr("Unbond"), bonds_box);
     m_unbond_button->setObjectName("unbondButton");
-    m_unbond_button->setToolTip(tr("Take the amount entered back from the bond: paid to this wallet some anchors later (about two days on the main network)"));
+    m_unbond_button->setToolTip(tr("Take the amount entered back from the bond: paid to this wallet some BMM commitments later (about two days on the main network)"));
     m_unbond_all_button = new QPushButton(tr("Unbond all"), bonds_box);
     m_unbond_all_button->setObjectName("unbondAllButton");
-    m_unbond_all_button->setToolTip(tr("Take all of the bond back (all that is bonded when the unbond is mined): paid to this wallet some anchors later"));
+    m_unbond_all_button->setToolTip(tr("Take all of the bond back (all that is bonded when the unbond is mined): paid to this wallet some BMM commitments later"));
     bond_buttons->addWidget(m_bond_button);
     bond_buttons->addWidget(m_add_bond_button);
     bond_buttons->addWidget(m_unbond_button);
@@ -424,10 +424,10 @@ void StakingPage::bond(bool add)
     const QPointer<StakingPage> self{this};
     QString question;
     if (existing) {
-        question = tr("Add %1 to this wallet's bond of %2 to the validator key %3? The coins leave this wallet now; unbonding them takes some anchors.")
+        question = tr("Add %1 to this wallet's bond of %2 to the validator key %3? The coins leave this wallet now; unbonding them takes some BMM commitments.")
                        .arg(amount, Amount(existing->find_value("bonded")), ShortKey(key));
     } else {
-        question = tr("Bond %1 to the validator key %2? The coins leave this wallet now; unbonding them takes some anchors.").arg(amount, ShortKey(key));
+        question = tr("Bond %1 to the validator key %2? The coins leave this wallet now; unbonding them takes some BMM commitments.").arg(amount, ShortKey(key));
     }
     if (QMessageBox::question(this, tr("Staking"), question) != QMessageBox::Yes) return;
     if (!self || !m_wallet_model) return;
@@ -458,13 +458,13 @@ void StakingPage::unbond(bool all)
     }
     const QPointer<StakingPage> self{this};
     const QString what{all ? tr("all of the bond (%1 now)").arg(Amount(bonded)) : amount};
-    if (QMessageBox::question(this, tr("Staking"), tr("Unbond %1 from the validator key %2? The coins are paid back to this wallet some anchors later.").arg(what, ShortKey(key))) != QMessageBox::Yes) return;
+    if (QMessageBox::question(this, tr("Staking"), tr("Unbond %1 from the validator key %2? The coins are paid back to this wallet some BMM commitments later.").arg(what, ShortKey(key))) != QMessageBox::Yes) return;
     if (!self || !m_wallet_model) return;
     UniValue params{Args({key.toStdString()})};
     params.push_back(all ? std::string{"all"} : amount.toStdString());
     walletCall("createunbond", params, tr("Could not unbond"), [this](const UniValue& result) {
         m_bond_amount->clear();
-        tell(tr("The unbond of %1 is in transaction %2. It is paid to %3 at anchor %4 or so.")
+        tell(tr("The unbond of %1 is in transaction %2. It is paid to %3 at BMM commitment %4 or so.")
                  .arg(Amount(result.find_value("amount")), Text(result.find_value("txid")), Text(result.find_value("owner")), Text(result.find_value("releaseanchor"))),
              /*error=*/false);
     });
@@ -533,7 +533,7 @@ void StakingPage::apply(const Snapshot& snapshot)
     } else {
         summary = tr("Blocks of stake are off in this epoch (too few validators with stake bonded): the chain's blocks are merged mined only.");
     }
-    summary += QStringLiteral(" ") + tr("%1 anchors; the last one committed at mainchain block %2.").arg(Text(info["anchors"]), Text(info["lastanchormainheight"]));
+    summary += QStringLiteral(" ") + tr("%1 BMM commitments; the last one at mainchain block %2.").arg(Text(info["anchors"]), Text(info["lastanchormainheight"]));
     if (info["stalled"].get_bool() && info["active"].get_bool()) summary += QStringLiteral(" ") + tr("No blocks of stake lately: merged mined blocks carry the transactions.");
     m_summary->setText(summary);
 
@@ -543,7 +543,7 @@ void StakingPage::apply(const Snapshot& snapshot)
     if (snapshot.anchors) {
         const UniValue& a{*snapshot.anchors};
         const QString height{snapshot.chain ? Text((*snapshot.chain)["blocks"]) : QStringLiteral("?")};
-        m_finality->setText(tr("Best block %1. Anchored up to block %2, final up to block %3 (%4 anchor(s) make a block final).")
+        m_finality->setText(tr("Best block %1. BMM-confirmed up to block %2, final up to block %3 (%4 BMM commitment(s) make a block final).")
                                 .arg(height, Text(a["anchoredheight"]), Text(a["finalheight"]), Text(a["finalanchors"])));
         const UniValue& recent{a["recent"]};
         m_anchors->setRowCount(recent.size());
@@ -551,7 +551,7 @@ void StakingPage::apply(const Snapshot& snapshot)
             const UniValue& anchor{recent[i]};
             const int row{static_cast<int>(i)};
             m_anchors->setItem(row, 0, Item(Text(anchor["height"])));
-            m_anchors->setItem(row, 1, Item(Text(anchor["kind"]) == QStringLiteral("bmm") ? tr("merged mined block") : tr("ticket")));
+            m_anchors->setItem(row, 1, Item(Text(anchor["kind"]) == QStringLiteral("bmm") ? tr("merged mined block (PoW)") : tr("BMM block")));
             m_anchors->setItem(row, 2, Item(Text(anchor["anchoredheight"])));
             m_anchors->setItem(row, 3, Item(Text(anchor["mainheight"])));
             m_anchors->item(row, 0)->setToolTip(Text(anchor["block"]));
@@ -605,7 +605,7 @@ void StakingPage::apply(const Snapshot& snapshot)
             m_bonds->item(row, 0)->setToolTip(Text(bond["validator"]));
             m_bonds->setItem(row, 1, Item(Amount(bond["bonded"])));
             QStringList unbonds;
-            for (const UniValue& unbond : bond["unbonds"].getValues()) unbonds << tr("%1 at anchor %2").arg(Amount(unbond["amount"]), Text(unbond["releaseanchor"]));
+            for (const UniValue& unbond : bond["unbonds"].getValues()) unbonds << tr("%1 at BMM commitment %2").arg(Amount(unbond["amount"]), Text(unbond["releaseanchor"]));
             m_bonds->setItem(row, 2, Item(Amount(bond["unbonding"])));
             m_bonds->item(row, 2)->setToolTip(unbonds.join(QStringLiteral("\n")));
             QString state;

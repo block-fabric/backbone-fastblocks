@@ -448,7 +448,7 @@ void StakingTests::stakingTests()
     QCOMPARE(WITH_LOCK(::cs_main, return context.chainman->ActiveChain().Tip()->GetBlockHash()), anchor.GetHash());
     QTRY_VERIFY_WITH_TIMEOUT(!RowsOfType(transactions, TransactionRecord::AnchorReward).isEmpty(), 30000);
     const QModelIndex pot{RowsOfType(transactions, TransactionRecord::AnchorReward).first()};
-    QCOMPARE(pot.data(Qt::DisplayRole).toString(), QString{"Anchor reward"});
+    QCOMPARE(pot.data(Qt::DisplayRole).toString(), QString{"BMM reward"});
     QVERIFY(pot.data(TransactionTableModel::AmountRole).toLongLong() > 0);
     QCOMPARE(RowsOfType(transactions, TransactionRecord::Staked).first().data(Qt::DisplayRole).toString(), QString{"Staked"});
     CAmount staked{0};
@@ -465,7 +465,7 @@ void StakingTests::stakingTests()
         for (QComboBox* combo : view.findChildren<QComboBox*>()) {
             for (int i{0}; i < combo->count(); ++i) kinds << combo->itemText(i);
         }
-        QVERIFY2(kinds.contains("Staked") && kinds.contains("Anchor reward") && kinds.contains("Slashing reward") && kinds.contains("Mined"), qPrintable(kinds.join(", ")));
+        QVERIFY2(kinds.contains("Staked") && kinds.contains("BMM reward") && kinds.contains("Slashing reward") && kinds.contains("Mined"), qPrintable(kinds.join(", ")));
     }
     // The page adds them up.
     wait_refresh();
@@ -530,7 +530,7 @@ void StakingTests::stakingTests()
                 // A block of stake that acknowledges an anchor shows it, with the mainchain block that committed to it.
                 if (index->nNonce != 0) {
                     ++ack_rows;
-                    QCOMPARE(kind, QString{"PoS + PoW anchor"});
+                    QCOMPARE(kind, QString{"BMM"});
                     QCOMPARE(blocks->item(row, BlockExplorer::COL_MAINCHAIN)->text().toUInt(), index->nNonce);
                 } else {
                     QCOMPARE(kind, QString{"PoS"});
@@ -544,7 +544,7 @@ void StakingTests::stakingTests()
                 if (height > 0) QVERIFY2(!blocks->item(row, BlockExplorer::COL_MAINCHAIN)->text().isEmpty(), qPrintable(QString::number(height)));
             }
             const QString block_finality{blocks->item(row, BlockExplorer::COL_FINALITY)->text()};
-            QVERIFY2(block_finality == "soft" || block_finality == "anchored" || block_finality == "final", qPrintable(block_finality));
+            QVERIFY2(block_finality == "soft" || block_finality == "BMM-confirmed" || block_finality == "final", qPrintable(block_finality));
             // Everything up to the anchor's parent is final (one anchor makes a block final here).
             if (height < anchor_height) QCOMPARE(block_finality, QString{"final"});
         }

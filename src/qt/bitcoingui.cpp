@@ -322,7 +322,7 @@ void BitcoinGUI::createActions()
     tabGroup->addAction(sidechainAction);
 
     stakingAction = new QAction(platformStyle->SingleColorIcon(":/icons/synced"), tr("&Staking"), this);
-    stakingAction->setStatusTip(tr("Blocks of stake: this node as a validator, the validators, anchors and how final your coins are"));
+    stakingAction->setStatusTip(tr("Blocks of stake: this node as a validator, the validators, BMM blocks and how final your coins are"));
     stakingAction->setToolTip(stakingAction->statusTip());
     stakingAction->setCheckable(true);
     stakingAction->setShortcut(QKeySequence(QStringLiteral("Alt+6")));

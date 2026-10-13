@@ -401,7 +401,7 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
     case TransactionRecord::Staked:
         return tr("Staked");
     case TransactionRecord::AnchorReward:
-        return tr("Anchor reward");
+        return tr("BMM reward");
     case TransactionRecord::SlashingReward:
         return tr("Slashing reward");
     default:

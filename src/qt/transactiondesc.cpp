@@ -127,7 +127,7 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
         QString source{tr("Generated")};
         switch (rec->type) {
         case TransactionRecord::Staked: source = tr("Staked: the producer's share of a block of stake"); break;
-        case TransactionRecord::AnchorReward: source = tr("Anchor reward: the fee pot, paid to an anchor's payee"); break;
+        case TransactionRecord::AnchorReward: source = tr("BMM reward: the fee pot, paid to the BMM bidder"); break;
         case TransactionRecord::SlashingReward: source = tr("Slashing reward: the reporter's share of a penalty"); break;
         default: break;
         }
