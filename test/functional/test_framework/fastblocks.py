@@ -102,3 +102,147 @@ def bond_pop(key, owner_address, genesis_hash, hrp="rsc"):
     version, program = decode_segwit_address(hrp, owner_address)
     assert version == 0 and len(program) == 20
     return sign_schnorr(key, TaggedHash("hpos/bond", bytes(program) + bytes.fromhex(genesis_hash)[::-1]))
+
+
+def slot_of(time_):
+    """The slot of a time on regtest (1-second slots from the genesis time of the parameters)."""
+    return time_ - REGTEST_GENESIS_TIME
+
+
+#: Regtest's PosParams::genesis_time: slot s starts at this time plus s.
+REGTEST_GENESIS_TIME = 1296688602
+
+
+class RawMessage:
+    """A P2P message kept as its bytes: FastBlocks' own, and those with extended headers (the
+    framework's block and headers have Bitcoin's 80-byte header)."""
+    msgtype = b""
+
+    def __init__(self, data=b""):
+        self.data = data
+
+    def deserialize(self, f):
+        self.data = f.read()
+
+    def serialize(self):
+        return self.data
+
+    def __repr__(self):
+        return f"{self.msgtype.decode()}({len(self.data)} bytes)"
+
+
+class MsgTicket(RawMessage):
+    msgtype = b"fbticket"
+
+
+class MsgGetTickets(RawMessage):
+    msgtype = b"fbgettickets"
+
+
+class MsgEvidence(RawMessage):
+    msgtype = b"fbevidence"
+
+
+class MsgRawHeaders(RawMessage):
+    msgtype = b"headers"
+
+
+class MsgRawBlock(RawMessage):
+    msgtype = b"block"
+
+
+class MsgRawCompactBlock(RawMessage):
+    msgtype = b"cmpctblock"
+
+
+def use_raw_messages():
+    """Have the framework's peers read FastBlocks' messages, and blocks and headers, as bytes."""
+    from .p2p import MESSAGEMAP
+    for message in (MsgTicket, MsgGetTickets, MsgEvidence, MsgRawHeaders, MsgRawBlock, MsgRawCompactBlock):
+        MESSAGEMAP[message.msgtype] = message
+
+
+def headers_message(headers):
+    """A headers message of serialized headers, each as a block without transactions (a transaction
+    count of 0; and for an extended header, no sections)."""
+    return MsgRawHeaders(ser_compact_size(len(headers)) + b"".join(bytes(h) + (b"\x00\x00" if len(h) == POS_HEADER_SIZE else b"\x00") for h in headers))
+
+
+def ticket_bytes(anchored_hex, payee_script):
+    """A serialized anchor ticket: version 1, the block anchored, the payee."""
+    return b"\x01" + bytes.fromhex(anchored_hex)[::-1] + ser_compact_size(len(payee_script)) + payee_script
+
+
+def ticket_hash(ticket):
+    """h* of a serialized ticket, in hex as RPCs give it."""
+    return TaggedHash("hpos/ticket", ticket)[::-1].hex()
+
+
+def pos_header(prev_hex, slot, nonce=0, merkle=b"\x00" * 32, sections=b"\x00" * 32, sig=b"\x00" * 64, bits=None):
+    """An extended header of a block of stake (unsigned unless `sig`), on `prev_hex`, of `slot` (regtest)."""
+    header = (0x20000000 | POS_BLOCK_BIT).to_bytes(4, "little") + bytes.fromhex(prev_hex)[::-1] + merkle
+    header += (REGTEST_GENESIS_TIME + slot).to_bytes(4, "little") + (bits if bits is not None else REGTEST_POS_BITS).to_bytes(4, "little")
+    header += nonce.to_bytes(4, "little") + sections + sig
+    assert_equal(len(header), POS_HEADER_SIZE)
+    return bytearray(header)
+
+
+#: nBits of a block of stake on regtest: the proof-of-work limit's.
+REGTEST_POS_BITS = 0x207fffff
+
+
+def header_hash(header):
+    return hash256(bytes(header[:112]))[::-1].hex()
+
+
+def chain_headers(node, start_height=1):
+    """The serialized headers of `node`'s active chain from a height on."""
+    return [bytes.fromhex(node.getblockheader(node.getblockhash(h), False)) for h in range(start_height, node.getblockcount() + 1)]
+
+
+def activate_and_fund(test, funded=0, nodes=None):
+    """Activate slot 5 on the mainchain, deposit 50 to node `funded` and take it in with a BMM block
+    (which every node of `nodes` takes). `test` is a SidechainTest whose nodes follow its mainchain."""
+    main = test.main
+    test.mine_main(110)
+    main.createsidechainproposal(SLOT, "FastBlocks", "Blocks of stake between merged mined blocks", "11" * 32, "22" * 20)
+    test.mine_main(20 + 1)
+    node = test.nodes[funded]
+    main.createsidechaindeposit(SLOT, node.getdepositaddress()["depositaddress"], 50)
+    test.mine_main()
+    return bmm_block(test, node, nodes)
+
+
+def bmm_block(test, node, nodes=None):
+    """A BMM block by `node`, with its mempool; the mainchain commits to it; every node of `nodes` takes it."""
+    nodes = test.nodes if nodes is None else nodes
+    block = node.createbmmblock(node.getnewaddress())
+    test.main.createbmmrequest(SLOT, block["hash"], Decimal("0.001"))
+    test.mine_main()
+    test.wait_until(lambda: all(n.getbestblockhash() == block["hash"] for n in nodes), timeout=60)
+    return block["hash"]
+
+
+def write_key_file(test, i, keys=None):
+    """A key file with KEYS[i] (or `keys`), in the test's directory (not a node's: it outlives a wiped one)."""
+    import os
+    path = os.path.join(test.options.tmpdir, f"validator{i}.key")
+    with open(path, "w") as f:
+        f.write("".join(k.hex() + "\n" for k in (keys or [KEYS[i]])))
+    return path
+
+
+def bond_validators(test, funder, key_indices, amount=Decimal("0.01"), nodes=None):
+    """`funder`'s wallet bonds `amount` to each KEYS[i] (the proofs of possession made here); BMM blocks
+    take the bonds in and make a validator set with them (no validators before: BMM blocks carry the
+    transactions). Returns when every node of `nodes` has an active set."""
+    nodes = test.nodes if nodes is None else nodes
+    genesis = funder.getblockhash(0)
+    for i in key_indices:
+        owner = funder.getnewaddress()
+        funder.createbond(XONLY[i], amount, bond_pop(KEYS[i], owner, genesis).hex(), owner)
+    test.sync_mempools(nodes)
+    bmm_block(test, funder, nodes)
+    assert_equal(funder.getrawmempool(), [])
+    bmm_block(test, funder, nodes)
+    test.wait_until(lambda: all(n.getposinfo()["active"] for n in nodes), timeout=120)
