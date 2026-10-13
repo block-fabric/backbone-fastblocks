@@ -140,6 +140,12 @@ public:
      */
     virtual OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const;
     /**
+     * Whether a block that failed for this reason may be valid with another extension (a signature the
+     * node took in a header before it could check it, forged): the node asks its peers for their copy,
+     * whose extension replaces its own if valid (CheckOtherExtension, REPLACE). By default none.
+     */
+    virtual bool OtherExtensionMayFix(const std::string& reject_reason) const { return false; }
+    /**
      * How far ahead of the node's clock a block's time may be, in seconds (ContextualCheckBlockHeader,
      * "time-too-new", a header that may come later). By default Bitcoin's MAX_FUTURE_BLOCK_TIME. A chain
      * whose blocks come every few seconds may want less: far-ahead times push the median time past

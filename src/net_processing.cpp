@@ -933,6 +933,13 @@ private:
      * punished if the block is invalid.
      */
     std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
+    /**
+     * Blocks that failed for a reason another extension could fix (ChainHooks::OtherExtensionMayFix: a
+     * sidechain's signature the node took before it could check it, forged), and the peers asked for
+     * them since: a peer's copy may carry a valid one, which replaces the node's (AcceptBlockHeader).
+     * Each peer that has such a block is asked for it once. Bounded.
+     */
+    std::map<uint256, std::set<NodeId>> m_extension_reask GUARDED_BY(cs_main);
 
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
@@ -2394,6 +2401,9 @@ void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, c
     }
     if (it != mapBlockSource.end())
         mapBlockSource.erase(it);
+    if (state.IsInvalid() && block->IsExtended() && sidechain::Hooks().OtherExtensionMayFix(state.GetRejectReason()) && m_extension_reask.size() < 64) {
+        m_extension_reask.try_emplace(hash);
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -6300,6 +6310,20 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     nSyncStarted++;
                 }
             }
+        }
+
+        // A block that failed for a reason another extension could fix: asked for once from each peer that has it.
+        for (auto it{m_extension_reask.begin()}; it != m_extension_reask.end();) {
+            const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(it->first)};
+            if (!index || !(index->nStatus & BLOCK_FAILED_VALID)) {
+                it = m_extension_reask.erase(it);
+                continue;
+            }
+            if (state.pindexBestKnownBlock && state.pindexBestKnownBlock->GetAncestor(index->nHeight) == index && it->second.insert(node.GetId()).second) {
+                LogDebug(BCLog::NET, "block %s, which failed with an extension another may fix, asked for again from peer=%d", it->first.ToString(), node.GetId());
+                MakeAndPushMessage(node, NetMsgType::GETDATA, std::vector<CInv>{CInv(MSG_BLOCK | MSG_WITNESS_FLAG, it->first)});
+            }
+            ++it;
         }
 
         // Headers of this peer's that failed through no fault of its own: asked for again once the tip moved.
