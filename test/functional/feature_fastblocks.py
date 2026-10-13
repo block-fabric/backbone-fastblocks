@@ -171,8 +171,12 @@ class FastBlocksTest(SidechainTest):
         self.wait_until(lambda: n0.getposinfo()["pot"]["accrued"] >= pots[0]["value"])
         # The next acknowledgements pay it to the ticket's payee.
         received = n0.getreceivedbyaddress(ticket_address, 0)
-        self.anchor()
-        self.anchor()
+        # (The anchorer bids for every mainchain block as soon as it sees it: a ticket may anchor a
+        # block from before the one with the fee, and the next one pays it.)
+        for _ in range(5):
+            self.anchor()
+            if n0.getposinfo()["pot"]["paid"] == n0.getposinfo()["pot"]["accrued"]:
+                break
         self.wait_until(lambda: n0.getposinfo()["pot"]["paid"] == n0.getposinfo()["pot"]["accrued"], timeout=60)
         assert_equal(n0.getreceivedbyaddress(ticket_address, 0) - received, pots[0]["value"])
         self.wait_in_sync()
@@ -182,7 +186,11 @@ class FastBlocksTest(SidechainTest):
         withdrawal = n0.createwithdrawal(main.getnewaddress(), 3, Decimal("0.01"))
         self.wait_until(lambda: n0.gettransaction(withdrawal["txid"])["confirmations"] > 0, timeout=30)
         assert_equal(n0.getwithdrawalbundle()["status"], "next")
-        for _ in range(3):
+        # (A ticket made before the last commitment was acknowledged builds no bundle: once that
+        # acknowledgement is in, the anchorer makes its ticket again for a block after it, a moment
+        # later; mainchain blocks come minutes apart.)
+        for _ in range(6):
+            time.sleep(3)
             self.anchor()
             if n0.getwithdrawalbundle()["status"] != "next":
                 break
