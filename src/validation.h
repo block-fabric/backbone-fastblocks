@@ -990,6 +990,15 @@ public:
      * is built on them. @return whether anything was reconsidered
      */
     bool ReconsiderRecordFailure(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /**
+     * On a sidechain with extended blocks: the extension of a header the node has is replaced by
+     * another, valid one, the one it had being invalid (ChainHooks::CheckOtherExtension, REPLACE: a
+     * signature forged before the node could check it). The block stored with the old one, if any,
+     * is written again with the new one; a failure of the block (it failed with the old one), and of
+     * those built on it, is taken back -- but under a block that failed itself, or one the operator
+     * marked invalid.
+     */
+    void ReplaceBlockExtension(CBlockIndex* pindex, const BlockHeaderExtension& ext) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();

@@ -65,6 +65,9 @@ enum class OtherExtension : uint8_t {
     EQUIVALENT,
     //! The node cannot tell yet.
     UNKNOWN,
+    //! Valid, and the extension the node has is not: the node takes this one in its place (a header
+    //! taken before its signature could be checked, with a forged one).
+    REPLACE,
 };
 
 /**
@@ -163,6 +166,14 @@ public:
      * from the peers that are not. A chain that wants Bitcoin's punishment turns it off.
      */
     virtual bool PardonRecordFailures() const { return true; }
+
+    /**
+     * Whether a block that fails for `reject_reason` (a reason of the sidechain's own rules) fails
+     * whatever the record of the mainchain says: then it is not noted as failed against the record,
+     * and is not tried again when the record changes, nor pardoned. In addition to the template's own
+     * (sidechain::RecordIndependent). By default none.
+     */
+    virtual bool RecordIndependent(const std::string& reject_reason) const { return false; }
 
     /** Whether a header turned away for `reject_reason` may become valid later, and should wait. */
     virtual bool IsWaitReason(const std::string& reject_reason) const;
