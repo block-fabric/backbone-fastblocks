@@ -218,6 +218,12 @@ public:
      */
     virtual bool ApplyTx(State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const;
     /**
+     * Whether ApplyTx may refuse `tx` (it has outputs of the sidechain's own kinds): the mempool checks
+     * such transactions again after every change of its tip, and drops those the next block could no
+     * longer take (the state moved under them). By default none.
+     */
+    virtual bool HasTxRules(const CTransaction& tx) const { return false; }
+    /**
      * Peg actions of the sidechain's own, first in a block that takes them: what it adds to
      * `owed_tx` is paid by the coinbase as refunds are. Block assembly calls it too, with the block
      * as far as it is known then: its parent, version, time and sections (SidechainAssembly), and a

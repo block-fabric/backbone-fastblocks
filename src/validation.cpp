@@ -5322,7 +5322,8 @@ void Chainstate::RemoveStaleDrivechainTxs()
     AssertLockHeld(::cs_main);
     if (!m_mempool) return;
     AssertLockHeld(m_mempool->cs);
-    if (m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty()) return;
+    // (On a sidechain the hooks' own rules are checked again whatever else is in the mempool.)
+    if (!m_chainman.GetConsensus().sidechain.enabled && m_mempool->m_bmm_requests.empty() && m_mempool->m_escrow_txs.empty() && m_mempool->m_refunds.empty()) return;
     const CBlockIndex* tip{m_chain.Tip()};
     if (!tip) return;
 
@@ -5336,6 +5337,23 @@ void Chainstate::RemoveStaleDrivechainTxs()
         for (const auto& [withdrawal, txid] : m_mempool->m_refunds) {
             if (side.GetWithdrawal(withdrawal) && !side.InBundle(withdrawal) && !main_pending) continue;
             if (const CTransactionRef tx{m_mempool->get(txid)}) stale.push_back(tx);
+        }
+        // The sidechain's own rules (ChainHooks::HasTxRules), checked at entry against the tip then:
+        // a block may have changed the state they read (a name or an asset taken by another transaction
+        // that was mined first, say). Such a transaction no block takes would
+        // otherwise hold its inputs, and the wallet that made it, until the mempool expires it.
+        const int next_height{m_chain.Height() + 1};
+        for (const CTxMemPoolEntryRef& entry : m_mempool->entryAll()) {
+            const CTransaction& tx{entry.get().GetTx()};
+            if (!sidechain::Hooks().HasTxRules(tx)) continue;
+            sidechain::StoreOverlay scratch{side.View(), /*journal=*/false};
+            sidechain::State scratch_state{scratch};
+            std::vector<CTxOut> payouts;
+            std::string reason;
+            if (!sidechain::Hooks().ApplyTx(scratch_state, tx, next_height, /*peg_step=*/false, payouts, reason)) {
+                LogDebug(BCLog::MEMPOOL, "%s no longer keeps the rules of the sidechain (%s): out of the mempool\n", tx.GetHash().ToString(), reason);
+                stale.push_back(entry.get().GetSharedTx());
+            }
         }
     }
 
