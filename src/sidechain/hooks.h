@@ -116,13 +116,15 @@ public:
     virtual bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const;
     /**
      * The headers of one message (ChainstateManager::ProcessNewBlockHeaders: a headers message, a
-     * compact block's header), before CheckHeader is called for each of them; EndHeaders after. A
-     * chain may weigh a header by the chain the message claims it leads to (where a header of a
-     * branch it cannot check yet is taken only if it leads to more than the best header: the
-     * branch's first headers are not). Called with cs_main held.
+     * compact block's header, a waiting header taken in; ProcessNewBlock: a block's), and where they
+     * come from: the peer, -1 for none (the node itself, its operator, its disk). Before CheckHeader
+     * is called for each of them; EndHeaders after. A chain may count what each peer makes it take
+     * in (the headers it cannot check yet, say). Called with cs_main held.
      */
-    virtual void BeginHeaders(std::span<const CBlockHeader> headers) const {}
+    virtual void BeginHeaders(std::span<const CBlockHeader> headers, int64_t source) const {}
     virtual void EndHeaders() const {}
+    /** A peer is gone (net_processing, FinalizeNode): what a chain counted for it may go. Called with cs_main held. */
+    virtual void SourceGone(int64_t source) const {}
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
