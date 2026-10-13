@@ -153,8 +153,11 @@ is replaced by the valid one when it comes (template: `CheckOtherExtension`
 says `REPLACE`; the header or block with it replaces the extension, the stored
 block is written again with it, and a failure of the block with the forged one,
 `bad-pos-sig`, is taken back). A block with another signature than its header's
-that the node cannot check yet (`blk-extension-unknown`: the chain below is not
-connected) is asked for again once its parent is connected, not at once.
+that the node cannot check yet (the chain below is not connected) is taken, with
+its header's signature, and the other one kept (one per peer, for 1000 blocks):
+when the block is connected, where the node can tell, a valid one replaces an
+invalid one the header had (template: `ChainstateManager::m_other_extensions`).
+The block hash covers all but the signature: it is the same block.
 
 A header that may come later (`pos-time-future`, `pos-ack-unknown`,
 `pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
@@ -172,7 +175,7 @@ Block (`CheckBlock`):
 | `nNonce` is the acknowledged height, 0 without one | `bad-pos-ack-nonce` |
 | Ticket version 1 | `bad-pos-ticket-version` |
 | The payee is a standard script of 80 bytes or less, not data | `bad-pos-ticket-payee` |
-| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; if the node's own is not valid (taken before it could tell the leader), the valid one replaces it (see above); one the node cannot check yet (it cannot tell the leader) is not taken, and not punished either (`blk-extension-unknown`) | `bad-blk-extension` |
+| For a header the node has, the block carries that header's signature and sections hash: the block hash does not cover the signature (template, `AcceptBlock`; a mutated block, the header stays valid; a compact block with another one is not reconstructed). Another valid signature of the slot's leader is the same block (template hook `CheckOtherExtension`): taken with the node's own signature, which it keeps, and its peer not punished; if the node's own is not valid (taken before it could tell the leader), the valid one replaces it (see above); one the node cannot check yet (it cannot tell the leader) is taken with the header's signature, and tried when the block is connected (see above) | `bad-blk-extension` |
 
 Acknowledgement (state):
 

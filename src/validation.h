@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1219,6 +1220,28 @@ public:
      * that a peer flooding it with headers that will never be committed to only crowds out its own.
      */
     void AddBmmWaiting(const CBlockHeader& header, int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Other extensions than their header's that blocks came with, which the node could not check when
+     * they came (ChainHooks::CheckOtherExtension, UNKNOWN: a sidechain that cannot tell a signer
+     * before it connects the chain below), by block and by source (the peer; -1 for none). The block
+     * is stored with its header's extension -- the block hash covers all but the extension: it is the
+     * same block -- and each of these is tried when the block is connected, where the node can tell
+     * (TakeOtherExtensions): a valid one replaces an invalid one the header had. So a block the node
+     * cannot check yet is never turned away, which would stall the download of a branch whose chain
+     * below cannot be connected without it. One per source and block (the newest), so that a peer's
+     * forged ones crowd out only its own; bounded.
+     */
+    std::map<uint256, std::map<int64_t, BlockHeaderExtension>> m_other_extensions GUARDED_BY(::cs_main);
+    std::deque<uint256> m_other_extensions_order GUARDED_BY(::cs_main);
+    static constexpr size_t MAX_OTHER_EXTENSION_BLOCKS{1000};
+    static constexpr size_t MAX_OTHER_EXTENSION_SOURCES{128};
+    void AddOtherExtension(const CBlockIndex& index, const BlockHeaderExtension& ext, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * The other extensions noted for a block about to be connected (its parent is the tip): one the
+     * sidechain's rules find valid where the header's is not replaces it (Chainstate::
+     * ReplaceBlockExtension). The entry is dropped. @return whether the extension was replaced
+     */
+    bool TakeOtherExtensions(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** What the sidechain rules need to check a block; empty if this chain is not a sidechain. */
     std::optional<drivechain::SideContext> SideContext(CAmount& minted, sidechain::StoreOverlay& store) const;
 
@@ -1487,7 +1510,7 @@ public:
      * @param[out]  new_block A boolean which is set to indicate if the block was first received via this call
      * @returns     If the block was processed, independently of block validity
      */
-    bool ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block) LOCKS_EXCLUDED(cs_main);
+    bool ProcessNewBlock(const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked, bool* new_block, int64_t source = -1) LOCKS_EXCLUDED(cs_main);
 
     /**
      * Process incoming block headers.
@@ -1522,7 +1545,7 @@ public:
      *
      * @returns   False if the block or header is invalid, or if saving to disk fails (likely a fatal error); true otherwise.
      */
-    bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    bool AcceptBlock(const std::shared_ptr<const CBlock>& pblock, BlockValidationState& state, CBlockIndex** ppindex, bool fRequested, const FlatFilePos* dbp, bool* fNewBlock, bool min_pow_checked, int64_t source = -1) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 

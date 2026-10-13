@@ -927,13 +927,6 @@ private:
      * punished if the block is invalid.
      */
     std::map<uint256, std::pair<NodeId, bool>> mapBlockSource GUARDED_BY(cs_main);
-    /**
-     * Blocks that came with another extension than their header's, which the node could not check
-     * yet (blk-extension-unknown: a sidechain that cannot tell a signer before it connects the chain
-     * below). Not asked for again until the block's parent was connected: it would come back, and
-     * fail again, as fast as a peer sends it.
-     */
-    std::set<const CBlockIndex*> m_extension_unknown GUARDED_BY(cs_main);
 
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
@@ -1620,12 +1613,6 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     state->pindexLastCommonBlock = pindex;
                 }
                 continue;
-            }
-
-            // Its extension could not be checked: not before the chain below it is connected.
-            if (const auto unknown{m_extension_unknown.find(pindex)}; unknown != m_extension_unknown.end()) {
-                if (!pindex->pprev || !pindex->pprev->IsValid(BLOCK_VALID_SCRIPTS)) continue;
-                m_extension_unknown.erase(unknown);
             }
 
             // Is block in-flight?
@@ -2400,9 +2387,6 @@ void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, c
     }
     if (it != mapBlockSource.end())
         mapBlockSource.erase(it);
-    if (state.GetRejectReason() == "blk-extension-unknown") {
-        if (const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(hash)}) m_extension_unknown.insert(index);
-    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -3769,7 +3753,7 @@ void PeerManagerImpl::ProcessGetCFCheckPt(CNode& node, Peer& peer, DataStream& v
 void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked)
 {
     bool new_block{false};
-    m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
+    m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block, node.GetId());
     if (new_block) {
         node.m_last_block_time = GetTime<std::chrono::seconds>();
         // In case this block came from a different peer than we requested
