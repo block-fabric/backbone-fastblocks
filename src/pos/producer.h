@@ -9,12 +9,14 @@
 #include <key.h>
 #include <pos/evidence.h>
 #include <pos/header.h>
+#include <pos/params.h>
 #include <pos/protection.h>
 #include <primitives/block.h>
 #include <script/script.h>
 #include <sync.h>
 #include <uint256.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -57,10 +59,24 @@ public:
     void Stop() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
+     * Whether a slot no block could be made for may be tried again: the failure came before the
+     * slashing protection noted the slot (nothing was signed). COUNTED: giving the slot up counts in
+     * Status::failed; UNCOUNTED: not known yet whether a key of this node leads the slot.
+     */
+    enum class Retry { NO, COUNTED, UNCOUNTED };
+    /**
      * Make the block of `slot`, if a key of this node leads it.
+     * @param[out] retry  if given: whether the slot may be tried again; a failure that may is then not
+     *                    counted in Status::failed (the caller counts the slot once, when it gives it up)
      * @return its hash; nothing if no key of this node leads the slot, or, with `error` set, if no block could be made
      */
-    std::optional<uint256> Produce(int64_t slot, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    std::optional<uint256> Produce(int64_t slot, std::string& error, Retry* retry = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * How long into a slot the producer keeps trying it after a failure before the signature (the node
+     * still taking in a block that came at the slot's start, the tip moving while the block was built,
+     * the seed of the epoch not on record yet): a third of the slot, at least a second.
+     */
+    static int64_t RetrySeconds(const Consensus::PosParams& params) { return std::max<int64_t>(1, params.slot_seconds / 3); }
 
     struct Status {
         uint64_t produced{0};
@@ -68,6 +84,8 @@ public:
         uint64_t failed{0};
         int64_t last_slot{-1};
         std::string error;
+        //! Calls of Produce by the producer's thread (tries of slots, retries included).
+        uint64_t tries{0};
     };
     Status GetStatus() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Whether the producer makes blocks at its slots (setstaking): on when the node starts. */
@@ -110,6 +128,8 @@ public:
 
 private:
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** A slot given up after failures before the signature: counted once. */
+    void NoteFailedSlot() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     node::NodeContext& m_node;
     const FastBlocksHooks& m_hooks;

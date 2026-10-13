@@ -12,8 +12,9 @@
   - a block of stake splits its fees: half to its producer, half to the pot, which
     the next acknowledgement pays to the ticket's payee;
   - a withdrawal made in a block of stake goes into a bundle at an acknowledgement;
-  - slashing protection: the slots signed are on disk, and a second node with the
-    same key file does not start;
+  - slashing protection: the slots signed are on disk, next to the key file, and a second
+    node with the same key file does not start;
+  - without -validatorpayout, the producer's share goes to a new address of the node's wallet;
   - without blocks of stake for stall_seconds, BMM blocks carry transactions again.
 """
 
@@ -133,9 +134,9 @@ class FastBlocksTest(SidechainTest):
         info = n0.getposinfo()
         assert_equal(info["producer"]["keys"], [compute_xonly_pubkey(KEYS[0])[0].hex()])
         assert info["lastposslot"] > 0
-        # What each validator signed is on disk before its blocks went out.
+        # What each validator signed is on disk before its blocks went out, next to its key file.
         for i, node in enumerate(self.nodes):
-            with open(node.chain_path / "validator_protection.dat") as f:
+            with open(self.key_file(i) + ".protection") as f:
                 lines = f.read().splitlines()
             assert_equal(lines[0], "fastblocks-slashing-protection 1")
             assert_equal(lines[1].split()[0], compute_xonly_pubkey(KEYS[i])[0].hex())
@@ -194,19 +195,37 @@ class FastBlocksTest(SidechainTest):
 
         self.log.info("Slashing protection: a second node with the same keys does not start")
         self.stop_node(2)
+        # The slots signed are kept next to the key file (wiping the data directory keeps them).
+        protection = self.key_file(2) + ".protection"
+        assert not os.path.exists(n2.chain_path / "validator_protection.dat")
         # (What it signed before it stopped: read now, as it may sign again as soon as it starts.)
-        with open(n2.chain_path / "validator_protection.dat") as f:
+        with open(protection) as f:
             signed_before = int(f.read().splitlines()[1].split()[1])
         self.nodes[2].assert_start_raises_init_error(self.validator_args(2, key_index=0), expected_msg="FastBlocks block producer: cannot lock", match=ErrorMatch.PARTIAL_REGEX)
-        self.start_node(2, extra_args=self.validator_args(2))
+        # Without -validatorpayout: the producer's share goes to a new address of the node's wallet.
+        self.start_node(2, extra_args=self.side_args + [f"-validatorkeyfile={self.key_file(2)}"])
         self.connect_nodes(0, 2)
         self.connect_nodes(1, 2)
         self.wait_in_sync()
         # A restarted validator goes on, after the slots it signed before.
         self.wait_until(lambda: n2.getposinfo()["producer"]["produced"] > 0, timeout=60)
         self.wait_in_sync()
-        with open(n2.chain_path / "validator_protection.dat") as f:
+        with open(protection) as f:
             assert_greater_than(int(f.read().splitlines()[1].split()[1]), signed_before)
+        payout = n2.getstakinginfo()["payout"]
+        info = n2.getaddressinfo(payout)
+        assert info["ismine"]
+        assert_equal(info["labels"], ["validator payout"])
+        def paid():
+            if n2.getreceivedbyaddress(payout, 0) > 0:
+                return True
+            # Fees for its blocks to share.
+            n0.sendtoaddress(n1.getnewaddress(), Decimal("0.1"))
+            time.sleep(1)
+            return False
+        self.wait_until(paid, timeout=120)
+        assert any(t.get("income") == "staked" and t["address"] == payout for t in n2.listtransactions("*", 1000))
+        self.wait_in_sync()
 
         self.log.info("Without blocks of stake for stall_seconds, BMM blocks carry transactions")
         for i in range(self.num_nodes):

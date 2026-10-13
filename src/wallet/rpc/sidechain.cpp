@@ -283,6 +283,20 @@ UniValue BondJSON(const interfaces::Chain::Bond& bond)
     entry.pushKV("banned", bond.banned);
     return entry;
 }
+/** The owner of a bond to `pubkey` that this wallet made and that waits in the mempool, if any. */
+std::optional<uint160> PendingBondOwner(const CWallet& wallet, const uint256& pubkey) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    for (const auto& [txid, wtx] : wallet.mapWallet) {
+        if (!wtx.InMempool()) continue;
+        for (const CTxOut& out : wtx.GetTx()->vout) {
+            if (!pos::IsBondScript(out.scriptPubKey)) continue;
+            const auto bond{pos::ParseBond(out)};
+            if (bond && bond->pubkey == pubkey && !bond->owner.IsNull() && wallet.IsMine(GetScriptForDestination(WitnessV0KeyHash{bond->owner}))) return bond->owner;
+        }
+    }
+    return std::nullopt;
+}
 } // namespace
 
 RPCMethod createbond()
@@ -298,7 +312,7 @@ RPCMethod createbond()
             {"validator_pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The validator's x-only key"},
             {"amount", RPCArg::Type::AMOUNT, RPCArg::Optional::NO, "The amount in " + CURRENCY_UNIT + " to bond"},
             {"pop", RPCArg::Type::STR_HEX, RPCArg::DefaultHint{"signed by this node's validator key"}, "The proof of possession: the validator key's BIP340 signature of the bond's owner (signbondpop on the validator's node)"},
-            {"owner", RPCArg::Type::STR, RPCArg::DefaultHint{"the bond's owner, or a new address of this wallet"}, "The P2WPKH address of this wallet that owns the bond (the pop names it)"},
+            {"owner", RPCArg::Type::STR, RPCArg::DefaultHint{"the bond's owner, or that of a bond of this wallet waiting for a block, or a new address of this wallet"}, "The P2WPKH address of this wallet that owns the bond (the pop names it: required with pop for a first bond)"},
         },
         RPCResult{RPCResult::Type::OBJ, "", "",
         {
@@ -321,23 +335,40 @@ RPCMethod createbond()
     if (existing && existing->banned) throw JSONRPCError(RPC_INVALID_PARAMETER, "This validator is banned: it signed two blocks for a slot");
 
     EnsureWalletIsUnlocked(*pwallet);
-    // The owner: the bond's if it has one (more bonds name the same), else the one given, else a new address.
-    uint160 owner;
-    if (existing && !existing->owner.IsNull()) {
-        owner = existing->owner;
-        if (!WITH_LOCK(pwallet->cs_wallet, return pwallet->IsMine(GetScriptForDestination(WitnessV0KeyHash{owner})))) throw JSONRPCError(RPC_WALLET_ERROR, "Another wallet owns the bond of this validator");
-    } else if (!request.params[3].isNull()) {
+    // A bond of this wallet to the key that waits in the mempool names the owner the next must name
+    // too (once it is mined, a bond naming another would never be).
+    const std::optional<uint160> pending_owner{WITH_LOCK(pwallet->cs_wallet, return PendingBondOwner(*pwallet, pubkey))};
+    // The owner: the bond's if it has one (more bonds name the same), else the pending bond's, else the
+    // one given, else a new address.
+    std::optional<uint160> given_owner;
+    if (!request.params[3].isNull()) {
         const CTxDestination dest{DecodeDestination(request.params[3].get_str())};
         const WitnessV0KeyHash* keyhash{std::get_if<WitnessV0KeyHash>(&dest)};
         if (!keyhash) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The owner must be a P2WPKH address");
         if (!WITH_LOCK(pwallet->cs_wallet, return pwallet->IsMine(dest))) throw JSONRPCError(RPC_WALLET_ERROR, "The owner is not an address of this wallet");
-        owner = uint160{*keyhash};
+        given_owner = uint160{*keyhash};
+    }
+    uint160 owner;
+    if (existing && !existing->owner.IsNull()) {
+        owner = existing->owner;
+        if (!WITH_LOCK(pwallet->cs_wallet, return pwallet->IsMine(GetScriptForDestination(WitnessV0KeyHash{owner})))) throw JSONRPCError(RPC_WALLET_ERROR, "Another wallet owns the bond of this validator");
+    } else if (pending_owner) {
+        owner = *pending_owner;
+    } else if (given_owner) {
+        owner = *given_owner;
+    } else if (!request.params[2].isNull()) {
+        // A proof of possession names its owner: a new address could not match it.
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Give the owner the proof of possession was signed for (the owner argument)");
     } else {
         const auto dest{pwallet->GetNewDestination(OutputType::BECH32, "bond")};
         if (!dest) throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, util::ErrorString(dest).original);
         const WitnessV0KeyHash* keyhash{std::get_if<WitnessV0KeyHash>(&*dest)};
         if (!keyhash) throw JSONRPCError(RPC_WALLET_ERROR, "The wallet cannot make a P2WPKH address for the bond's owner");
         owner = uint160{*keyhash};
+    }
+    if (given_owner && *given_owner != owner) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("The bond of this validator is owned by %s%s: a bond must name it", EncodeDestination(WitnessV0KeyHash{owner}),
+                                                           existing && !existing->owner.IsNull() ? "" : " (a bond waiting for a block names it)"));
     }
     std::array<unsigned char, 64> pop;
     if (!request.params[2].isNull()) {
@@ -347,7 +378,9 @@ RPCMethod createbond()
     } else {
         const auto signed_pop{pwallet->chain().signBondPop(pubkey, owner)};
         if (!signed_pop) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "This node does not hold the validator key: give the proof of possession (signbondpop " + EncodeDestination(WitnessV0KeyHash{owner}) + " on its node)");
+            const std::string address{EncodeDestination(WitnessV0KeyHash{owner})};
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("This node does not hold the validator key: run signbondpop %s %s on its node, then createbond %s %s <pop> %s (with %s as owner)",
+                                                                HexStr(pubkey), address, HexStr(pubkey), FormatMoney(amount), address, address));
         }
         pop = *signed_pop;
     }
@@ -408,14 +441,17 @@ RPCMethod createunbond()
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("What stays bonded must be nothing or at least the minimum stake of %s %s", FormatMoney(staking.min_stake), CURRENCY_UNIT));
     }
 
-    // One unbond of a validator per block: a second with the same sequence could never be mined.
+    // One unbond of a validator per block: a second with the same sequence could never be mined. Only
+    // one in the mempool counts: one the mempool dropped (the state moved under it) never will be.
     {
         LOCK(pwallet->cs_wallet);
         for (const auto& [txid, wtx] : pwallet->mapWallet) {
-            if (pwallet->GetTxDepthInMainChain(wtx) != 0 || wtx.isAbandoned()) continue;
+            if (!wtx.InMempool()) continue;
             for (const CTxOut& out : wtx.GetTx()->vout) {
                 const auto pending{pos::ParseUnbond(out)};
-                if (pending && pending->pubkey == pubkey) throw JSONRPCError(RPC_WALLET_ERROR, "An unbond of this validator waits for a block: try again once it is mined");
+                if (pending && pending->pubkey == pubkey) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, strprintf("An unbond of this validator (%s) waits for a block: try again once it is mined", txid.GetHex()));
+                }
             }
         }
     }

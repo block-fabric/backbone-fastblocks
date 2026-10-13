@@ -64,6 +64,24 @@ void PushParentDescriptors(const CWallet& wallet, const CScript& script_pubkey, 
 
 void HandleWalletError(const std::shared_ptr<CWallet>& wallet, DatabaseStatus& status, bilingual_str& error);
 void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+
+/**
+ * FastBlocks: the anchors of the wallet's own chain (the one that ends at its last block, which may
+ * lag the node's tip during a reorg), fetched once per RPC call, on first use. A transaction's height
+ * and depth are the wallet's: the anchors have to be of the same chain, or a transaction the node just
+ * reorged out would show as anchored by the other branch's anchors.
+ */
+class WalletAnchors
+{
+public:
+    explicit WalletAnchors(const CWallet& wallet) : m_wallet{wallet} {}
+    //! (With the wallet's lock held.)
+    const std::optional<interfaces::Chain::Anchors>& Get();
+
+private:
+    const CWallet& m_wallet;
+    std::optional<std::optional<interfaces::Chain::Anchors>> m_anchors;
+};
 } //  namespace wallet
 
 #endif // BITCOIN_WALLET_RPC_UTIL_H

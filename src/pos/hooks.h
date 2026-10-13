@@ -198,6 +198,8 @@ public:
     bool BeforePegStep(sidechain::State& state, const CBlock& block, int height, const sidechain::PegStep& step, const Consensus::SidechainParams& params,
                        std::vector<CTxOut>& owed_tx, std::string& reject_reason) const override;
     bool ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const override;
+    //! Bonds and unbonds.
+    bool HasTxRules(const CTransaction& tx) const override;
     bool AfterBlock(sidechain::State& state, const CBlock& block, int height, const std::optional<sidechain::PegStep>& step, CAmount minted,
                     const Consensus::SidechainParams& params, std::string& reject_reason) const override;
 

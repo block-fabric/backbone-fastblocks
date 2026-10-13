@@ -18,7 +18,7 @@
 using interfaces::FoundBlock;
 
 namespace wallet {
-static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue& entry)
+static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue& entry, WalletAnchors& wallet_anchors)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     interfaces::Chain& chain = wallet.chain();
@@ -34,9 +34,9 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
         int64_t block_time;
         CHECK_NONFATAL(chain.findBlock(conf->confirmed_block_hash, FoundBlock().time(block_time)));
         entry.pushKV("blocktime", block_time);
-        // FastBlocks: how final the block is.
+        // FastBlocks: how final the block is, on the wallet's chain.
         if (confirms > 0) {
-            if (const auto anchors{chain.getAnchors()}) {
+            if (const auto& anchors{wallet_anchors.Get()}) {
                 const pos::Finality finality{pos::FinalityAt(conf->confirmed_block_height, confirms, anchors->anchored_heights, anchors->final_anchors)};
                 entry.pushKV("finality", pos::FinalityName(finality.status));
             }
@@ -326,7 +326,7 @@ static void MaybePushAddress(UniValue & entry, const CTxDestination &dest)
  * @param  filter_label   Optional label string to filter incoming transactions.
  */
 template <class Vec>
-static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, int nMinDepth, bool fLong,
+static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, WalletAnchors& anchors, int nMinDepth, bool fLong,
                              Vec& ret, const std::optional<std::string>& filter_label,
                              bool include_change = false)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
@@ -353,7 +353,7 @@ static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, int nM
             entry.pushKV("vout", s.vout);
             entry.pushKV("fee", ValueFromAmount(-nFee));
             if (fLong)
-                WalletTxToJSON(wallet, wtx, entry);
+                WalletTxToJSON(wallet, wtx, entry, anchors);
             entry.pushKV("abandoned", wtx.isAbandoned());
             ret.push_back(std::move(entry));
         }
@@ -407,7 +407,7 @@ static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, int nM
             }
             entry.pushKV("abandoned", wtx.isAbandoned());
             if (fLong)
-                WalletTxToJSON(wallet, wtx, entry);
+                WalletTxToJSON(wallet, wtx, entry, anchors);
             ret.push_back(std::move(entry));
         }
     }
@@ -538,12 +538,13 @@ RPCMethod listtransactions()
         LOCK(pwallet->cs_wallet);
 
         const CWallet::TxItems & txOrdered = pwallet->wtxOrdered;
+        WalletAnchors anchors{*pwallet};
 
         // iterate backwards until we have nCount items to return:
         for (CWallet::TxItems::const_reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
         {
             CWalletTx *const pwtx = (*it).second;
-            ListTransactions(*pwallet, *pwtx, 0, true, ret, filter_label);
+            ListTransactions(*pwallet, *pwtx, anchors, 0, true, ret, filter_label);
             if ((int)ret.size() >= (nCount+nFrom)) break;
         }
     }
@@ -671,11 +672,12 @@ RPCMethod listsinceblock()
     int depth = height ? wallet.GetLastBlockHeight() + 1 - *height : -1;
 
     UniValue transactions(UniValue::VARR);
+    WalletAnchors anchors{wallet};
 
     for (const auto& [_, tx] : wallet.mapWallet) {
 
         if (depth == -1 || abs(wallet.GetTxDepthInMainChain(tx)) < depth) {
-            ListTransactions(wallet, tx, 0, true, transactions, filter_label, include_change);
+            ListTransactions(wallet, tx, anchors, 0, true, transactions, filter_label, include_change);
         }
     }
 
@@ -692,7 +694,7 @@ RPCMethod listsinceblock()
             if (it != wallet.mapWallet.end()) {
                 // We want all transactions regardless of confirmation count to appear here,
                 // even negative confirmation ones, hence the big negative.
-                ListTransactions(wallet, it->second, -100000000, true, removed, filter_label, include_change);
+                ListTransactions(wallet, it->second, anchors, -100000000, true, removed, filter_label, include_change);
             }
         }
         blockId = block.hashPrevBlock;
@@ -801,10 +803,11 @@ RPCMethod gettransaction()
     if (CachedTxIsFromMe(*pwallet, wtx))
         entry.pushKV("fee", ValueFromAmount(nFee));
 
-    WalletTxToJSON(*pwallet, wtx, entry);
+    WalletAnchors anchors{*pwallet};
+    WalletTxToJSON(*pwallet, wtx, entry, anchors);
 
     UniValue details(UniValue::VARR);
-    ListTransactions(*pwallet, wtx, 0, false, details, /*filter_label=*/std::nullopt);
+    ListTransactions(*pwallet, wtx, anchors, 0, false, details, /*filter_label=*/std::nullopt);
     entry.pushKV("details", std::move(details));
 
     entry.pushKV("hex", EncodeHexTx(*wtx.GetTx()));

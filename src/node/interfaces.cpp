@@ -858,14 +858,17 @@ public:
     {
         return chainman().IsInitialBlockDownload();
     }
-    std::optional<Anchors> getAnchors() override
+    std::optional<Anchors> getAnchors(const uint256& tip_hash) override
     {
         const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
         if (!hooks) return std::nullopt;
         Anchors anchors;
         anchors.final_anchors = hooks->Params().final_anchors;
         LOCK(::cs_main);
-        anchors.anchored_heights = pos::AnchoredHeights(*hooks, *chainman().ActiveChain().Tip(), anchors.final_anchors);
+        // Any block: the wallet's last one may not be the tip (anymore).
+        const CBlockIndex* tip{chainman().m_blockman.LookupBlockIndex(tip_hash)};
+        if (!tip) return std::nullopt;
+        anchors.anchored_heights = pos::AnchoredHeights(*hooks, *tip, anchors.final_anchors);
         return anchors;
     }
     std::optional<Staking> getStaking() override

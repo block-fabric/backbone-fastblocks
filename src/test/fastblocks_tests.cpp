@@ -7,6 +7,8 @@
 // producer and its slashing protection. A chainstate of a regtest sidechain with three validators,
 // and a record of the mainchain the test writes itself.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <addresstype.h>
 #include <chain.h>
 #include <chainparams.h>
@@ -44,11 +46,21 @@
 #include <util/time.h>
 #include <validation.h>
 #include <validationinterface.h>
+#ifdef ENABLE_WALLET
+#include <rpc/request.h>
+#include <rpc/util.h>
+#include <univalue.h>
+#include <wallet/context.h>
+#include <wallet/test/util.h>
+#include <wallet/wallet.h>
+#endif
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <fstream>
 #include <memory>
+#include <thread>
 #include <optional>
 #include <string>
 #include <vector>
@@ -494,7 +506,25 @@ struct SeedSetup : public FastBlocksSetup {
     SeedSetup() : FastBlocksSetup{/*with_validators=*/true, /*lookahead=*/0} {}
 };
 
+/** Wait (real time) until `done`, at most `seconds`; whether it came. */
+bool WaitFor(const std::function<bool()>& done, int seconds = 20)
+{
+    const auto deadline{std::chrono::steady_clock::now() + std::chrono::seconds{seconds}};
+    while (!done()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+    return true;
+}
+
 } // namespace
+
+#ifdef ENABLE_WALLET
+namespace wallet {
+RPCMethod getbalances();
+RPCMethod gettransaction();
+} // namespace wallet
+#endif
 
 BOOST_AUTO_TEST_SUITE(fastblocks_tests)
 
@@ -3559,5 +3589,191 @@ BOOST_FIXTURE_TEST_CASE(staking_seen_from_the_state, NoValidatorsSetup)
     BOOST_CHECK_EQUAL(restarted.MaxFutureBlockTime(), MAX_FUTURE_BLOCK_TIME);
     restarted.Attach(nullptr);
 }
+
+BOOST_FIXTURE_TEST_CASE(producer_retries_before_signing, SeedSetup)
+{
+    // A slot whose block cannot be made at first, for a reason that comes before the slashing
+    // protection notes it (nothing signed), is tried again while the slot lasts: here the mainchain
+    // block that seeds the epoch comes just after the slot starts. (So too a block that arrives as the
+    // slot starts: the node still taking it in, or the tip moving while the block was built.)
+    StartPos();
+    const int64_t epoch{pos::EpochOf(base_slot, Pos()) + 1};
+    const int i{static_cast<int>(epoch * Pos().slots_per_epoch - base_slot)};
+    const int64_t slot{Slot(i)};
+    const uint256 before{Tip()->GetBlockHash()};
+    producer->Start();
+    BOOST_REQUIRE(WaitFor([&] { return producer->GetStatus().tries >= 1; }));
+    BOOST_CHECK(Tip()->GetBlockHash() == before);
+    // The seed's mainchain block, while the clock is still in the slot.
+    Main([&](sidechain::MainBlock& block) { block.time = GetTime() + 1; });
+    BOOST_CHECK_MESSAGE(WaitFor([&] { return Tip()->GetBlockHash() != before; }), "no block for the slot after the seed came");
+    producer->Stop();
+    BOOST_CHECK_EQUAL(pos::SlotOf(Tip()->nTime, Pos()), slot);
+    BOOST_CHECK_EQUAL(producer->GetStatus().produced, 1U);
+    // Not a failure: the slot was made.
+    BOOST_CHECK_EQUAL(producer->GetStatus().failed, 0U);
+    // A failure after the slot is noted is not tried again (a second block would be a second signature).
+    std::string error;
+    pos::Producer::Retry retry{pos::Producer::Retry::COUNTED};
+    BOOST_CHECK(!producer->Produce(slot, error, &retry));
+    BOOST_CHECK(retry != pos::Producer::Retry::NO); // (the chain has a block of the slot: before the signature)
+    producer->SetExtraCheckForTesting([](const CBlock&) -> std::optional<std::string> { return "refused by the test"; });
+    BOOST_CHECK(!producer->Produce(Slot(i + 1), error, &retry));
+    BOOST_CHECK_EQUAL(error, "the block is not valid: refused by the test");
+    BOOST_CHECK(retry == pos::Producer::Retry::NO);
+}
+
+BOOST_FIXTURE_TEST_CASE(protection_next_to_the_key_file, FastBlocksSetup)
+{
+    // The slashing protection lives next to the validator key file, not in the data directory: wiping
+    // the data directory to sync again keeps the key, and must keep the slots it signed. The file an
+    // older version kept in the data directory counts too.
+    ArgsManager& args{*m_node.args};
+    const fs::path dir{args.GetDataDirBase() / "validator_keys"};
+    fs::create_directories(dir);
+    const fs::path key_file{dir / "validator.key"};
+    {
+        std::ofstream out{key_file.std_path()};
+        out << HexStr(keys[2]) << "\n";
+    }
+    const fs::path legacy{args.GetDataDirNet() / "validator_protection.dat"};
+    {
+        std::ofstream out{legacy.std_path()};
+        out << "fastblocks-slashing-protection 1\n" << HexStr(XOnly(keys[2])) << " 100\n";
+    }
+    args.ForceSetArg("-validatorkeyfile", fs::PathToString(key_file));
+    std::string error;
+    {
+        const auto made{pos::Producer::FromArgs(m_node, Hooks(), error)};
+        BOOST_REQUIRE_MESSAGE(made, error);
+        BOOST_CHECK_EQUAL(made->LastSignedSlot(), 100);
+        // Without a wallet and -validatorpayout: the key's own address.
+        BOOST_CHECK(made->Payout() == GetScriptForDestination(WitnessV0KeyHash{keys[2].GetPubKey()}));
+    }
+    BOOST_CHECK(fs::exists(dir / "validator.key.protection"));
+    // The data directory wiped: the slot is still known.
+    fs::remove(legacy);
+    {
+        const auto made{pos::Producer::FromArgs(m_node, Hooks(), error)};
+        BOOST_REQUIRE_MESSAGE(made, error);
+        BOOST_CHECK_EQUAL(made->LastSignedSlot(), 100);
+    }
+    // A higher slot in an old file still counts (the highest of each key).
+    {
+        std::ofstream out{legacy.std_path()};
+        out << "fastblocks-slashing-protection 1\n" << HexStr(XOnly(keys[2])) << " 150\n";
+    }
+    {
+        const auto made{pos::Producer::FromArgs(m_node, Hooks(), error)};
+        BOOST_REQUIRE_MESSAGE(made, error);
+        BOOST_CHECK_EQUAL(made->LastSignedSlot(), 150);
+    }
+    fs::remove(legacy);
+    {
+        const auto made{pos::Producer::FromArgs(m_node, Hooks(), error)};
+        BOOST_REQUIRE_MESSAGE(made, error);
+        BOOST_CHECK_EQUAL(made->LastSignedSlot(), 150);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(mempool_drops_stale_staking_txs, FastBlocksSetup)
+{
+    // A bond or an unbond is checked against the tip when it enters the mempool. A block can then make
+    // it one no block will take: it must leave the mempool, or it holds its inputs (and the wallet that
+    // made it) until the mempool expires it, two weeks later.
+    StartPos();
+    COutPoint a, b, c, d;
+    CTxOut spent_a{Fund(COIN, a)}, spent_b{Fund(COIN, b)}, spent_c{Fund(COIN, c)}, spent_d{Fund(COIN, d)};
+    CKey validator, newcomer, other_owner;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    newcomer.MakeNewKey(/*fCompressed=*/true);
+    other_owner.MakeNewKey(/*fCompressed=*/true);
+    const CAmount min{Pos().min_stake};
+    Accept(Pay(a, spent_a, {BondOut(validator, 3 * min, Owner(key), &key, a)}));
+    // (After the blocks of the deposits.)
+    Take(PosBlock(10));
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), 0U);
+    // Two unbonds the owner signed with the same sequence (the second, say, after the first seemed
+    // lost), each valid on the tip: a block takes one, the other can never be mined.
+    const uint32_t sequence{Validator(XOnly(validator))->unbond_seq};
+    const CMutableTransaction first{Pay(a, spent_a, {UnbondOut(validator, min, sequence, key)})};
+    const CMutableTransaction second{Pay(b, spent_b, {UnbondOut(validator, 2 * min, sequence, key)})};
+    Accept(first);
+    Accept(second);
+    // Two first bonds of a key naming two owners (a wallet that bonded twice in a block): once one
+    // is mined, the other names the wrong owner.
+    const CMutableTransaction bond_x{Pay(c, spent_c, {BondOut(newcomer, min, Owner(key), &key, c)})};
+    const CMutableTransaction bond_y{Pay(d, spent_d, {BondOut(newcomer, min, Owner(other_owner), &other_owner, d)})};
+    Accept(bond_x);
+    Accept(bond_y);
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), 4U);
+    const CBlock block{PosBlock(11)};
+    BOOST_REQUIRE_EQUAL(block.vtx.size(), 3U);
+    Take(block);
+    // One of each pair was mined; the other left the mempool with the block.
+    BOOST_CHECK_EQUAL(m_node.mempool->size(), 0U);
+    BOOST_CHECK_EQUAL(Validator(XOnly(validator))->unbond_seq, sequence + 1);
+    BOOST_CHECK(Validator(XOnly(newcomer))->owner == Owner(key) || Validator(XOnly(newcomer))->owner == Owner(other_owner));
+    // The inputs of those not mined are free again.
+    for (const CMutableTransaction* tx : {&first, &second, &bond_x, &bond_y}) {
+        const bool mined{std::any_of(block.vtx.begin(), block.vtx.end(), [&](const CTransactionRef& in) { return in->GetHash() == tx->GetHash(); })};
+        if (mined) continue;
+        BOOST_CHECK(!WITH_LOCK(m_node.mempool->cs, return m_node.mempool->GetConflictTx(tx->vin.at(0).prevout)));
+    }
+}
+
+#ifdef ENABLE_WALLET
+BOOST_FIXTURE_TEST_CASE(wallet_finality_on_its_own_chain, FastBlocksSetup)
+{
+    // The finality the wallet shows is that of its own chain, the one that ends at its last block: in
+    // a reorg the node's tip moves first, and the anchors of the new branch must not make a payment
+    // the reorg took out look anchored or final. (The wallet here never hears of the reorg, as one
+    // that has not caught up with the validation queue.)
+    StartPos();
+    Take(PosBlock(1));
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    CKey wallet_key;
+    wallet_key.MakeNewKey(/*fCompressed=*/true);
+    const CMutableTransaction payment{Pay(coin, spent, {CTxOut{COIN / 2, GetScriptForDestination(WitnessV0KeyHash{wallet_key.GetPubKey()})}})};
+    Accept(payment);
+    const CBlockIndex* fork{Tip()};
+    const CBlock paying{PosBlock(2)};
+    Take(paying);
+    const int height{Tip()->nHeight};
+    std::shared_ptr<wallet::CWallet> wallet{wallet::CreateSyncedWallet(*m_node.chain, Chain().m_chain, wallet_key)};
+    wallet::WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    BOOST_REQUIRE(wallet::AddWallet(context, wallet));
+    const auto call{[&](RPCMethod (*method)(), UniValue params) {
+        JSONRPCRequest request;
+        request.context = &context;
+        request.params = std::move(params);
+        return method().HandleRequest(request);
+    }};
+    // On its chain: soft (no anchor covers the block yet).
+    BOOST_CHECK_EQUAL(call(wallet::getbalances, UniValue{UniValue::VARR})["mine"]["finality"]["soft"].getValStr(), "0.50000000");
+    // Another branch from below the payment's block, without it, with an anchor that covers its height.
+    BlockValidationState state;
+    BOOST_REQUIRE(Chain().InvalidateBlock(state, Index(paying.GetHash())));
+    BOOST_REQUIRE(Tip() == fork);
+    WITH_LOCK(m_node.mempool->cs, m_node.mempool->removeRecursive(CTransaction{payment}, MemPoolRemovalReason::CONFLICT));
+    Take(PosBlock(3));
+    BOOST_REQUIRE_EQUAL(Tip()->nHeight, height);
+    AckTip(4);
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), Pos().final_anchors)).at(0), height);
+    // The wallet still has the payment at that height, in the block of the other branch.
+    BOOST_REQUIRE(WITH_LOCK(wallet->cs_wallet, return wallet->GetLastBlockHash()) == paying.GetHash());
+    const UniValue finality{call(wallet::getbalances, UniValue{UniValue::VARR})["mine"]["finality"]};
+    BOOST_CHECK_EQUAL(finality["soft"].getValStr(), "0.50000000");
+    BOOST_CHECK_EQUAL(finality["anchored"].getValStr(), "0.00000000");
+    BOOST_CHECK_EQUAL(finality["final"].getValStr(), "0.00000000");
+    UniValue params{UniValue::VARR};
+    params.push_back(payment.GetHash().GetHex());
+    BOOST_CHECK_EQUAL(call(wallet::gettransaction, params)["finality"].get_str(), "soft");
+    BOOST_REQUIRE(wallet::RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt));
+}
+#endif // ENABLE_WALLET
 
 BOOST_AUTO_TEST_SUITE_END()

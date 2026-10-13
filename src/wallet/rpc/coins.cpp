@@ -454,8 +454,9 @@ RPCMethod getbalances()
         if (wallet.IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE)) {
             balances_mine.pushKV("used", ValueFromAmount(bal.m_mine_used));
         }
-        // FastBlocks: the coins of the wallet in blocks, by how final the blocks are.
-        if (const auto anchors{wallet.chain().getAnchors()}) {
+        // FastBlocks: the coins of the wallet in blocks, by how final the blocks are, on the wallet's
+        // chain (that of its last block: during a reorg, the node's tip may be on another).
+        if (const auto anchors{wallet.chain().getAnchors(wallet.GetLastBlockHash())}) {
             std::array<CAmount, 3> amounts{};
             for (const auto& [txid, wtx] : wallet.mapWallet) {
                 const auto* confirmed{wtx.state<TxStateConfirmed>()};

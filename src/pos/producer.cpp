@@ -9,11 +9,13 @@
 #include <common/args.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <interfaces/wallet.h>
 #include <kernel/chainparams.h>
 #include <key_io.h>
 #include <logging.h>
 #include <node/context.h>
 #include <node/miner.h>
+#include <outputtype.h>
 #include <pos/hooks.h>
 #include <pos/staking.h>
 #include <pubkey.h>
@@ -21,6 +23,7 @@
 #include <tinyformat.h>
 #include <txmempool.h>
 #include <util/fs.h>
+#include <util/result.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/thread.h>
@@ -34,6 +37,8 @@ namespace pos {
 namespace {
 //! Tickets (and offences) the producer leaves out of its blocks, at most.
 constexpr size_t MAX_REFUSED{1000};
+//! A slot that failed before the signature is tried again after this long (Producer::RetrySeconds).
+constexpr auto RETRY_INTERVAL{std::chrono::milliseconds{500}};
 
 uint256 XOnly(const CKey& key)
 {
@@ -65,6 +70,17 @@ bool Producer::Behind(ChainstateManager& chainman)
     return false;
 }
 
+namespace {
+//! The first wallet the node has loaded, if any.
+std::unique_ptr<interfaces::Wallet> FirstWallet(node::NodeContext& node)
+{
+    if (!node.wallet_loader) return nullptr;
+    auto wallets{node.wallet_loader->getWallets()};
+    if (wallets.empty()) return nullptr;
+    return std::move(wallets.front());
+}
+} // namespace
+
 std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const FastBlocksHooks& hooks, std::string& error)
 {
     const ArgsManager& args{*node.args};
@@ -95,7 +111,9 @@ std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const Fast
     }
     // (A key leads slots once it is in the validator set of an epoch: from the start, or bonded.)
     for (const CKey& key : keys) LogInfo("FastBlocks: validator key %s", HexStr(XOnly(key)));
-    // The producer's share of fees goes to -validatorpayout, or else to the first key (P2WPKH).
+    // The producer's share of fees goes to -validatorpayout; else to a new address of the node's
+    // wallet, which sees the income and keeps it whatever becomes of the (hot) key file; else, with no
+    // wallet loaded, to the first key (P2WPKH).
     CScript payout{GetScriptForDestination(WitnessV0KeyHash{keys[0].GetPubKey()})};
     if (args.IsArgSet("-validatorpayout")) {
         const CTxDestination dest{DecodeDestination(args.GetArg("-validatorpayout", ""))};
@@ -104,9 +122,24 @@ std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const Fast
             return nullptr;
         }
         payout = GetScriptForDestination(dest);
+    } else if (auto wallet{FirstWallet(node)}) {
+        const auto dest{wallet->getNewDestination(OutputType::BECH32, "validator payout")};
+        if (dest) {
+            payout = GetScriptForDestination(*dest);
+            LogInfo("FastBlocks: the producer's share of fees goes to %s, of the wallet \"%s\" (-validatorpayout to choose)", EncodeDestination(*dest), wallet->getWalletName());
+        } else {
+            LogWarning("FastBlocks: the wallet \"%s\" gives no address for the producer's share of fees (%s): it goes to the validator key's address %s",
+                       wallet->getWalletName(), util::ErrorString(dest).original, EncodeDestination(WitnessV0KeyHash{keys[0].GetPubKey()}));
+        }
+    } else {
+        LogWarning("FastBlocks: no wallet and no -validatorpayout: the producer's share of fees goes to the validator key's address %s, "
+                   "which no wallet sees (doc/fastblocks.md, \"Producer and anchorer\", says how to import it)", EncodeDestination(WitnessV0KeyHash{keys[0].GetPubKey()}));
     }
-    auto protection{SlashingProtection::Open(args.GetDataDirNet() / "validator_protection.dat", key_path.parent_path(),
-                                             fs::PathFromString(fs::PathToString(key_path.filename()) + ".lock"), error)};
+    // The slashing protection lives next to the key file (named after it), so that wiping the data
+    // directory to sync again keeps it; the file of older versions, in the data directory, counts too.
+    const std::string key_name{fs::PathToString(key_path.filename())};
+    auto protection{SlashingProtection::Open(key_path.parent_path() / fs::PathFromString(key_name + ".protection"), key_path.parent_path(),
+                                             fs::PathFromString(key_name + ".lock"), error, std::vector<fs::path>{args.GetDataDirNet() / fs::u8path("validator_protection.dat")})};
     if (!protection) return nullptr;
     LogInfo("FastBlocks: block producer with %u validator key(s)", keys.size());
     return std::make_unique<Producer>(node, hooks, std::move(keys), std::move(payout), std::move(protection));
@@ -193,19 +226,52 @@ std::optional<std::array<unsigned char, 64>> Producer::SignBondPop(const uint256
 void Producer::Run()
 {
     const Consensus::PosParams& params{m_hooks.Params()};
-    int64_t last_tried{-1};
+    //! The last slot done with: made, given up, or not this node's.
+    int64_t last_done{-1};
+    //! A slot whose last try failed before the signature, and when to try it again.
+    int64_t retrying{-1};
+    Retry retrying_kind{Retry::NO};
+    SteadyClock::time_point next_try{};
     while (!m_stop) {
         const int64_t now{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
         const int64_t slot{SlotOf(now, params)};
-        if (m_enabled && slot > last_tried && now >= SlotTime(slot, params) && now > params.genesis_time) {
-            last_tried = slot;
+        // A slot that was being tried again and is over (or given up as the producer was turned off).
+        if (retrying >= 0 && (slot != retrying || !m_enabled)) {
+            if (retrying_kind == Retry::COUNTED) NoteFailedSlot();
+            last_done = std::max(last_done, retrying);
+            retrying = -1;
+        }
+        if (m_enabled && slot > last_done && now >= SlotTime(slot, params) && now > params.genesis_time &&
+            (slot != retrying || SteadyClock::now() >= next_try)) {
             std::string error;
-            const auto made{Produce(slot, error)};
-            if (!made && !error.empty()) LogDebug(BCLog::VALIDATION, "FastBlocks: no block for slot %d: %s\n", slot, error);
+            Retry retry{Retry::NO};
+            const auto made{Produce(slot, error, &retry)};
+            WITH_LOCK(m_mutex, ++m_status.tries);
+            // A failure before the slashing protection noted the slot (nothing signed): the slot is
+            // tried again, for a while. A block or a late block arriving as the slot starts (the node
+            // still taking it in, the tip moving while the block was built) would otherwise cost the
+            // whole slot.
+            if (!made && retry != Retry::NO && now < SlotTime(slot, params) + RetrySeconds(params)) {
+                if (slot != retrying) LogDebug(BCLog::VALIDATION, "FastBlocks: no block for slot %d yet, trying again: %s\n", slot, error);
+                retrying = slot;
+                retrying_kind = retry;
+                next_try = SteadyClock::now() + RETRY_INTERVAL;
+            } else {
+                last_done = slot;
+                retrying = -1;
+                if (!made && retry == Retry::COUNTED) NoteFailedSlot();
+                if (!made && !error.empty()) LogDebug(BCLog::VALIDATION, "FastBlocks: no block for slot %d: %s\n", slot, error);
+            }
         }
         WAIT_LOCK(m_mutex, lock);
         m_wake.wait_for(lock, std::chrono::milliseconds{100}, [this] { return m_stop.load(); });
     }
+}
+
+void Producer::NoteFailedSlot()
+{
+    LOCK(m_mutex);
+    ++m_status.failed;
 }
 
 std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAck>& ack, std::string& error, const std::vector<DoubleProposal>& evidence) const
@@ -269,16 +335,30 @@ bool Producer::Sign(CBlock& block, const CKey& key, const uint256& genesis)
     return key.SignSchnorr(BlockSigHash(block, genesis), block.ext.sig, /*merkle_root=*/nullptr, uint256::ZERO);
 }
 
-std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
+std::optional<uint256> Producer::Produce(int64_t slot, std::string& error, Retry* retry)
 {
     LOCK(m_produce_mutex);
     ChainstateManager& chainman{*m_node.chainman};
     const Consensus::PosParams& params{m_hooks.Params()};
+    if (retry) *retry = Retry::NO;
+    // Before the slashing protection notes the slot: nothing is signed, the slot may be tried again
+    // (the caller counts it as failed once, when it gives it up).
+    bool before_signing{true};
     const auto fail{[&](std::string why) -> std::optional<uint256> {
         error = std::move(why);
         LOCK(m_mutex);
-        ++m_status.failed;
+        if (before_signing && retry) {
+            *retry = Retry::COUNTED;
+        } else {
+            ++m_status.failed;
+        }
         m_status.error = error;
+        return std::nullopt;
+    }};
+    // Not known to lead the slot (yet): not counted as a failure, but worth trying again.
+    const auto unknown{[&](std::string why) -> std::optional<uint256> {
+        error = std::move(why);
+        if (retry) *retry = Retry::UNCOUNTED;
         return std::nullopt;
     }};
 
@@ -295,8 +375,8 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
         const FastBlocksHooks::SlotLeader leader{m_hooks.LeaderOf(*tip, slot)};
         switch (leader.status) {
         case FastBlocksHooks::LeaderStatus::INACTIVE: error = "no blocks of stake in this epoch: too few validators"; return std::nullopt;
-        case FastBlocksHooks::LeaderStatus::SEED_UNKNOWN: error = "the mainchain block that seeds the epoch is not on record yet"; return std::nullopt;
-        case FastBlocksHooks::LeaderStatus::SET_UNKNOWN: error = "the validator set of the epoch is not known"; return std::nullopt;
+        case FastBlocksHooks::LeaderStatus::SEED_UNKNOWN: return unknown("the mainchain block that seeds the epoch is not on record yet");
+        case FastBlocksHooks::LeaderStatus::SET_UNKNOWN: return unknown("the validator set of the epoch is not known");
         case FastBlocksHooks::LeaderStatus::OK: break;
         }
         leader_key = leader.pubkey;
@@ -346,7 +426,8 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error)
     if (!block) return fail(build_error);
     if (block->hashPrevBlock != tip_hash) return fail("the tip moved while the block was built");
 
-    // The slot is noted on disk before the signature exists.
+    // The slot is noted on disk before the signature exists: from here on it is not tried again.
+    before_signing = false;
     std::string protection_error;
     if (!m_protection->MaySign(leader_key, slot, protection_error)) return fail("slashing protection: " + protection_error);
     if (!Sign(*block, *key, chainman.GetConsensus().hashGenesisBlock)) return fail("signing failed");

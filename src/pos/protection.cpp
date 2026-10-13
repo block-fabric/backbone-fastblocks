@@ -9,6 +9,7 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <mutex>
@@ -27,7 +28,8 @@ std::set<fs::path> g_locks;
 fs::path LockPath(const fs::path& dir, const fs::path& name) { return fs::absolute(dir / name); }
 } // namespace
 
-std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& path, const fs::path& lock_dir, const fs::path& lock_name, std::string& error)
+std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& path, const fs::path& lock_dir, const fs::path& lock_name, std::string& error,
+                                                             const std::vector<fs::path>& merge_from)
 {
     {
         std::lock_guard lock{g_locks_mutex};
@@ -42,28 +44,52 @@ std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& pat
         g_locks.insert(LockPath(lock_dir, lock_name));
     }
     std::unique_ptr<SlashingProtection> protection{new SlashingProtection(path, lock_dir, lock_name)};
-    std::ifstream file{path.std_path()};
-    if (file.is_open()) {
-        std::string line;
-        if (!std::getline(file, line) || line != HEADER) {
-            error = strprintf("%s is not a slashing protection file", fs::PathToString(path));
-            return nullptr;
-        }
-        LOCK(protection->m_mutex);
-        while (std::getline(file, line)) {
-            if (line.empty()) continue;
-            const auto parts{util::SplitString(line, ' ')};
-            const auto key{parts.size() == 2 ? TryParseHex<uint8_t>(parts[0]) : std::nullopt};
-            const auto slot{parts.size() == 2 ? ToIntegral<int64_t>(parts[1]) : std::nullopt};
-            if (!key || key->size() != 32 || !slot) {
-                error = strprintf("%s has a line that does not read: %s", fs::PathToString(path), line);
-                return nullptr;
+    std::map<uint256, int64_t> slots;
+    if (!ReadSlots(path, slots, error)) return nullptr;
+    // Files kept elsewhere before (an older version of the node): what they hold counts too, the highest
+    // slot of each key, and goes into this file at once. A file that does not read stops the node: it
+    // may hold the last slot a key signed.
+    bool merged{false};
+    for (const fs::path& other : merge_from) {
+        std::map<uint256, int64_t> other_slots;
+        if (!ReadSlots(other, other_slots, error)) return nullptr;
+        for (const auto& [key, slot] : other_slots) {
+            auto [it, inserted]{slots.try_emplace(key, slot)};
+            if (inserted || it->second < slot) {
+                it->second = slot;
+                merged = true;
             }
-            auto& last{protection->m_slots[uint256{std::span<const unsigned char>{*key}}]};
-            last = std::max(last, *slot);
         }
     }
+    if (merged && !protection->Write(slots, error)) return nullptr;
+    LOCK(protection->m_mutex);
+    protection->m_slots = std::move(slots);
     return protection;
+}
+
+bool SlashingProtection::ReadSlots(const fs::path& path, std::map<uint256, int64_t>& slots, std::string& error)
+{
+    std::ifstream file{path.std_path()};
+    if (!file.is_open()) return true;
+    std::string line;
+    if (!std::getline(file, line) || line != HEADER) {
+        error = strprintf("%s is not a slashing protection file", fs::PathToString(path));
+        return false;
+    }
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        const auto parts{util::SplitString(line, ' ')};
+        const auto key{parts.size() == 2 ? TryParseHex<uint8_t>(parts[0]) : std::nullopt};
+        const auto slot{parts.size() == 2 ? ToIntegral<int64_t>(parts[1]) : std::nullopt};
+        if (!key || key->size() != 32 || !slot) {
+            error = strprintf("%s has a line that does not read: %s", fs::PathToString(path), line);
+            return false;
+        }
+        const uint256 pubkey{std::span<const unsigned char>{*key}};
+        auto [it, inserted]{slots.try_emplace(pubkey, *slot)};
+        if (!inserted) it->second = std::max(it->second, *slot);
+    }
+    return true;
 }
 
 SlashingProtection::~SlashingProtection()

@@ -315,14 +315,14 @@ public:
     //! Check if in IBD.
     virtual bool isInitialBlockDownload() = 0;
 
-    //! FastBlocks: the heights of the blocks the newest anchors of the active chain anchor (newest
-    //! first, at most final_anchors of them), and how many anchors make a block final. Nothing on
-    //! a chain without anchors.
+    //! FastBlocks: the heights of the blocks the newest anchors of the chain that ends at
+    //! `tip_hash` anchor (newest first, at most final_anchors of them), and how many anchors make a
+    //! block final. Nothing on a chain without anchors, or if the block is not known.
     struct Anchors {
         int final_anchors{0};
         std::vector<int> anchored_heights;
     };
-    virtual std::optional<Anchors> getAnchors() { return std::nullopt; }
+    virtual std::optional<Anchors> getAnchors(const uint256& tip_hash) { return std::nullopt; }
 
     //! FastBlocks: the validators in the state of the active chain (bonds), and the staking parameters.
     struct Bond {

@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace pos {
 
@@ -23,17 +24,21 @@ namespace pos {
  * node. A key never signs at or below a slot it signed before, so a restarted node (systemd) never
  * signs two blocks for one slot.
  *
- * The file has a line per key: the x-only key in hex and the slot. A lock file next to the validator
- * key file keeps a second node with the same keys from starting.
+ * The file has a line per key: the x-only key in hex and the slot. It lives next to the validator key
+ * file (so that wiping the node's data directory to sync again does not lose it), as does a lock file
+ * that keeps a second node with the same keys from starting.
  */
 class SlashingProtection
 {
 public:
     /**
-     * Open (or create) the file `path`, and take the lock `lock_name` in `lock_dir`.
-     * @return nullptr, with `error` set, if the file does not read or the lock is held
+     * Open (or create) the file `path`, and take the lock `lock_name` in `lock_dir`. The slots of the
+     * files `merge_from` (where an older version kept them), if they exist, count too: the highest of
+     * each key is written to `path` at once.
+     * @return nullptr, with `error` set, if a file does not read or the lock is held
      */
-    static std::unique_ptr<SlashingProtection> Open(const fs::path& path, const fs::path& lock_dir, const fs::path& lock_name, std::string& error);
+    static std::unique_ptr<SlashingProtection> Open(const fs::path& path, const fs::path& lock_dir, const fs::path& lock_name, std::string& error,
+                                                    const std::vector<fs::path>& merge_from = {});
     ~SlashingProtection();
     SlashingProtection(const SlashingProtection&) = delete;
     SlashingProtection& operator=(const SlashingProtection&) = delete;
@@ -49,6 +54,8 @@ public:
 private:
     SlashingProtection(fs::path path, fs::path lock_dir, fs::path lock_name) : m_path{std::move(path)}, m_lock_dir{std::move(lock_dir)}, m_lock_name{std::move(lock_name)} {}
     bool Write(const std::map<uint256, int64_t>& slots, std::string& error) const;
+    /** Add the slots of the file `path` to `slots` (the highest of each key); nothing if it does not exist. */
+    static bool ReadSlots(const fs::path& path, std::map<uint256, int64_t>& slots, std::string& error);
 
     const fs::path m_path;
     const fs::path m_lock_dir;

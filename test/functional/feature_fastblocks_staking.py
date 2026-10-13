@@ -8,7 +8,8 @@ enough stake is bonded. Two nodes, each with a validator key, against a mainchai
   - no validators: BMM blocks carry the transactions, the producers make nothing;
   - bonds: each node's wallet bonds pegged coins to its key (the node signs the proof of
     possession); the first wallet bonds to a third key, which no node runs, with a proof made
-    here (signbondpop's formula), and more stake; a BMM block carries the bonds;
+    here (signbondpop's formula, for the owner the error names), and more stake; bonds made twice
+    before a block name the same owner; a BMM block carries the bonds;
   - blocks of stake from the epoch after the one after the anchor that made the set: by the
     leaders that run, the third key's slots stay empty;
   - liveness: the third key made none of the many slots it led, and is jailed: out of the sets made
@@ -113,24 +114,43 @@ class FastBlocksStakingTest(SidechainTest):
 
         self.log.info("Bonds: each wallet to its node's key; a third key, with a proof of possession made here, and more stake")
         assert_raises_rpc_error(-8, "The amount must be positive", n0.createbond, XONLY[0], 0)
-        # A key the node does not hold needs its proof.
-        assert_raises_rpc_error(-8, "This node does not hold the validator key", n0.createbond, XONLY[2], 1)
         bond0 = n0.createbond(XONLY[0], Decimal("0.01"))
         assert_equal(bond0["eligible"], True)
-        bond1 = n1.createbond(XONLY[1], Decimal("0.01"))
-        owner2 = n0.getnewaddress()
+        # Bond twice before a block (the button clicked twice): the second names the first's owner,
+        # and both are mined (a second owner could never be once the first is).
+        bond1 = n1.createbond(XONLY[1], Decimal("0.005"))
+        bond1b = n1.createbond(XONLY[1], Decimal("0.005"))
+        assert_equal(bond1b["owner"], bond1["owner"])
+        # A key the node does not hold needs its proof: the error says how to get it, for which owner.
         genesis = n0.getblockhash(0)
+        try:
+            n0.createbond(XONLY[2], 1)
+            raise AssertionError("a bond without its proof of possession")
+        except JSONRPCException as e:
+            message = e.error["message"]
+        assert f"signbondpop {XONLY[2]} " in message, message
+        owner2 = message.split("(with ")[1].split(" as owner)")[0]
+        assert n0.getaddressinfo(owner2)["ismine"]
+        # Its node signs it (signbondpop there; here signbondpop's formula).
         pop = bond_pop(KEYS[2], owner2, genesis)
         assert_equal(n1.signbondpop(n1.getnewaddress())["pubkey"], XONLY[1])
-        # A proof for another owner is refused.
+        # A proof for another owner is refused; one without its owner too (a new address could not match).
         assert_raises_rpc_error(-8, "The proof of possession is not the validator key's signature for this owner", n0.createbond, XONLY[2], 1, pop.hex(), n0.getnewaddress())
-        bond2 = n0.createbond(XONLY[2], Decimal("0.05"), pop.hex(), owner2)
+        assert_raises_rpc_error(-8, "Give the owner the proof of possession was signed for", n0.createbond, XONLY[2], 1, pop.hex())
+        bond2 = n0.createbond(XONLY[2], Decimal("0.04"), pop.hex(), owner2)
         assert_equal(bond2["owner"], owner2)
+        # More, before a block: the pending bond's owner, the proof given or not, the owner given or not.
+        assert_raises_rpc_error(-8, f"The bond of this validator is owned by {owner2}", n0.createbond, XONLY[2], Decimal("0.005"), pop.hex(), n0.getnewaddress())
+        bond2b = n0.createbond(XONLY[2], Decimal("0.005"), pop.hex())
+        bond2c = n0.createbond(XONLY[2], Decimal("0.005"), pop.hex(), owner2)
+        assert_equal({bond2b["owner"], bond2c["owner"]}, {owner2})
         # A BMM block carries them (still no validators): the coins leave circulation into the state.
         self.bmm_block()
-        for txid in (bond0["txid"], bond2["txid"]):
+        for txid in (bond0["txid"], bond2["txid"], bond2b["txid"], bond2c["txid"]):
             assert_greater_than(n0.gettransaction(txid)["confirmations"], 0)
-        assert_greater_than(n1.gettransaction(bond1["txid"])["confirmations"], 0)
+        for txid in (bond1["txid"], bond1b["txid"]):
+            assert_greater_than(n1.gettransaction(txid)["confirmations"], 0)
+        assert_equal(n0.getrawmempool(), [])
         assert_equal(sorted(b["validator"] for b in n0.listbonds()), sorted([XONLY[0], XONLY[2]]))
         assert_equal([b["validator"] for b in n1.listbonds()], [XONLY[1]])
         assert_equal(len(n1.listbonds(True)), 3)
@@ -192,12 +212,12 @@ class FastBlocksStakingTest(SidechainTest):
         unbond = n1.createunbond(XONLY[1], "all")
         assert_equal(unbond["amount"], Decimal("0.015"))
         assert_equal(unbond["all"], True)
-        # One at a time: a second, with the same sequence, could never be mined.
+        # One at a time: a second, with the same sequence, could never be mined. The error names the first.
         try:
             n1.createunbond(XONLY[1])
             raise AssertionError("a second unbond was made")
         except JSONRPCException as e:
-            assert "waits for a block" in e.error["message"] or "nothing bonded" in e.error["message"], e.error
+            assert f"An unbond of this validator ({unbond['txid']}) waits for a block" in e.error["message"] or "nothing bonded" in e.error["message"], e.error
         owner = unbond["owner"]
         self.wait_until(lambda: n1.gettransaction(unbond["txid"])["confirmations"] > 0, timeout=60)
         listed = n1.listbonds()[0]

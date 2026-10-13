@@ -767,6 +767,7 @@ RPCMethod getstakinginfo()
             {RPCResult::Type::BOOL, "validator", "Whether the node has validator keys (-validatorkeyfile)"},
             {RPCResult::Type::BOOL, "enabled", "Whether it makes blocks of stake (setstaking)"},
             {RPCResult::Type::STR, "producererror", "Why the block producer could not start, if it could not"},
+            {RPCResult::Type::STR, "payout", /*optional=*/true, "Where the producer's share of fees goes: -validatorpayout, else an address of the node's wallet, else the first validator key's (P2WPKH)"},
             {RPCResult::Type::ARR, "keys", "Its validator keys",
             {
                 {RPCResult::Type::OBJ, "", "",
@@ -803,6 +804,10 @@ RPCMethod getstakinginfo()
     result.pushKV("validator", producer != nullptr);
     result.pushKV("enabled", producer && producer->Enabled());
     result.pushKV("producererror", hooks.ProducerError());
+    if (producer) {
+        CTxDestination payout;
+        result.pushKV("payout", ExtractDestination(producer->Payout(), payout) ? EncodeDestination(payout) : HexStr(producer->Payout()));
+    }
     const auto keys{LocalKeys(hooks)};
     const EpochSchedule schedule{ScheduleOf(hooks, chainman, pos::EpochOf(slot, params))};
     UniValue entries(UniValue::VARR);

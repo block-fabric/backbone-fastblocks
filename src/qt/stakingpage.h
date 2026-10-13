@@ -126,6 +126,7 @@ private:
     QLabel* m_next_slot{nullptr};
     QLabel* m_blocks_made{nullptr};
     QLabel* m_missed{nullptr};
+    QLabel* m_payout{nullptr};
     QLabel* m_income_staked_today{nullptr};
     QLabel* m_income_staked{nullptr};
     QLabel* m_income_anchor_today{nullptr};

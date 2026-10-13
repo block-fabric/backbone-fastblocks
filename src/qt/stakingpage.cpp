@@ -174,6 +174,7 @@ StakingPage::StakingPage(const PlatformStyle*, QWidget* parent) : QWidget(parent
     m_next_slot = Value(validator_box, "validatorNextSlot");
     m_blocks_made = Value(validator_box, "validatorBlocks");
     m_missed = Value(validator_box, "validatorMissed");
+    m_payout = Value(validator_box, "validatorPayout");
     overview->addRow(tr("Keys:"), m_keys);
     overview->addRow(tr("Bonded:"), m_bonded);
     overview->addRow(tr("Unbonding:"), m_unbonding);
@@ -184,6 +185,8 @@ StakingPage::StakingPage(const PlatformStyle*, QWidget* parent) : QWidget(parent
     overview->addRow(tr("Next slot it leads:"), m_next_slot);
     overview->addRow(tr("Blocks made:"), m_blocks_made);
     overview->addRow(tr("Missed slots:"), m_missed);
+    overview->addRow(tr("Fees paid to:"), m_payout);
+    m_payout->setToolTip(tr("Where the producer's share of the fees of this node's blocks of stake goes: -validatorpayout, else an address of the node's wallet, else the first validator key's own address"));
     m_share->setToolTip(tr("Leaders are picked by stake: the share of the set's stake is the share of the slots to expect"));
     m_missed->setToolTip(tr("Slots this node's keys led and it made no block for, since it started. A validator that misses too many in an epoch is jailed for a while."));
     validator_layout->addLayout(overview);
@@ -642,7 +645,7 @@ void StakingPage::showValidator(const UniValue& s, const UniValue* pos)
         QString status{tr("This node has no validator keys. Start it with -validatorkeyfile to make blocks of stake.")};
         if (!Text(s["producererror"]).isEmpty()) status += QStringLiteral(" ") + Text(s["producererror"]);
         m_staking_status->setText(status);
-        for (QLabel* label : {m_keys, m_bonded, m_unbonding, m_eligible, m_in_set, m_jail, m_share, m_next_slot, m_blocks_made, m_missed}) label->setText(tr("–"));
+        for (QLabel* label : {m_keys, m_bonded, m_unbonding, m_eligible, m_in_set, m_jail, m_share, m_next_slot, m_blocks_made, m_missed, m_payout}) label->setText(tr("–"));
         return;
     }
     const int64_t epoch{pos ? (*pos)["epoch"].getInt<int64_t>() : 0};
@@ -698,6 +701,7 @@ void StakingPage::showValidator(const UniValue& s, const UniValue* pos)
     made += QStringLiteral("; ") + tr("%1 since the node started, %2 of them acknowledgements").arg(Text(s["produced"]), Text(s["acknowledgements"]));
     m_blocks_made->setText(made);
     m_missed->setText(tr("%1 since the node started").arg(Text(s["failed"])));
+    m_payout->setText(Text(s.find_value("payout")));
 }
 
 void StakingPage::showIncome()

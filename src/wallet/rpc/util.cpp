@@ -174,4 +174,10 @@ void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet)
     entry.pushKV("lastprocessedblock", std::move(lastprocessedblock));
 }
 
+const std::optional<interfaces::Chain::Anchors>& WalletAnchors::Get()
+{
+    AssertLockHeld(m_wallet.cs_wallet);
+    if (!m_anchors) m_anchors = m_wallet.chain().getAnchors(m_wallet.GetLastBlockHash());
+    return *m_anchors;
+}
 } // namespace wallet

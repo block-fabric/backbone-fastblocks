@@ -9,7 +9,7 @@ set, a bootstrap of regtest), one key per node, each with a bond:
   - equivocation: a leader signs a second block for a slot it made a block of; the nodes find the
     proof in the headers, and a leader puts it in a block of stake;
   - the penalty: 10 % of the offender's stake goes, the rest is unbonded; it is banned (no set, no
-    bond); the reward is owed to the script of the first output of the block that carried the proof,
+    bond); an unbond of its owner waiting in the mempools can no longer be mined and leaves them; the reward is owed to the script of the first output of the block that carried the proof,
     and paid at the next peg step, with a share of the penalty's rest (the reserve) to the anchor's payee;
   - invalid evidence stays refused, and a proof is punished once;
   - banned, a validator leads no more from the next block (its slots stay empty), and a proof of
@@ -115,7 +115,21 @@ class FastBlocksSlashingTest(SidechainTest):
         # Its node stops making blocks first: another validator carries the proof (and is paid for it).
         tip = self.pos_tip(n0)
         offender = tip["proposer"]
-        self.nodes[XONLY.index(offender)].setstaking(False)
+        offender_node = self.nodes[XONLY.index(offender)]
+        offender_node.setstaking(False)
+        # Its owner unbonds part of the stake; no block takes it before the proof does (its node keeps
+        # it, at a priority below any fee; the others would refuse it so). The penalty unbonds the
+        # rest: the unbond can then never be mined, and must leave the mempool, its inputs free again.
+        offender_node.setnetworkactive(False)
+        self.wait_until(lambda: offender_node.getconnectioncount() == 0, timeout=30)
+        unbond = offender_node.createunbond(offender, BOND / 2)
+        for n in self.nodes:
+            n.prioritisetransaction(txid=unbond["txid"], fee_delta=-100000000)
+        offender_node.setnetworkactive(True)
+        for other in range(3):
+            if other != XONLY.index(offender):
+                self.connect_nodes(XONLY.index(offender), other)
+        assert unbond["txid"] in offender_node.getrawmempool()
         original, rival = self.rival(n0, tip["hash"])
         # Invalid evidence stays refused: the second header signed by another key is no proof.
         forged = PosBlock(n0.getblock(tip["hash"], 0))
@@ -144,11 +158,15 @@ class FastBlocksSlashingTest(SidechainTest):
         assert_equal(sorted(carrying["evidence"][0]["hashes"]), sorted([original.hash, rival.hash]))
         reporter = carrying["tx"][0]["vout"][0]["scriptPubKey"]["hex"]
         self.check_peg()
+        # The unbond the penalty made invalid left the mempool; its wallet can abandon it.
+        self.wait_until(lambda: unbond["txid"] not in offender_node.getrawmempool(), timeout=60)
+        offender_node.abandontransaction(unbond["txid"])
+        details = offender_node.gettransaction(unbond["txid"])["details"]
+        assert details and all(d["abandoned"] for d in details), details
         # Not twice: the same proof is no longer one this chain takes, and the offender's key no longer bonds.
         assert_raises_rpc_error(-8, "This validator is banned", n0.createbond, offender, BOND)
 
         self.log.info("Banned, it leads no more, from the block after the one that banned it")
-        offender_node = self.nodes[XONLY.index(offender)]
         offender_node.setstaking(True)
         schedule = n0.getleaderschedule()["slots"]
         assert all("leader" not in s for s in schedule if s.get("banned") == offender)
