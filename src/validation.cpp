@@ -7637,3 +7637,58 @@ void ChainstateManager::AddBmmWaiting(const CBlockHeader& header, int64_t peer) 
     }
     m_bmm_waiting.emplace(hash, BmmWaiting{header, peer, m_bmm_waiting_sequence++});
 }
+
+std::vector<std::pair<const CBlockIndex*, int64_t>> ChainstateManager::RetryBmmWaiting()
+{
+    AssertLockNotHeld(::cs_main);
+    std::vector<std::pair<CBlockHeader, int64_t>> pending;
+    {
+        LOCK(::cs_main);
+        if (!m_mainchain) return {};
+        std::multimap<int64_t, std::pair<CBlockHeader, int64_t>> ready;
+        for (const auto& [_, waiting] : m_bmm_waiting) {
+            if (const auto order{sidechain::Hooks().WaitingReady(waiting.header, *m_mainchain)}) ready.emplace(*order, std::make_pair(waiting.header, waiting.peer));
+        }
+        for (auto& [_, entry] : ready) pending.push_back(std::move(entry));
+    }
+    // Each stays in the store while it is tried: validation, finding it still waits, keeps it there with
+    // its peer, where a header taken out would come back without one (and the block never be fetched).
+    std::vector<std::pair<const CBlockIndex*, int64_t>> taken;
+    while (!pending.empty()) {
+        // A header the hooks put before its parent (the same key, say) is tried again after it, as long
+        // as each pass takes another header in.
+        std::vector<std::pair<CBlockHeader, int64_t>> orphans;
+        bool progress{false};
+        for (const auto& [header, peer] : pending) {
+            const uint256 hash{header.GetHash()};
+            BlockValidationState state;
+            const CBlockIndex* pindex{nullptr};
+            const bool accepted{ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex) && pindex};
+            LOCK(::cs_main);
+            const auto it{m_bmm_waiting.find(hash)};
+            if (accepted) {
+                // The peer may have been learned since the header was looked up.
+                const int64_t from{it != m_bmm_waiting.end() && it->second.peer >= 0 ? it->second.peer : peer};
+                if (it != m_bmm_waiting.end()) m_bmm_waiting.erase(it);
+                taken.emplace_back(pindex, from);
+                progress = true;
+            } else if (state.GetResult() == BlockValidationResult::BLOCK_MISSING_PREV) {
+                orphans.emplace_back(header, peer);
+            } else if (state.GetResult() == BlockValidationResult::BLOCK_TIME_FUTURE && sidechain::Hooks().IsWaitReason(state.GetRejectReason())) {
+                // Still waiting: kept, with its peer (put back if it was made room for meanwhile).
+                AddBmmWaiting(header, peer);
+            } else if (it != m_bmm_waiting.end()) {
+                m_bmm_waiting.erase(it);
+            }
+        }
+        pending.swap(orphans);
+        if (!progress) break;
+    }
+    // Headers whose parent did not come: they wait as long as it does. Of a parent not waiting, the
+    // peer that sent them sends the rest of its chain when asked, as for any header.
+    LOCK(::cs_main);
+    for (const auto& [header, _] : pending) {
+        if (!m_bmm_waiting.contains(header.hashPrevBlock)) m_bmm_waiting.erase(header.GetHash());
+    }
+    return taken;
+}
