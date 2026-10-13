@@ -213,9 +213,9 @@ class FastBlocksP2PTest(SidechainTest):
         tips = self.tips(late)
         slot = n0.getblock(newest)["slot"]
         # Nobody can tell yet whether they are signed: taken while the peer's budget of such headers
-        # lasts (the forged ones above used some of it), then not (pos-unchecked-budget), the peer
+        # lasts (the forged ones above used some of it), then not (unchecked-budget), the peer
         # not punished.
-        with late.assert_debug_log(["pos-unchecked-budget"]):
+        with late.assert_debug_log(["unchecked-budget"]):
             for k in range(SIBLINGS):
                 sibling = pos_header(newest, slot + 1, merkle=k.to_bytes(32, "little"))
                 attacker.send_without_ping(headers_message([sibling]))
@@ -232,7 +232,7 @@ class FastBlocksP2PTest(SidechainTest):
         for k in range(50):
             padded.append(pos_header(prev, slot + 1 + k, merkle=b"\x09" * 32))
             prev = header_hash(padded[-1])
-        with late.assert_debug_log(["pos-unchecked-budget"]):
+        with late.assert_debug_log(["unchecked-budget"]):
             attacker.send_and_ping(headers_message(padded))
         assert attacker.is_connected
         assert self.unknown(late, padded)

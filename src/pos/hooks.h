@@ -163,15 +163,13 @@ public:
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
     bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override;
     /**
-     * Where the headers being taken in come from: a header whose signature cannot be checked yet is
-     * taken from a peer only while fewer than `unchecked_headers_per_peer` of those it made the node
-     * take are still unchecked (pos-unchecked-budget). Called with cs_main held.
+     * A header of a block of stake whose leader the node cannot tell yet (LeaderOf: SET_UNKNOWN, the set
+     * of its epoch made by an anchor the node has not connected) is taken unchecked, within the
+     * template's budget (UncheckedLimits: unchecked_headers_per_peer, unchecked_headers_total). See
+     * doc/fastblocks.md, "Headers and blocks the node cannot check yet". Called with cs_main held.
      */
-    void BeginHeaders(std::span<const CBlockHeader> headers, int64_t source) const override;
-    void EndHeaders() const override;
-    void SourceGone(int64_t source) const override;
-    /** How many headers this peer made the node take that nobody could check, and that are not checked yet (connected). */
-    size_t UncheckedHeaders(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const override;
+    UncheckedBudget UncheckedLimits() const override;
     bool CheckBlock(const CBlock& block, BlockValidationState& state) const override;
     bool IsWaitReason(const std::string& reject_reason) const override;
     //! A node a little behind on the record after a mainchain reorg must not cut itself off from the peers that took an anchor back first.
@@ -180,12 +178,13 @@ public:
     uint256 SectionsHash(std::span<const unsigned char> sections) const override;
     /**
      * Another signature of the slot's leader over a block of stake the node has the header of is the
-     * same block: EQUIVALENT if both verify (the node keeps its own), UNKNOWN if the node cannot tell
-     * the leader yet, or did not check the one it has; INVALID otherwise.
+     * same block: EQUIVALENT if both verify (the node keeps its own), REPLACE if this one verifies and
+     * the node's (taken unchecked) does not, UNKNOWN if the node cannot tell the leader yet; INVALID
+     * otherwise.
      */
     sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override;
-    //! A block of stake whose signature fails: its header may have come with a forged one.
-    bool OtherExtensionMayFix(const std::string& reject_reason) const override { return reject_reason == "bad-pos-sig"; }
+    //! A block of stake whose signature fails: its header, taken unchecked, may have come with a forged one.
+    bool ExtensionFailure(const std::string& reject_reason) const override { return reject_reason == "bad-pos-sig"; }
     /**
      * 10 minutes while the network has blocks of stake (genesis validators, or the set the newest
      * anchor of the active chain made is active), Bitcoin's two hours otherwise: from the state of the
@@ -346,13 +345,6 @@ private:
     mutable Mutex m_final_mutex;
     mutable int m_final_height GUARDED_BY(m_final_mutex){-1};
     mutable std::pair<uint256, uint256> m_final_for GUARDED_BY(m_final_mutex);
-
-    //! Where the headers being taken in come from (BeginHeaders): a peer, or -1.
-    mutable int64_t m_headers_source GUARDED_BY(::cs_main){-1};
-    //! Whether the unchecked headers of m_headers_source were looked over in this message (UncheckedHeaders).
-    mutable bool m_unchecked_pruned GUARDED_BY(::cs_main){false};
-    //! The headers nobody could check that each peer made the node take, not known to be checked since.
-    mutable std::map<int64_t, std::vector<uint256>> m_unchecked_by_source GUARDED_BY(::cs_main);
 
     mutable Mutex m_sets_mutex;
     struct KnownSet {
