@@ -513,7 +513,7 @@ void StakingTests::stakingTests()
         QTRY_VERIFY_WITH_TIMEOUT(blocks->rowCount() >= 10 && blocks->item(0, BlockExplorer::COL_HEIGHT)->text().toInt() >= tip_height, 30000);
         QCOMPARE(blocks->horizontalHeaderItem(BlockExplorer::COL_KIND)->text(), QString{"Kind"});
         QVERIFY(!blocks->isColumnHidden(BlockExplorer::COL_KIND));
-        int pos_rows{0}, pow_rows{0};
+        int pos_rows{0}, pow_rows{0}, ack_rows{0};
         for (int row{0}; row < blocks->rowCount(); ++row) {
             const int height{blocks->item(row, BlockExplorer::COL_HEIGHT)->text().toInt()};
             const QString kind{blocks->item(row, BlockExplorer::COL_KIND)->text()};
@@ -523,12 +523,19 @@ void StakingTests::stakingTests()
             QVERIFY(!blocks->item(row, BlockExplorer::COL_KIND)->icon().isNull());
             if (index->m_ext) {
                 ++pos_rows;
-                QCOMPARE(kind, QString{"PoS"});
                 QCOMPARE(blocks->item(row, BlockExplorer::COL_SLOT)->text().toLongLong(), pos::SlotOf(index->nTime, chain.Hooks().Params()));
                 // Only this node's key makes blocks here.
                 QCOMPARE(blocks->item(row, BlockExplorer::COL_PRODUCER)->text(), QString{"this node"});
                 QCOMPARE(blocks->item(row, BlockExplorer::COL_PRODUCER)->toolTip(), key1);
-                QVERIFY(blocks->item(row, BlockExplorer::COL_MAINCHAIN)->text().isEmpty());
+                // A block of stake that acknowledges an anchor shows it, with the mainchain block that committed to it.
+                if (index->nNonce != 0) {
+                    ++ack_rows;
+                    QCOMPARE(kind, QString{"PoS + PoW anchor"});
+                    QCOMPARE(blocks->item(row, BlockExplorer::COL_MAINCHAIN)->text().toUInt(), index->nNonce);
+                } else {
+                    QCOMPARE(kind, QString{"PoS"});
+                    QVERIFY(blocks->item(row, BlockExplorer::COL_MAINCHAIN)->text().isEmpty());
+                }
             } else {
                 ++pow_rows;
                 QCOMPARE(kind, QString{"PoW"});

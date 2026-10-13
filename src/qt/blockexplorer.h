@@ -54,8 +54,11 @@ public:
         QString kind;
         QString slot;
         QString proposer;
-        //! The mainchain height that committed to a merged mined block, if known.
+        //! The mainchain height that committed to a merged mined block, or to the anchor a block of
+        //! stake acknowledges, if known.
         QString main_height;
+        //! A block of stake that acknowledges an anchor (a ticket the mainchain committed to).
+        bool ack{false};
         //! What getblock said of its finality, when it was read.
         QString finality;
         int64_t time{0};

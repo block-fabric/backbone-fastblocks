@@ -70,7 +70,7 @@ QString ShortKey(const QString& key) { return key.size() > 20 ? key.left(8) + QS
  */
 QIcon KindIcon(const QString& kind)
 {
-    const bool pos{kind == QStringLiteral("pos")};
+    const bool pos{kind == QStringLiteral("pos") || kind == QStringLiteral("ack")};
     QPixmap pixmap(32, 32);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
@@ -80,6 +80,13 @@ QIcon KindIcon(const QString& kind)
     painter.setBrush(fill);
     if (pos) {
         painter.drawEllipse(QRectF(4, 4, 24, 24));
+        // A block of stake that acknowledges an anchor: with the amber diamond of the proof of work.
+        if (kind == QStringLiteral("ack")) {
+            const QColor pow{0xe8, 0x9a, 0x1c};
+            painter.setPen(QPen(pow.darker(160), 2));
+            painter.setBrush(pow);
+            painter.drawPolygon(QPolygonF{{QPointF(23, 13), QPointF(32, 22), QPointF(23, 31), QPointF(14, 22)}});
+        }
     } else {
         painter.drawPolygon(QPolygonF{{QPointF(16, 2), QPointF(30, 16), QPointF(16, 30), QPointF(2, 16)}});
     }
@@ -270,6 +277,10 @@ BlockExplorer::Snapshot BlockExplorer::Fetch(const CallFn& call, int count, std:
             if (b.find_value("slot").isNum()) row.slot = Text(b.find_value("slot"));
             if (b.find_value("proposer").isStr()) row.proposer = Text(b.find_value("proposer"));
             if (b.find_value("mainheight").isNum()) row.main_height = Text(b.find_value("mainheight"));
+            if (const UniValue& ack{b.find_value("ack")}; ack.isObject()) {
+                row.ack = true;
+                if (ack.find_value("mainheight").isNum()) row.main_height = Text(ack.find_value("mainheight"));
+            }
             const UniValue& finality{b.find_value("finality")};
             if (finality.isObject() && finality.find_value("status").isStr()) row.finality = Text(finality.find_value("status"));
             snapshot.blocks.push_back(std::move(row));
@@ -331,12 +342,16 @@ void BlockExplorer::applyBlocks(Snapshot snapshot)
     m_last = std::move(snapshot);
     const int rows{static_cast<int>(m_last.blocks.size())};
     m_blocks->setRowCount(rows);
-    const QIcon pos_icon{KindIcon(QStringLiteral("pos"))}, pow_icon{KindIcon(QStringLiteral("bmm"))};
+    const QIcon pos_icon{KindIcon(QStringLiteral("pos"))}, pow_icon{KindIcon(QStringLiteral("bmm"))}, ack_icon{KindIcon(QStringLiteral("ack"))};
     for (int row{0}; row < rows; ++row) {
         const BlockRow& block{m_last.blocks[row]};
         m_blocks->setItem(row, COL_HEIGHT, Item(QString::number(block.height)));
         auto* kind{Item(KindName(block.kind))};
-        if (block.kind == QStringLiteral("pos")) {
+        if (block.kind == QStringLiteral("pos") && block.ack) {
+            kind->setText(tr("PoS + PoW anchor"));
+            kind->setIcon(ack_icon);
+            kind->setToolTip(tr("A block of stake that acknowledges a merged mined anchor: the mainchain block %1 committed to a ticket of this chain").arg(block.main_height));
+        } else if (block.kind == QStringLiteral("pos")) {
             kind->setIcon(pos_icon);
             kind->setToolTip(tr("A block of stake"));
         } else if (block.kind == QStringLiteral("bmm")) {
@@ -348,7 +363,9 @@ void BlockExplorer::applyBlocks(Snapshot snapshot)
         auto* producer{Item(producerName(block.proposer))};
         producer->setToolTip(block.proposer);
         m_blocks->setItem(row, COL_PRODUCER, producer);
-        m_blocks->setItem(row, COL_MAINCHAIN, Item(block.main_height));
+        auto* main{Item(block.main_height)};
+        if (block.ack) main->setToolTip(tr("The mainchain block that committed to the anchor this block acknowledges"));
+        m_blocks->setItem(row, COL_MAINCHAIN, main);
         m_blocks->setItem(row, COL_FINALITY, Item(finalityOf(block)));
         m_blocks->setItem(row, COL_TIME, Item(Time(block.time)));
         m_blocks->setItem(row, COL_TXS, Item(block.txs));
