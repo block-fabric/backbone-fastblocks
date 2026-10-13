@@ -124,7 +124,14 @@ QString TransactionDesc::toHTML(interfaces::Node& node, interfaces::Wallet& wall
     //
     if (wtx.is_coinbase)
     {
-        strHTML += "<b>" + tr("Source") + ":</b> " + tr("Generated") + "<br>";
+        QString source{tr("Generated")};
+        switch (rec->type) {
+        case TransactionRecord::Staked: source = tr("Staked: the producer's share of a block of stake"); break;
+        case TransactionRecord::AnchorReward: source = tr("Anchor reward: the fee pot, paid to an anchor's payee"); break;
+        case TransactionRecord::SlashingReward: source = tr("Slashing reward: the reporter's share of a penalty"); break;
+        default: break;
+        }
+        strHTML += "<b>" + tr("Source") + ":</b> " + source + "<br>";
     } else if (wtx.from) {
         // Online transaction
         strHTML += "<b>" + tr("From") + ":</b> " + GUIUtil::HtmlEscape(*wtx.from) + "<br>";

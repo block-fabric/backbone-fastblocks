@@ -115,8 +115,16 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                 }
                 if (wtx.is_coinbase)
                 {
-                    // Generated
+                    // Generated: mined, or FastBlocks' income (what the node says the output pays).
                     sub.type = TransactionRecord::Generated;
+                    if (i < wtx.txout_coinbase_role.size()) {
+                        switch (wtx.txout_coinbase_role[i]) {
+                        case interfaces::Chain::CoinbaseRole::STAKED: sub.type = TransactionRecord::Staked; break;
+                        case interfaces::Chain::CoinbaseRole::ANCHOR: sub.type = TransactionRecord::AnchorReward; break;
+                        case interfaces::Chain::CoinbaseRole::REPORTER: sub.type = TransactionRecord::SlashingReward; break;
+                        case interfaces::Chain::CoinbaseRole::OTHER: break;
+                        }
+                    }
                 }
 
                 parts.append(sub);
@@ -157,7 +165,7 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
     status.m_cur_block_hash = block_hash;
 
     // For generated transactions, determine maturity
-    if (type == TransactionRecord::Generated) {
+    if (isGenerated()) {
         if (wtx.blocks_to_maturity > 0)
         {
             status.status = TransactionStatus::Immature;

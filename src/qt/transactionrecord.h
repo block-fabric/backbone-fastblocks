@@ -70,7 +70,15 @@ public:
         SendToOther,
         RecvWithAddress,
         RecvFromOther,
+        //! FastBlocks coinbase income: the producer's share of a block of stake, the pot paid to an
+        //! anchor's payee, a reward for a proof that a leader signed twice.
+        Staked,
+        AnchorReward,
+        SlashingReward,
     };
+
+    /** Whether the record is of a coinbase output: mined, or FastBlocks' income. */
+    bool isGenerated() const { return type == Generated || type == Staked || type == AnchorReward || type == SlashingReward; }
 
     /** Number of confirmation recommended for accepting a transaction */
     static constexpr int RecommendedNumConfirmations{6};
