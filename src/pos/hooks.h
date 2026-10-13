@@ -162,14 +162,15 @@ public:
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
     bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override;
     /**
-     * The chain a message's headers claim to lead to: the key of the last of the run of them, from the
-     * first, that links up and passes the rules a header can be checked against alone (its time and
-     * slot, its acknowledgement in order and on record, a BMM block's commitment on record). A header
-     * whose signature cannot be checked yet is taken only if it, or the chain its message claims,
-     * leads to more than the best header (pos-unchecked-low-work). Called with cs_main held.
+     * Where the headers being taken in come from: a header whose signature cannot be checked yet is
+     * taken from a peer only while fewer than `unchecked_headers_per_peer` of those it made the node
+     * take are still unchecked (pos-unchecked-budget). Called with cs_main held.
      */
-    void BeginHeaders(std::span<const CBlockHeader> headers) const override;
+    void BeginHeaders(std::span<const CBlockHeader> headers, int64_t source) const override;
     void EndHeaders() const override;
+    void SourceGone(int64_t source) const override;
+    /** How many headers this peer made the node take that nobody could check, and that are not checked yet (connected). */
+    size_t UncheckedHeaders(int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool CheckBlock(const CBlock& block, BlockValidationState& state) const override;
     bool IsWaitReason(const std::string& reject_reason) const override;
     //! A node a little behind on the record after a mainchain reorg must not cut itself off from the peers that took an anchor back first.
@@ -330,12 +331,12 @@ private:
     mutable int m_final_height GUARDED_BY(m_final_mutex){-1};
     mutable std::pair<uint256, uint256> m_final_for GUARDED_BY(m_final_mutex);
 
-    //! What the headers of the message being taken in claim (BeginHeaders): the headers of the run, and its key.
-    struct HeadersClaim {
-        std::set<uint256> hashes;
-        arith_uint256 work;
-    };
-    mutable std::optional<HeadersClaim> m_headers_claim GUARDED_BY(::cs_main);
+    //! Where the headers being taken in come from (BeginHeaders): a peer, or -1.
+    mutable int64_t m_headers_source GUARDED_BY(::cs_main){-1};
+    //! Whether the unchecked headers of m_headers_source were looked over in this message (UncheckedHeaders).
+    mutable bool m_unchecked_pruned GUARDED_BY(::cs_main){false};
+    //! The headers nobody could check that each peer made the node take, not known to be checked since.
+    mutable std::map<int64_t, std::vector<uint256>> m_unchecked_by_source GUARDED_BY(::cs_main);
 
     mutable Mutex m_sets_mutex;
     struct KnownSet {

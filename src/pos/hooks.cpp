@@ -127,6 +127,8 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
     // slot's epoch, which an anchor before the epoch before it made, and of the epoch's seed, which the
     // record of the mainchain gives.
     const SlotLeader leader{LeaderOf(prev, slot)};
+    //! Taken without its signature checked, from a peer: counted against it if taken.
+    bool unchecked{false};
     switch (leader.status) {
     case LeaderStatus::INACTIVE:
         return invalid("bad-pos-inactive", "no blocks of stake in this epoch: too few validators");
@@ -154,17 +156,19 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
             // (Not the peer's fault: its chain may be another; this node does not take it.)
             return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "bad-pos-fork-too-deep", "a header whose signature cannot be checked, on a branch that leaves a final block or the window of sets");
         }
-        // ... and it leads to more than the best header, or the chain its message claims does
-        // (BeginHeaders: the first headers of a branch that overtakes come with the rest of it). Not
-        // siblings by the thousand, which anyone can make, nor a branch that overtakes nothing: the
-        // node does not need it until it does. (Not while the node loads blocks from disk: it took
-        // them in before.)
-        if (!chainman.m_blockman.LoadingBlocks() && chainman.m_best_header) {
-            arith_uint256 claim{ChainWork(&prev, header)};
-            if (m_headers_claim && m_headers_claim->hashes.contains(header.GetHash())) claim = std::max(claim, m_headers_claim->work);
-            if (claim <= chainman.m_best_header->nChainWork) {
-                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "pos-unchecked-low-work", "a header whose signature cannot be checked, that leads to no more than the best header");
+        // ... and the peer that sent it has made the node take fewer than unchecked_headers_per_peer
+        // such headers that are not checked yet (their blocks connected). Anyone can make them, by
+        // the thousand, and claim with them whatever the record allows (acknowledgements of every
+        // commitment): what such a header claims is no measure of it, nor of the best header (an
+        // attacker's could be inflated so, and stop the honest headers of a node that catches up). A
+        // count is: each peer has its own, which its forged headers use up, and which an honest peer's
+        // headers give back as the node connects their blocks (it asks the peer for more then). Not
+        // the peer's fault; not for the node's own headers, nor those it loads from disk.
+        if (m_headers_source >= 0 && !chainman.m_blockman.LoadingBlocks()) {
+            if (UncheckedHeaders(m_headers_source) >= static_cast<size_t>(m_params.unchecked_headers_per_peer)) {
+                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "pos-unchecked-budget", "the peer sent as many headers whose signature cannot be checked yet as a node takes before it checks them");
             }
+            unchecked = true;
         }
         break;
     }
@@ -208,56 +212,45 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
     if (header.nNonce != 0 && (!chainman.m_mainchain || !chainman.m_mainchain->BmmAt(static_cast<int>(header.nNonce)))) {
         return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-ack-unknown", "no commitment on record at the height the block acknowledges");
     }
+    if (unchecked) m_unchecked_by_source[m_headers_source].push_back(header.GetHash());
     return true;
 }
 
-void FastBlocksHooks::BeginHeaders(std::span<const CBlockHeader> headers) const
+void FastBlocksHooks::BeginHeaders(std::span<const CBlockHeader>, int64_t source) const
 {
     AssertLockHeld(::cs_main);
-    m_headers_claim.reset();
-    const ChainstateManager* chainman{Chainman()};
-    // (One header claims what it is.)
-    if (!chainman || headers.size() < 2) return;
-    const CBlockIndex* start{chainman->m_blockman.LookupBlockIndex(headers.front().hashPrevBlock)};
-    if (!start) return;
-    const sidechain::Mainchain* record{chainman->m_mainchain.get()};
-    ChainKey key{ChainKey::FromWork(start->nChainWork)};
-    std::optional<int64_t> last_slot{LastPosSlot(start, m_params)};
-    const auto latest{NodeClock::now() + std::chrono::seconds{m_params.max_future_seconds}};
-    uint256 prev{start->GetBlockHash()};
-    HeadersClaim claim;
-    for (const CBlockHeader& header : headers) {
-        if (header.hashPrevBlock != prev) break;
-        key.height = static_cast<uint64_t>(start->nHeight) + claim.hashes.size() + 1;
-        if (IsPosHeader(header)) {
-            const int64_t time{header.nTime};
-            if (header.nBits != m_pos_bits || time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) break;
-            if (header.Time() > latest) break;
-            const int64_t slot{SlotOf(time, m_params)};
-            if (last_slot && slot <= *last_slot) break;
-            last_slot = slot;
-            if (header.nNonce != 0) {
-                if (header.nNonce <= key.last_anchor_height || !record || !record->BmmAt(static_cast<int>(header.nNonce))) break;
-                ++key.anchors;
-                key.last_anchor_height = header.nNonce;
-            }
-        } else {
-            const auto height{record ? record->BmmHeight(header.GetHash()) : std::nullopt};
-            if (!height) break;
-            ++key.anchors;
-            key.last_anchor_height = static_cast<uint32_t>(*height);
-        }
-        prev = header.GetHash();
-        claim.hashes.insert(prev);
-        claim.work = key.Work();
-    }
-    if (!claim.hashes.empty()) m_headers_claim = std::move(claim);
+    m_headers_source = source;
+    m_unchecked_pruned = false;
 }
 
 void FastBlocksHooks::EndHeaders() const
 {
     AssertLockHeld(::cs_main);
-    m_headers_claim.reset();
+    m_headers_source = -1;
+}
+
+void FastBlocksHooks::SourceGone(int64_t source) const
+{
+    AssertLockHeld(::cs_main);
+    m_unchecked_by_source.erase(source);
+}
+
+size_t FastBlocksHooks::UncheckedHeaders(int64_t source) const
+{
+    AssertLockHeld(::cs_main);
+    const auto found{m_unchecked_by_source.find(source)};
+    if (found == m_unchecked_by_source.end()) return 0;
+    std::vector<uint256>& hashes{found->second};
+    // Those checked since (their blocks connected) give their place back. Looked over once a message
+    // at most, when the peer has none left: a message of a peer that has none costs one look.
+    if (hashes.size() >= static_cast<size_t>(m_params.unchecked_headers_per_peer) && !m_unchecked_pruned && Chainman()) {
+        m_unchecked_pruned = true;
+        std::erase_if(hashes, [&](const uint256& hash) {
+            const CBlockIndex* index{Chainman()->m_blockman.LookupBlockIndex(hash)};
+            return !index || index->IsValid(BLOCK_VALID_SCRIPTS);
+        });
+    }
+    return hashes.size();
 }
 
 bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& state) const

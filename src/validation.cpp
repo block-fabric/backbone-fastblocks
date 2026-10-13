@@ -4889,13 +4889,13 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 }
 
 // Exposed wrapper for AcceptBlockHeader
-bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex)
+bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> headers, bool min_pow_checked, BlockValidationState& state, const CBlockIndex** ppindex, int64_t source)
 {
     AssertLockNotHeld(cs_main);
     {
         LOCK(cs_main);
-        // A sidechain may weigh each header by the chain the message claims it leads to.
-        sidechain::Hooks().BeginHeaders(headers);
+        // A sidechain may count the headers each peer sends.
+        sidechain::Hooks().BeginHeaders(headers, source);
         struct EndHeaders {
             ~EndHeaders() { sidechain::Hooks().EndHeaders(); }
         } end_headers;
@@ -5127,8 +5127,13 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         // not very expensive, the anti-DoS benefits of caching failure (of a definitely-invalid block) are not substantial.
         bool ret = CheckBlock(*block, state, GetConsensus());
         if (ret) {
-            // Store to disk
-            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked);
+            // Store to disk (the block's header, if new, is one the source sent: ChainHooks::BeginHeaders)
+            const CBlockHeader& header{*block};
+            sidechain::Hooks().BeginHeaders(std::span{&header, 1}, source);
+            struct EndHeaders {
+                ~EndHeaders() { sidechain::Hooks().EndHeaders(); }
+            } end_headers;
+            ret = AcceptBlock(block, state, &pindex, force_processing, nullptr, new_block, min_pow_checked, source);
         }
         if (!ret) {
             if (m_options.signals) {

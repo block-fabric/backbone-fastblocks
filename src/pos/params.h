@@ -53,6 +53,12 @@ struct PosParams {
     //! Not consensus: wallets call a block final once this many anchors cover it.
     int final_anchors{6};
     /**
+     * Not consensus: a node takes from a peer at most this many headers whose signature it cannot
+     * check yet (their epoch's set made by an anchor it has not connected) and that it has not
+     * checked since (connected their blocks). See doc/fastblocks.md, "Headers the node cannot check yet".
+     */
+    int64_t unchecked_headers_per_peer{10000};
+    /**
      * The validators the chain starts with, a bootstrap (regtest's -posvalidators): in the set until
      * jailed or banned, with their stake as weight on top of what they bond. None on the main and test
      * networks, which start merged mined only, until enough stake is bonded (doc/fastblocks.md, "Staking").

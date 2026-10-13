@@ -117,7 +117,7 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | The record has the block that seeds the epoch; may come later (not a slot to come: below) | `pos-seed-unknown` |
 | Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
 | A header whose epoch's set the node does not know: the branch leaves the active chain at or above its final block, and the anchor that made the set is not on the active chain (the state pruned that one's set). Not punished | `bad-pos-fork-too-deep` |
-| ... and it leads to more than the best header, or the chain its message claims does (the run of the message's headers, from the first, that link up and pass the rules a header can be checked against alone: its time and slot, its acknowledgement in order and on record, a BMM block's commitment on record). Not punished; not while blocks load from disk | `pos-unchecked-low-work` |
+| ... and the peer that sent it made the node take fewer than `unchecked_headers_per_peer` such headers that are not checked yet (10000; 2000 on regtest; not consensus). Not punished; not for the node's own headers, nor while blocks load from disk | `pos-unchecked-budget` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later if its leader signed it; one whose leader the node cannot tell (set or seed unknown) does not wait, nor is punished | `pos-time-future`, `pos-time-future-unchecked` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
@@ -143,11 +143,19 @@ below it; and it does not take back a final block nor reach below the window of
 sets the state keeps (`bad-pos-fork-too-deep`). So a branch of headers nobody
 checked counts at most as many anchors as the commitments it names, after one it
 paid for; when its first block is connected, the signature fails and the node is
-back on its chain. And such a header is taken only if it leads past the best
-header, or comes in a message whose headers do (`pos-unchecked-low-work`): the
-node takes one branch of them at a time, not siblings by the thousand, which
-anyone can make; the first headers of a branch that overtakes come with the rest
-of it (template hook `BeginHeaders`). A header taken with a signature that turns out invalid (the
+back on its chain. And a peer makes the node take at most
+`unchecked_headers_per_peer` such headers that it has not checked since
+(`pos-unchecked-budget`; template hooks `BeginHeaders`, which names the peer a
+message comes from, and `SourceGone`): not siblings by the thousand, which anyone
+can make. A count, not what the headers claim: anyone can claim with them every
+commitment on record, so neither what a message claims nor the best header (which
+such headers may have inflated) measures them; a node that compared the two took
+a padded message whole, and turned away the honest headers of a node catching up
+that led to less than an attacker's inflated best header. Each peer has its own
+count, which its forged headers use up and nobody else's; an honest peer's headers
+give their place back as the node connects their blocks, and the node asks the
+peer for its headers again once its tip moved (template, `net_processing`: after a
+header refused through no fault of the peer's). A header taken with a signature that turns out invalid (the
 block hash does not cover it: a peer can send the honest header with another)
 is replaced by the valid one when it comes (template: `CheckOtherExtension`
 says `REPLACE`; the header or block with it replaces the extension, the stored
@@ -686,7 +694,8 @@ after every step:
 | `feature_fastblocks_signature.py` | A block with the hash of a known header and another signature (another key's, or none), relayed whole, as a compact block and submitted, is turned away; the block its leader signed is taken after, and stays through `-reindex`; the producer's signatures are deterministic; another valid signature of the leader is the same block (taken, the node's own kept, no peer disconnected; two nodes holding the two stay in sync) |
 | `feature_fastblocks_stall.py` | A mainchain reorg that drops and gives back an anchor; blocks of stake stalled (BMM blocks carry the transactions, PoS starts again); anchors stalled (PoS halts after `max_unanchored_slots`, starts again with a new ticket); IBD |
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; a stranger's top-up of a satoshi refused, the owner's taken; an unbond of all paid unbonding_anchors anchors later |
-| `feature_fastblocks_p2p.py` | Peers of the test framework that misbehave: forged signatures sent first to a node catching up, then the honest nodes (it reaches their tip; the honest blocks are not fetched again and again meanwhile); 5000 unsigned siblings of its newest header (one taken); about 70 unsigned acknowledging headers from deep in the chain, on a validator that knows the sets (`bad-pos-sig`) and on one restarted whose state pruned them (`bad-pos-fork-too-deep`: no new tip, no reorg); 5000 siblings of a deep block; tickets 8 a peer per mainchain block; `fbgettickets` of 17 entries (misbehaving); one proof sent 200 times (kept once, the peer kept) |
+| `feature_fastblocks_p2p.py` | Peers of the test framework that misbehave: forged signatures sent first to a node catching up, then the honest nodes (it reaches their tip; the honest blocks are not fetched again and again meanwhile); 5000 unsigned siblings of its newest header, and a message padded with more (the peer's budget taken, no more); about 70 unsigned acknowledging headers from deep in the chain, on a validator that knows the sets (`bad-pos-sig`) and on one restarted whose state pruned them (`bad-pos-fork-too-deep`: no new tip, no reorg); 5000 siblings of a deep block; tickets 8 a peer per mainchain block; `fbgettickets` of 17 entries (misbehaving); one proof sent 200 times (kept once, the peer kept) |
+| `feature_fastblocks_fork.py` | A fork whose overtaking block a node has the header of with a forged signature, and cannot check before it connects the fork: it syncs, the leader's signature replacing the forged one |
 | `feature_fastblocks_restart.py` | A validator restarted refuses a BMM block 30 minutes ahead as the others do; every validator restarted while a committed ticket waits asks for it and acknowledges it; a validator whose data directory is wiped does not sign a slot it signed again; one killed between signing and relaying (`-posfaultaftersign`) does not sign that slot again |
 | `feature_fastblocks_soak.py` (extended) | 30-second slots (`-posslotseconds=30`), `--duration` minutes of rounds: restarts and kills, partitions, mainchain reorgs, bonds, unbonds, payments, withdrawals; after each, one tip, `pegbalance`, no node down, few failed slots |
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; a BMM block carries a proof (all validators stopped), its payee rewarded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |

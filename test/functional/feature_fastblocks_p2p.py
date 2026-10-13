@@ -8,7 +8,9 @@ with peers of the test framework:
 
   - a node catching up gets the honest headers first with their signatures forged (the block hash
     does not cover them), and a block with one; then thousands of unsigned siblings of the newest
-    header; then an honest node connects: it reaches the honest tip, its block index did not grow;
+    header, and a message padded with more: the node takes no more of those it cannot check from the
+    peer than its budget (unchecked_headers_per_peer); then an honest node connects: it reaches the
+    honest tip;
   - a validator restarted (the sets it read forgotten, the state's pruned) gets about 70 unsigned
     headers from deep in the chain, acknowledging every commitment after the fork: refused, no new
     chain tip, no reorg; and thousands of unsigned siblings of a deep block, then of its tip;
@@ -60,6 +62,8 @@ def epoch_of(slot):
 #: Headers a node takes in one message, at most.
 MAX_HEADERS = 2000
 SIBLINGS = 5000
+#: Headers whose signature it cannot check yet a node takes from a peer, until it checked them (regtest).
+UNCHECKED_PER_PEER = 2000
 
 
 class FastBlocksPeer(P2PInterface):
@@ -205,20 +209,33 @@ class FastBlocksP2PTest(SidechainTest):
         block[112:176] = bytes(64)
         attacker.send_and_ping(MsgRawBlock(bytes(block)))
 
-        self.log.info("Then thousands of unsigned siblings on its newest header: the block index does not grow")
+        self.log.info("Then thousands of unsigned siblings on its newest header: the block index grows by the peer's budget at most")
         tips = self.tips(late)
         slot = n0.getblock(newest)["slot"]
-        # The first leads further than the best header, and is taken (nobody can tell yet); the others
-        # lead no further (pos-unchecked-low-work), and are not.
-        with late.assert_debug_log(["pos-unchecked-low-work"]):
+        # Nobody can tell yet whether they are signed: taken while the peer's budget of such headers
+        # lasts (the forged ones above used some of it), then not (pos-unchecked-budget), the peer
+        # not punished.
+        with late.assert_debug_log(["pos-unchecked-budget"]):
             for k in range(SIBLINGS):
                 sibling = pos_header(newest, slot + 1, merkle=k.to_bytes(32, "little"))
                 attacker.send_without_ping(headers_message([sibling]))
             attacker.sync_with_ping(timeout=120)
         assert attacker.is_connected
         grown = self.tips(late) - tips
-        assert_equal(len(grown), 1)
-        assert_equal(len(late.getchaintips()), len(tips))
+        assert_greater_than(len(grown), 0)
+        assert_greater_than(UNCHECKED_PER_PEER - len(pos) + 1, len(grown))
+        # A message padded with more of them, leading further than anything: none taken (what they
+        # claim, nobody can check). (Slots that started; fewer than max_unanchored_slots.)
+        self.wait_until(lambda: n0.getposinfo()["slot"] > slot + 60, timeout=120)
+        padded = []
+        prev = newest
+        for k in range(50):
+            padded.append(pos_header(prev, slot + 1 + k, merkle=b"\x09" * 32))
+            prev = header_hash(padded[-1])
+        with late.assert_debug_log(["pos-unchecked-budget"]):
+            attacker.send_and_ping(headers_message(padded))
+        assert attacker.is_connected
+        assert self.unknown(late, padded)
 
         self.log.info("An honest node connects: the node reaches the honest tip")
         for i in range(3):

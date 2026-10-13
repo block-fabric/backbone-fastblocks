@@ -479,7 +479,7 @@ void Follower::Act()
         const auto& [header, peer]{entry};
         BlockValidationState state;
         const CBlockIndex* pindex{nullptr};
-        if (!chainman.ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex) || !pindex || peer < 0 || !m_node.peerman) continue;
+        if (!chainman.ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, &pindex, peer) || !pindex || peer < 0 || !m_node.peerman) continue;
         // The block, from the peer that announced it: a header with less work than what the peer
         // announced before (blocks the record made invalid) would not be fetched otherwise.
         if (!WITH_LOCK(::cs_main, return pindex->nStatus & BLOCK_HAVE_DATA)) {

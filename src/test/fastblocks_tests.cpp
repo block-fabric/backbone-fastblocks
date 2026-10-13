@@ -463,10 +463,11 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
     }
 
     /** Headers as a peer sends them: why they are turned away (nothing if they are taken). */
-    std::string HeaderReason(const std::vector<CBlockHeader>& headers)
+    //! Why the node refuses these headers from a peer (`source`), if it does.
+    std::string HeaderReason(const std::vector<CBlockHeader>& headers, int64_t source = 0)
     {
         BlockValidationState state;
-        if (Chainman().ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state)) return {};
+        if (Chainman().ProcessNewBlockHeaders(headers, /*min_pow_checked=*/true, state, nullptr, source)) return {};
         return state.GetRejectReason();
     }
     uint256 BestHeader() { return WITH_LOCK(::cs_main, return Chainman().m_best_header->GetBlockHash()); }
@@ -3366,9 +3367,14 @@ BOOST_FIXTURE_TEST_CASE(future_unsigned_header_not_waiting, FastBlocksSetup)
 BOOST_FIXTURE_TEST_CASE(unchecked_siblings_not_taken, FastBlocksSetup)
 {
     // Headers whose leader the node cannot tell yet (a branch with an anchor it never connected, as for
-    // a node that catches up), above the final block: taken only if they lead to more than the best
-    // header. Siblings by the thousand, which anyone can make, are not; a branch whose first headers
-    // overtake nothing is, when its message leads it past the best header.
+    // a node that catches up), above the final block: a peer makes the node take at most its budget of
+    // them (unchecked_headers_per_peer) until they are checked. Siblings by the thousand, which anyone
+    // can make, are not taken; nor a message padded with headers that claim whatever the record
+    // allows; and what such headers claim stops nobody else's.
+    // (A budget of 3 for the test. The params are the hooks', made for this test.)
+    auto& params{const_cast<Consensus::PosParams&>(Pos())};
+    const int64_t budget_before{params.unchecked_headers_per_peer};
+    params.unchecked_headers_per_peer = 3;
     StartPos();
     Take(PosBlock(1));
     const CBlockHeader like{Tip()->GetBlockHeader()};
@@ -3376,37 +3382,113 @@ BOOST_FIXTURE_TEST_CASE(unchecked_siblings_not_taken, FastBlocksSetup)
     Commit(other.GetHash());
     BOOST_REQUIRE_EQUAL(HeaderReason({other}), "");
     BOOST_REQUIRE(BestHeader() == other.GetHash());
+    // Commitments on record that headers nobody checks can claim to acknowledge.
+    std::vector<uint32_t> commitments;
+    for (uint8_t i{1}; i <= 4; ++i) {
+        Commit(uint256{static_cast<uint8_t>(0xc0 + i)});
+        commitments.push_back(static_cast<uint32_t>(Record().Height()));
+    }
     Mock(pos::SlotTime(pos::SlotOf(GetTime(), Pos()) + 2 * Pos().slots_per_epoch, Pos()));
     Main();
     const int64_t slot{pos::SlotOf(GetTime(), Pos())};
-    BOOST_REQUIRE(!WITH_LOCK(::cs_main, return Hooks().SetFor(*Index(other.GetHash()), pos::EpochOf(slot - 1, Pos()))));
-    // The first one leads further than the best header: taken.
-    const CBlockHeader first{UnsignedHeader(like, other.GetHash(), slot - 1, 0, 1)};
-    BOOST_CHECK_EQUAL(HeaderReason({first}), "");
-    BOOST_CHECK(BestHeader() == first.GetHash());
-    // Its siblings lead no further: not taken, the peer not punished.
+    BOOST_REQUIRE(!WITH_LOCK(::cs_main, return Hooks().SetFor(*Index(other.GetHash()), pos::EpochOf(slot - 10, Pos()))));
+
+    // An attacker first: a branch that claims every commitment on record, to inflate the best header.
+    std::vector<CBlockHeader> inflated;
+    uint256 prev{other.GetHash()};
+    for (size_t i{0}; i < 3; ++i) {
+        inflated.push_back(UnsignedHeader(like, prev, slot - 10 + static_cast<int64_t>(i), commitments[i], 1));
+        prev = inflated.back().GetHash();
+    }
+    BOOST_CHECK_EQUAL(HeaderReason(inflated, /*source=*/1), "");
+    BOOST_CHECK(BestHeader() == inflated.back().GetHash());
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Hooks().UncheckedHeaders(1)), 3U);
+    // Its budget is spent: siblings of the newest header are not taken, the peer not punished.
     for (uint8_t salt{2}; salt < 12; ++salt) {
-        const CBlockHeader sibling{UnsignedHeader(like, other.GetHash(), slot - 1, 0, salt)};
+        const CBlockHeader sibling{UnsignedHeader(like, inflated[1].GetHash(), slot - 8, 0, salt)};
         BlockValidationState state;
-        BOOST_CHECK(!Chainman().ProcessNewBlockHeaders({{sibling}}, /*min_pow_checked=*/true, state));
-        BOOST_CHECK_EQUAL(state.GetRejectReason(), "pos-unchecked-low-work");
+        BOOST_CHECK(!Chainman().ProcessNewBlockHeaders({{sibling}}, /*min_pow_checked=*/true, state, nullptr, /*source=*/1));
+        BOOST_CHECK_EQUAL(state.GetRejectReason(), "pos-unchecked-budget");
         BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK);
         BOOST_CHECK(!Index(sibling.GetHash()));
     }
-    // A sibling that comes with a child, which leads further: the message claims that, both taken.
-    const CBlockHeader rival{UnsignedHeader(like, other.GetHash(), slot - 1, 0, 20)};
-    const CBlockHeader child{UnsignedHeader(like, rival.GetHash(), slot, 0, 20)};
-    BOOST_CHECK_EQUAL(HeaderReason({rival, child}), "");
-    BOOST_CHECK(BestHeader() == child.GetHash());
-    // A child that claims what no header can be (a slot to come, a commitment not on record) claims
-    // nothing for the sibling before it.
-    for (const auto& [later_slot, nonce] : {std::pair<int64_t, uint32_t>{slot + 3600, 0}, {slot, 1u << 30}}) {
-        const CBlockHeader sibling{UnsignedHeader(like, other.GetHash(), slot - 1, 0, 30)};
-        const CBlockHeader claims{UnsignedHeader(like, sibling.GetHash(), later_slot, nonce, 30)};
-        BOOST_CHECK_EQUAL(HeaderReason({sibling, claims}), "pos-unchecked-low-work");
-        BOOST_CHECK(!Index(sibling.GetHash()));
+    // A message padded with headers that claim more (the last commitment too): taken up to the
+    // budget of its peer, not further, whatever it claims.
+    std::vector<CBlockHeader> padded;
+    prev = other.GetHash();
+    for (size_t i{0}; i < 5; ++i) {
+        padded.push_back(UnsignedHeader(like, prev, slot - 10 + static_cast<int64_t>(i), i < commitments.size() ? commitments[i] : 0, 2));
+        prev = padded.back().GetHash();
     }
-    BOOST_CHECK(BestHeader() == child.GetHash());
+    BOOST_CHECK_EQUAL(HeaderReason(padded, /*source=*/2), "pos-unchecked-budget");
+    for (size_t i{0}; i < padded.size(); ++i) BOOST_CHECK_EQUAL(Index(padded[i].GetHash()) != nullptr, i < 3);
+
+    // An honest peer, whose branch claims less than the inflated best header (fewer anchors): its
+    // headers are taken all the same (a node catching up needs them).
+    std::vector<CBlockHeader> honest;
+    prev = other.GetHash();
+    for (size_t i{0}; i < 3; ++i) {
+        honest.push_back(UnsignedHeader(like, prev, slot - 10 + static_cast<int64_t>(i), 0, 3));
+        prev = honest.back().GetHash();
+    }
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Index(honest.back().GetHash()) == nullptr && Chainman().m_best_header->nChainWork > Hooks().ChainWork(Index(other.GetHash()), honest[0])));
+    BOOST_CHECK_EQUAL(HeaderReason(honest, /*source=*/3), "");
+    for (const CBlockHeader& header : honest) BOOST_CHECK(Index(header.GetHash()));
+    // Not from the node itself (its operator, its disk).
+    const CBlockHeader own{UnsignedHeader(like, inflated[1].GetHash(), slot - 8, 0, 40)};
+    BOOST_CHECK_EQUAL(HeaderReason({own}, /*source=*/-1), "");
+    // A peer gone: what was counted for it goes.
+    WITH_LOCK(::cs_main, Hooks().SourceGone(1));
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Hooks().UncheckedHeaders(1)), 0U);
+    params.unchecked_headers_per_peer = budget_before;
+}
+
+BOOST_FIXTURE_TEST_CASE(unchecked_headers_checked_give_room, FastBlocksSetup)
+{
+    // The headers nobody could check that a peer made the node take give their place back once
+    // checked (their blocks connected): an honest peer's budget is not used up as the node catches up.
+    auto& params{const_cast<Consensus::PosParams&>(Pos())};
+    const int64_t budget_before{params.unchecked_headers_per_peer};
+    params.unchecked_headers_per_peer = 1;
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    const CBlock anchor{PosBlock(2, ack)};
+    Take(anchor);
+    const int64_t epoch{pos::EpochOf(pos::SlotOf(anchor.nTime, Pos()), Pos())};
+    const int last{static_cast<int>((epoch + 2) * Pos().slots_per_epoch - base_slot)};
+    const CBlock honest{PosBlock(last)};
+    // The node as it was before it connected the anchor: the anchor taken back, its set forgotten.
+    CBlockIndex* anchor_index{Index(anchor.GetHash())};
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, anchor_index));
+        LOCK(::cs_main);
+        Chain().ResetBlockFailureFlags(anchor_index);
+        Chainman().RecalculateBestHeader();
+    }
+    Hooks().ForgetKnownSets();
+    // The header, from peer 5: taken unchecked, its budget spent.
+    BOOST_REQUIRE_EQUAL(HeaderReason({honest}, /*source=*/5), "");
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Hooks().UncheckedHeaders(5)), 1U);
+    CBlockHeader sibling{honest};
+    sibling.hashMerkleRoot = uint256{0x77};
+    sibling.ext.sig.fill(0);
+    BOOST_CHECK_EQUAL(HeaderReason({sibling}, /*source=*/5), "pos-unchecked-budget");
+    // Its block connected (checked): room again.
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    Submit(honest);
+    BOOST_REQUIRE(Tip() == Index(honest.GetHash()));
+    {
+        LOCK(::cs_main);
+        Hooks().BeginHeaders({}, 5);
+        BOOST_CHECK_EQUAL(Hooks().UncheckedHeaders(5), 0U);
+        Hooks().EndHeaders();
+    }
+    params.unchecked_headers_per_peer = budget_before;
 }
 
 BOOST_FIXTURE_TEST_CASE(record_independent_failures, FastBlocksSetup)
