@@ -2630,6 +2630,37 @@ BOOST_FIXTURE_TEST_CASE(record_failures_pardoned, FastBlocksSetup)
     BOOST_CHECK(result(second).first == BlockValidationResult::BLOCK_CACHED_INVALID);
 }
 
+BOOST_FIXTURE_TEST_CASE(block_failing_against_the_record_pardoned, FastBlocksSetup)
+{
+    // A block that fails against the record when it is connected (here: its acknowledgement names
+    // the height of another commitment, as after a mainchain reorg moved it) is no fault of the peer
+    // that sent it, whose record may say otherwise: not BLOCK_CONSENSUS, which a peer is punished
+    // for. (After a mainchain reorg, the nodes that connected such a block disconnected the
+    // validator that had relayed it: the soak test.) A block that breaks a rule whatever the record
+    // says still is.
+    StartPos();
+    Take(PosBlock(1));
+    Take(PosBlock(2));
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->pprev->GetBlockHash(), script))};
+    Commit(uint256{7});
+    pos::AnchorAck moved{ack};
+    moved.main_height = Record().Height();
+    const CBlock block{WithAck(PosBlock(3), moved)};
+    const auto result{[&](const CBlock& b) {
+        LOCK(::cs_main);
+        const BlockValidationState state{TestBlockValidity(Chain(), b, /*check_pow=*/false, /*check_merkle_root=*/true)};
+        return std::make_pair(state.GetResult(), state.GetRejectReason());
+    }};
+    BOOST_CHECK(result(block) == std::make_pair(BlockValidationResult::BLOCK_TIME_FUTURE, std::string{"bad-pos-ack-height"}));
+    // Its producer keeping more than its share: whatever the record says.
+    CBlock greedy{PosBlock(3)};
+    CMutableTransaction coinbase{*greedy.vtx[0]};
+    coinbase.vout[0].nValue += 1;
+    greedy.vtx[0] = MakeTransactionRef(std::move(coinbase));
+    Resign(greedy, nullptr);
+    BOOST_CHECK(result(greedy).first == BlockValidationResult::BLOCK_CONSENSUS);
+}
+
 BOOST_FIXTURE_TEST_CASE(no_second_ack_while_one_waits, FastBlocksSetup)
 {
     // The acknowledgement of a commitment the record lost and has again waits for the follower to
