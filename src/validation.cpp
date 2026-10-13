@@ -5097,7 +5097,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             return false;
         }
         if (unchecked && min_pow_checked && !AdmitUnchecked(*pindexPrev, source)) {
-            LogDebug(BCLog::VALIDATION, "%s: unchecked header %s from peer=%d over the budget\n", __func__, hash.ToString(), source);
+            LogDebug(BCLog::VALIDATION, "%s: unchecked header %s from peer=%d over the budget (unchecked-budget)\n", __func__, hash.ToString(), source);
             return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "unchecked-budget", "the peer, or the node, holds as many headers it cannot check yet as it may");
         }
     }
