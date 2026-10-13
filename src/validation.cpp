@@ -2925,7 +2925,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // What is not on record yet is no fault of the peer that sent the block. Nor, to VerifyDB,
             // is a block of the chain the record does not agree with any more a sign of a corrupt database.
             const bool not_yet{sidechain::Hooks().IsWaitReason(reject_reason) || reject_reason == "bmm-unknown" || reject_reason == "bad-sc-main-unknown" || (verifying && side && side->failed)};
-            state.Invalid(not_yet ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
+            // Nor, where record failures are pardoned, a rule that reads the record: the peer's may
+            // say otherwise (after a mainchain reorg, the nodes that connected such a block again
+            // disconnected the peer that had relayed it before).
+            const bool pardoned{side && side->failed && !sidechain::RecordIndependent(reject_reason) && sidechain::Hooks().PardonRecordFailures()};
+            state.Invalid(not_yet || pardoned ? BlockValidationResult::BLOCK_TIME_FUTURE : BlockValidationResult::BLOCK_CONSENSUS, reject_reason);
         } else if (scdb_check) {
             CAmount check_minted{0};
             sidechain::StoreOverlay check_store{side_base, /*journal=*/true};
