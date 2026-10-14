@@ -152,7 +152,14 @@ whose signature fails when connected is a failure of that copy, not of the block
 A header that may come later (`pos-time-future`, `pos-ack-unknown`,
 `pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
 headers, with the headers a peer sent after it; each is taken in once it and
-every waiting header below it can be, in the order of their heights.
+every waiting header below it can be, in the order of their heights. A waiting
+header keeps the peer that sent it, whichever way it came (a headers message, a
+compact block, a block), and is taken in within that peer's budget; one whose
+sender is not known is never taken as the node's own (`UNKNOWN_SOURCE`): it is
+taken in only if the node can check it. (Review of audit 6: blocks of stake on a
+branch the node could not check, sent as `block` messages and acknowledging the
+next mainchain height, were taken as the node's own once it was on record,
+outside every budget, and never left the block index.)
 
 Block (`CheckBlock`):
 
@@ -259,7 +266,13 @@ until its block is connected.
    dead entry, never freed memory; what was read so, the locator of the best
    header and the header tip notified, is now read with the lock held), and the
    peers' pointers into them (best known block, blocks in flight) are moved to
-   the nearest block that stays, under the same lock. A header whose block is
+   the nearest block that stays, under the same lock. Code that keeps a pointer
+   into the block index across a release of the lock looks it up again by hash
+   if any entry left meanwhile (`m_unchecked_erasures`): `ActivateBestChain`
+   finds its most-work chain again (a holder that left while the node connected
+   its branch made it read a deleted block, a fatal error: review of audit 6),
+   and so do the headers and compact block handlers and the headers taken in
+   once the mainchain commits to them. A header whose block is
    connected is checked: it leaves the set, is written to disk, and is kept like
    any other. The node's own headers, and those read from disk or given by RPC,
    have the node as holder, which never goes.
