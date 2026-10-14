@@ -102,6 +102,14 @@ bool EvidencePool::Add(const Offence& offence, DoubleProposal proof)
     proof.Normalize();
     const uint256 id{ProofId(proof)};
     LOCK(m_mutex);
+    // Full: a proof of a slot not after the oldest kept would be the one pushed out at once. It is
+    // not taken (nor relayed): else a proof pushed out is new again each time it comes back, and
+    // nodes in a cycle relay it round for ever. Proofs are only ever pushed out, never removed, so
+    // this floor only rises: a node takes each proof once at most.
+    if (m_proofs.size() >= MAX_EVIDENCE) {
+        const auto oldest{std::min_element(m_proofs.begin(), m_proofs.end(), [](const auto& x, const auto& y) { return x.first.slot < y.first.slot; })};
+        if (offence.slot <= oldest->first.slot) return false;
+    }
     if (!m_proofs.emplace(offence, std::move(proof)).second) return false;
     m_known.emplace(id, offence);
     m_unrelayed.push_back(offence);

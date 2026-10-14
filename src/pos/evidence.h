@@ -93,7 +93,11 @@ std::optional<Offence> CheckEvidence(const DoubleProposal& proof, const uint256&
 class EvidencePool
 {
 public:
-    /** Keep a proof that was checked. @return whether it was new */
+    /**
+     * Keep a proof that was checked. Full (MAX_EVIDENCE), one of a slot not after the oldest kept is
+     * not taken: a proof pushed out never comes back as new (nor is relayed again).
+     * @return whether it was new and kept
+     */
     bool Add(const Offence& offence, DoubleProposal proof) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * Note a header whose signature by `signer`, the leader of its slot, was checked. If `signer`
