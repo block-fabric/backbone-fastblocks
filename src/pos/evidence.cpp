@@ -102,6 +102,8 @@ bool EvidencePool::Add(const Offence& offence, DoubleProposal proof)
     proof.Normalize();
     const uint256 id{ProofId(proof)};
     LOCK(m_mutex);
+    // (Kept as checked: its signatures by the offender are good.)
+    if (!m_sigs.contains({id, offence.pubkey})) NoteSigs(id, offence.pubkey, true);
     // Full: a proof of a slot not after the oldest kept would be the one pushed out at once. It is
     // not taken (nor relayed): else a proof pushed out is new again each time it comes back, and
     // nodes in a cycle relay it round for ever. Proofs are only ever pushed out, never removed, so
@@ -130,6 +132,40 @@ std::optional<Offence> EvidencePool::Known(const DoubleProposal& proof) const
     const auto found{m_known.find(id)};
     if (found == m_known.end()) return std::nullopt;
     return found->second;
+}
+
+void EvidencePool::NoteSigs(const uint256& id, const uint256& pubkey, bool valid)
+{
+    AssertLockHeld(m_mutex);
+    if (!m_sigs.emplace(std::make_pair(id, pubkey), valid).second) return;
+    m_sigs_order.emplace_back(id, pubkey);
+    while (m_sigs_order.size() > MAX_CHECKED_SIGNATURES) {
+        m_sigs.erase(m_sigs_order.front());
+        m_sigs_order.pop_front();
+    }
+}
+
+bool EvidencePool::CheckSigs(const DoubleProposal& proof, const uint256& pubkey, const uint256& genesis, bool* checked)
+{
+    const uint256 id{ProofId(proof)};
+    if (checked) *checked = false;
+    {
+        LOCK(m_mutex);
+        if (const auto found{m_sigs.find({id, pubkey})}; found != m_sigs.end()) return found->second;
+    }
+    // (Not under the lock: the two checks are what costs.)
+    const bool valid{CheckBlockSig(proof.a, pubkey, genesis) && CheckBlockSig(proof.b, pubkey, genesis)};
+    if (checked) *checked = true;
+    LOCK(m_mutex);
+    NoteSigs(id, pubkey, valid);
+    return valid;
+}
+
+bool EvidencePool::SigsKnown(const DoubleProposal& proof, const uint256& pubkey) const
+{
+    const uint256 id{ProofId(proof)};
+    LOCK(m_mutex);
+    return m_sigs.contains({id, pubkey});
 }
 
 std::optional<DoubleProposal> EvidencePool::NoteSigned(const CBlockHeader& header, int64_t slot, const uint256& signer)

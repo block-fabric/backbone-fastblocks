@@ -12,6 +12,7 @@
 #include <sync.h>
 #include <uint256.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -29,6 +30,10 @@ inline constexpr const char* MSG_EVIDENCE{"fbevidence"};
 inline constexpr size_t MAX_EVIDENCE{1000};
 //! Signed headers a node remembers, one per slot and signer, to find a second one: those of the oldest slots go first.
 inline constexpr size_t MAX_SIGNED_HEADERS{4000};
+//! Results of signature checks of proofs a node remembers, by proof and leader: the oldest go first.
+inline constexpr size_t MAX_CHECKED_SIGNATURES{4 * MAX_EVIDENCE};
+//! Proofs whose signatures a block this node makes (of stake, or merged mined) checks, at most, beyond those checked before.
+inline constexpr size_t MAX_EVIDENCE_SIG_CHECKS{32};
 
 /**
  * Two headers the leader of a slot signed for that slot: the proof that it signed twice, which
@@ -108,6 +113,15 @@ public:
     std::optional<DoubleProposal> NoteSigned(const CBlockHeader& header, int64_t slot, const uint256& signer) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** The offence of a proof this node keeps already (in either order), if it does: no signature to check again. */
     std::optional<Offence> Known(const DoubleProposal& proof) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /**
+     * Whether both headers of a proof are signed by `pubkey` (on the chain of `genesis`), checked once:
+     * the result is remembered, by proof and leader (MAX_CHECKED_SIGNATURES), so that a proof the node
+     * keeps costs no signature check at each block it makes. `checked`: set to whether the signatures
+     * were checked now (not remembered).
+     */
+    bool CheckSigs(const DoubleProposal& proof, const uint256& pubkey, const uint256& genesis, bool* checked = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether the result of CheckSigs for this proof and leader is remembered. */
+    bool SigsKnown(const DoubleProposal& proof, const uint256& pubkey) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::vector<std::pair<Offence, DoubleProposal>> All() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     std::optional<DoubleProposal> Get(const Offence& offence) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     size_t Size() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -124,6 +138,12 @@ private:
     std::vector<Offence> m_unrelayed GUARDED_BY(m_mutex);
     //! The first header each signer signed for each slot seen, by slot and signer.
     std::map<std::pair<int64_t, uint256>, CBlockHeader> m_signed GUARDED_BY(m_mutex);
+    //! Whether both headers of a proof are signed by a key, by the proof's id and the key; oldest first in m_sigs_order.
+    std::map<std::pair<uint256, uint256>, bool> m_sigs GUARDED_BY(m_mutex);
+    std::deque<std::pair<uint256, uint256>> m_sigs_order GUARDED_BY(m_mutex);
+    void NoteSigs(const uint256& id, const uint256& pubkey, bool valid) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+
+public:
     /** What identifies a proof, in either order. */
     static uint256 ProofId(const DoubleProposal& proof);
 };

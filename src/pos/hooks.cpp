@@ -914,7 +914,7 @@ bool FastBlocksHooks::PosActiveNow() const
 }
 
 std::optional<Offence> FastBlocksHooks::CheckChainEvidence(const DoubleProposal& proof, const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view,
-                                                           uint64_t anchors, std::string& reason) const
+                                                           uint64_t anchors, std::string& reason, size_t* sig_budget) const
 {
     AssertLockHeld(::cs_main);
     const auto fail{[&](const char* why) -> std::optional<Offence> {
@@ -932,10 +932,15 @@ std::optional<Offence> FastBlocksHooks::CheckChainEvidence(const DoubleProposal&
     case LeaderStatus::INACTIVE: return fail("bad-pos-evidence-sig");
     case LeaderStatus::OK: break;
     }
-    const auto offence{CheckEvidence(proof, leader.pubkey, Genesis(), m_params, reason)};
-    if (!offence) return std::nullopt;
     // Within the window: while the stake it signed with is still bonded or unbonding.
     if (anchors > leader.set_anchors + static_cast<uint64_t>(m_params.evidence_window_anchors)) return fail("bad-pos-evidence-old");
+    // Both signed by the leader (checked once per proof and leader; within the caller's budget).
+    if (sig_budget && !m_evidence.SigsKnown(proof, leader.pubkey)) {
+        if (*sig_budget == 0) return fail("pos-evidence-later");
+        --*sig_budget;
+    }
+    if (!m_evidence.CheckSigs(proof, leader.pubkey, Genesis())) return fail("bad-pos-evidence-sig");
+    const std::optional<Offence> offence{Offence{.pubkey = leader.pubkey, .slot = offence_slot}};
     if (OffencePunished(view, offence->pubkey, offence->slot)) return fail("bad-pos-evidence-known");
     // Slashed once: no proof against a banned validator takes anything more.
     if (const auto record{GetValidator(view, offence->pubkey)}; record && record->tombstoned) return fail("bad-pos-evidence-banned");
@@ -1289,8 +1294,11 @@ std::optional<Offence> FastBlocksHooks::AddEvidence(const DoubleProposal& proof,
             if (leader.status == LeaderStatus::SET_UNKNOWN || leader.status == LeaderStatus::SEED_UNKNOWN) unknown = true;
             if (leader.status != LeaderStatus::OK || checked.contains(leader.pubkey)) continue;
             checked.insert(leader.pubkey);
-            offence = CheckEvidence(proof, leader.pubkey, Genesis(), m_params, reason);
-            if (offence) break;
+            // (Checked once per proof and leader: a proof sent again costs no signature check.)
+            if (m_evidence.CheckSigs(proof, leader.pubkey, Genesis())) {
+                offence = Offence{.pubkey = leader.pubkey, .slot = slot};
+                break;
+            }
         }
     }
     if (!offence) {
@@ -1358,21 +1366,44 @@ std::vector<uint256> FastBlocksHooks::AskMissingTickets() const
     return missing;
 }
 
+std::vector<std::pair<Offence, DoubleProposal>> FastBlocksHooks::ChainEvidence(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view, uint64_t anchors,
+                                                                                size_t max, const std::set<Offence>& skip) const
+{
+    AssertLockHeld(::cs_main);
+    std::vector<std::pair<Offence, DoubleProposal>> chosen;
+    std::set<uint256> offenders;
+    // Whether each validator met is banned (the pool keeps proofs by validator: read once each).
+    std::map<uint256, bool> banned;
+    size_t sig_budget{MAX_EVIDENCE_SIG_CHECKS};
+    for (const auto& [offence, proof] : m_evidence.All()) {
+        if (chosen.size() >= max) break;
+        if (skip.contains(offence) || offenders.contains(offence.pubkey)) continue;
+        // The cheap checks, by the pool's offence (the signatures say it is the only one the proof can
+        // be): a later slot, punished already, banned.
+        if (offence.slot > slot) continue;
+        if (OffencePunished(view, offence.pubkey, offence.slot)) continue;
+        auto is_banned{banned.find(offence.pubkey)};
+        if (is_banned == banned.end()) {
+            const auto record{GetValidator(view, offence.pubkey)};
+            is_banned = banned.emplace(offence.pubkey, record && record->tombstoned).first;
+        }
+        if (is_banned->second) continue;
+        std::string reason;
+        const auto checked{CheckChainEvidence(proof, prev, slot, view, anchors, reason, &sig_budget)};
+        if (!checked) continue;
+        offenders.insert(checked->pubkey);
+        chosen.emplace_back(*checked, proof);
+    }
+    return chosen;
+}
+
 std::vector<CTxOut> FastBlocksHooks::MergeMinedOutputs(const sidechain::StoreView& view, const CBlockIndex& prev, int64_t time) const
 {
     AssertLockHeld(::cs_main);
     // The proofs this node knows that the chain has not punished, one per validator (a validator is
     // slashed once), a few at most.
     std::vector<CTxOut> outputs;
-    std::set<uint256> offenders;
-    const int64_t slot{SlotOf(time, m_params)};
-    const uint64_t anchors{FAST_STATE.Get(view).anchors};
-    for (const auto& [offence, proof] : m_evidence.All()) {
-        if (outputs.size() >= MAX_MINED_EVIDENCE) break;
-        if (offenders.contains(offence.pubkey)) continue;
-        std::string reason;
-        if (!CheckChainEvidence(proof, prev, slot, view, anchors, reason)) continue;
-        offenders.insert(offence.pubkey);
+    for (const auto& [offence, proof] : ChainEvidence(prev, SlotOf(time, m_params), view, FAST_STATE.Get(view).anchors, MAX_MINED_EVIDENCE)) {
         outputs.emplace_back(0, EvidenceScript(proof));
     }
     return outputs;

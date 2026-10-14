@@ -703,6 +703,21 @@ and none of the headers' parents, and a node on another branch may find another
 leader, for a true proof an honest peer checked (review 4 of audit 6, attack
 2). It costs the sender a message per signature check or two.
 
+The result of each signature check of a proof is kept, by proof and leader (the
+last 4000; a proof the pool keeps counts as checked against its offender), so
+that no proof is checked twice against one leader. The blocks a node makes (of
+stake, and merged mined) read the pool under `cs_main`: the cheap checks come
+first, by the offence a proof is kept under (its signatures were checked: on any
+chain where the proof is one, it is that offence): punished already, its
+validator banned, a slot after the block's; then the window; then the
+signatures, of 32 proofs not checked before at most per block (the next block
+checks others). With a pool of 1000 proofs against a banned validator, leaving
+them out of a merged mined block took 105 to 167 ms, and about 2 ms after
+(`evidence_pool_of_a_banned_validator`, `evidence_sig_checks_bounded`). In a
+block's own check the signatures still come before `-known` and `-banned`: those
+read the state alone (`RecordIndependent`), and a proof is only one once its
+signatures say whose.
+
 The pool is bounded and takes each proof once at most: full (1000), a proof of
 a slot not after the oldest kept is not taken, nor relayed (it would be the one
 pushed out at once, and new again the next time it came: a validator that

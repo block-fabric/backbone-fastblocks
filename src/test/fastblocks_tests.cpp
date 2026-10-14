@@ -4287,6 +4287,133 @@ BOOST_FIXTURE_TEST_CASE(attack_waiting_block_held_by_the_node, FastBlocksSetup)
 // Adversarial review 4 (attacks; a failing check is an attack that works).
 //
 
+BOOST_FIXTURE_TEST_CASE(evidence_pool_of_a_banned_validator, FastBlocksSetup)
+{
+    // A full pool (MAX_EVIDENCE proofs) against one validator that is banned already: none of them
+    // takes anything more. Leaving them out of a block of stake, or of a merged mined block, costs
+    // the node little: no signature is checked again (cs_main is held all the while).
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [a1, b1]{TwoBlocks(2)};
+    const CKey& offender_key{Leader(base_slot + 2)};
+    const uint256 offender{XOnly(offender_key)};
+    Take(a1);
+    int k{3};
+    while (XOnly(Leader(base_slot + k)) == offender) ++k;
+    Take(WithEvidence(k, {{.a = a1, .b = b1}}));
+    BOOST_REQUIRE(Validator(offender)->tombstoned);
+
+    // Two headers signed by the offender for each of MAX_EVIDENCE slots it leads.
+    const CBlock base{a1};
+    int64_t slot{base_slot + k + 1};
+    while (Hooks().Evidence().Size() < pos::MAX_EVIDENCE) {
+        const auto leader{Hooks().ActiveLeaderOf(slot)};
+        BOOST_REQUIRE(leader.status == pos::FastBlocksHooks::LeaderStatus::OK);
+        if (leader.pubkey == offender) {
+            CBlock a{base};
+            a.nTime = pos::SlotTime(slot, Pos());
+            BOOST_REQUIRE(pos::Producer::Sign(a, offender_key, Genesis()));
+            CBlock b{a};
+            b.hashMerkleRoot = ArithToUint256(arith_uint256{static_cast<uint64_t>(slot)});
+            BOOST_REQUIRE(pos::Producer::Sign(b, offender_key, Genesis()));
+            BOOST_REQUIRE(Hooks().Evidence().Add({.pubkey = offender, .slot = slot}, {.a = a, .b = b}));
+        }
+        ++slot;
+    }
+    // A slot after them all, led by another validator.
+    int m{static_cast<int>(slot - base_slot)};
+    while (XOnly(Leader(base_slot + m)) == offender) ++m;
+
+    // A merged mined block: no proof in its coinbase.
+    {
+        LOCK(::cs_main);
+        const auto start{std::chrono::steady_clock::now()};
+        const auto outputs{Hooks().MergeMinedOutputs(Chain().SideCache(), *Tip(), pos::SlotTime(base_slot + m, Pos()))};
+        const auto took{std::chrono::steady_clock::now() - start};
+        BOOST_TEST_MESSAGE("MergeMinedOutputs with " << pos::MAX_EVIDENCE << " proofs against a banned validator: " << Ticks<std::chrono::microseconds>(took) << " us");
+        BOOST_CHECK(outputs.empty());
+    }
+    // A block of stake (with an acknowledgement: the slot is far past the last anchor): none in its sections.
+    Anchor(Ticket(Tip()->GetBlockHash(), script));
+    std::string error;
+    const auto start{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE_MESSAGE(producer->Produce(Slot(m), error), error);
+    const auto took{std::chrono::steady_clock::now() - start};
+    BOOST_TEST_MESSAGE("Produce with " << pos::MAX_EVIDENCE << " proofs against a banned validator: " << Ticks<std::chrono::microseconds>(took) << " us");
+    CBlock made;
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(made, *Tip())));
+    pos::PosSections sections;
+    BOOST_REQUIRE(pos::PosSections::Decode(made.vSections, sections));
+    BOOST_CHECK(sections.evidence.empty());
+}
+
+BOOST_FIXTURE_TEST_CASE(evidence_sig_checks_bounded, FastBlocksSetup)
+{
+    // Proofs the pool keeps under a leader another chain names (signed by a key that does not lead
+    // their slots here): on this chain their signatures fail, which only checking them tells. A block
+    // this node makes checks those of MAX_EVIDENCE_SIG_CHECKS proofs at most, and remembers each
+    // result: the next block checks others, and none is checked twice.
+    StartPos();
+    const CBlock base{PosBlock(1)};
+    const int64_t until{base_slot + 400};
+    std::vector<std::pair<pos::DoubleProposal, uint256>> proofs; // with the leader of its slot here
+    for (int64_t slot{base_slot + 2}; slot < until; ++slot) {
+        const auto leader{Hooks().ActiveLeaderOf(slot)};
+        BOOST_REQUIRE(leader.status == pos::FastBlocksHooks::LeaderStatus::OK);
+        const CKey* signer{nullptr};
+        for (const CKey& k : keys) {
+            if (XOnly(k) != leader.pubkey) signer = &k;
+        }
+        BOOST_REQUIRE(signer);
+        CBlock a{base};
+        a.nTime = pos::SlotTime(slot, Pos());
+        BOOST_REQUIRE(pos::Producer::Sign(a, *signer, Genesis()));
+        CBlock b{a};
+        b.hashMerkleRoot = ArithToUint256(arith_uint256{static_cast<uint64_t>(slot)});
+        BOOST_REQUIRE(pos::Producer::Sign(b, *signer, Genesis()));
+        const pos::DoubleProposal proof{.a = a, .b = b};
+        BOOST_REQUIRE(Hooks().Evidence().Add({.pubkey = XOnly(*signer), .slot = slot}, proof));
+        proofs.emplace_back(proof, leader.pubkey);
+    }
+    BOOST_REQUIRE_GT(proofs.size(), 3 * pos::MAX_EVIDENCE_SIG_CHECKS);
+    const auto checked{[&] {
+        return std::count_if(proofs.begin(), proofs.end(), [&](const auto& p) { return Hooks().Evidence().SigsKnown(p.first, p.second); });
+    }};
+    BOOST_CHECK_EQUAL(checked(), 0);
+    for (size_t round{1}; round <= 3; ++round) {
+        LOCK(::cs_main);
+        BOOST_CHECK(Hooks().MergeMinedOutputs(Chain().SideCache(), *Tip(), pos::SlotTime(until, Pos())).empty());
+        BOOST_CHECK_EQUAL(checked(), round * pos::MAX_EVIDENCE_SIG_CHECKS);
+    }
+    // The pool's own proofs, checked against the key they were kept under, are known as good.
+    std::string reason;
+    for (const auto& [offence, proof] : Hooks().Evidence().All()) {
+        BOOST_CHECK(Hooks().Evidence().SigsKnown(proof, offence.pubkey));
+        BOOST_CHECK(Hooks().Evidence().CheckSigs(proof, offence.pubkey, Genesis()));
+    }
+    // A result is pure: checked against a leader, the same as the check itself.
+    for (const auto& [proof, leader] : proofs) {
+        const bool known{Hooks().Evidence().SigsKnown(proof, leader)};
+        bool now{known};
+        BOOST_CHECK(!Hooks().Evidence().CheckSigs(proof, leader, Genesis(), &now));
+        BOOST_CHECK_EQUAL(now, !known);
+        BOOST_CHECK(Hooks().Evidence().SigsKnown(proof, leader));
+        BOOST_CHECK(!pos::CheckEvidence(proof, leader, Genesis(), Pos(), reason));
+    }
+    // Bounded: the oldest results go first.
+    pos::EvidencePool pool;
+    const pos::DoubleProposal& first{proofs[0].first};
+    for (size_t i{0}; i < pos::MAX_CHECKED_SIGNATURES; ++i) pool.CheckSigs(proofs[i % proofs.size()].first, uint256{static_cast<uint8_t>(i / proofs.size() + 1)}, Genesis());
+    BOOST_CHECK(pool.SigsKnown(first, uint256{1}));
+    pool.CheckSigs(first, uint256{0xff}, Genesis());
+    BOOST_CHECK(!pool.SigsKnown(first, uint256{1}));
+    BOOST_CHECK(pool.SigsKnown(first, uint256{0xff}));
+}
+
 BOOST_FIXTURE_TEST_CASE(attack4_evicted_proof_relayed_again, FastBlocksSetup)
 {
     // ATTACK (a single validator, or one that has unbonded: it loses nothing). The evidence pool keeps

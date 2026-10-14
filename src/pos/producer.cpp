@@ -413,17 +413,11 @@ std::optional<uint256> Producer::Produce(int64_t slot, std::string& error, Retry
         }
         // The proofs this node knows that the chain has not punished yet, one per validator (a
         // validator is slashed once: a second proof against it in the block would be invalid).
+        // (Cheap checks first, and a bounded number of signatures: ChainEvidence.)
         const uint64_t anchors{fast.anchors + (ack ? 1 : 0)};
-        std::set<uint256> offenders;
-        for (const auto& [offence, proof] : m_hooks.Evidence().All()) {
-            if (evidence.size() >= MAX_SECTION_EVIDENCE) break;
-            if (refused_offences.contains(offence) || offenders.contains(offence.pubkey)) continue;
-            std::string reason;
-            if (m_hooks.CheckChainEvidence(proof, *tip, slot, view, anchors, reason)) {
-                evidence.push_back(proof);
-                offences.push_back(offence);
-                offenders.insert(offence.pubkey);
-            }
+        for (auto& [offence, proof] : m_hooks.ChainEvidence(*tip, slot, view, anchors, MAX_SECTION_EVIDENCE, refused_offences)) {
+            evidence.push_back(std::move(proof));
+            offences.push_back(offence);
         }
         tip_hash = tip->GetBlockHash();
     }

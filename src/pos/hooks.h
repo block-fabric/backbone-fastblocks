@@ -154,10 +154,26 @@ public:
      * Reasons: those of CheckEvidence; bad-pos-evidence-late (a slot after the block's),
      * bad-pos-evidence-old (more than evidence_window_anchors anchors since the set of its epoch was
      * made, or a set the state no longer has), bad-pos-evidence-known, pos-seed-unknown. Called with
-     * cs_main held. `anchors`: those of the chain with the block.
+     * cs_main held. `anchors`: those of the chain with the block. The signatures are checked last
+     * (the window first: both read the record; whether the offence was punished, or its validator
+     * banned, only once the signatures say whose it is: those read the state alone, RecordIndependent),
+     * and once per proof and leader (EvidencePool::CheckSigs). `sig_budget`: if given, how many
+     * proofs whose signatures were not checked before may be checked; none left, the proof is not
+     * taken (pos-evidence-later), and the count goes down by those checked.
      */
     std::optional<Offence> CheckChainEvidence(const DoubleProposal& proof, const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view, uint64_t anchors,
-                                              std::string& reason) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+                                              std::string& reason, size_t* sig_budget = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    /**
+     * The proofs of the pool a block on top of `prev`, of `slot`, can carry (CheckChainEvidence), one per
+     * validator, at most `max`, those of `skip` left out. Under cs_main, with a pool of MAX_EVIDENCE
+     * proofs, so the cheap checks come first, by the offence the pool keeps a proof under (its
+     * signatures were checked: wherever the proof is one, it is that offence): punished already, its
+     * validator banned, a slot after the block's. Then the signatures of at most
+     * MAX_EVIDENCE_SIG_CHECKS proofs not checked before (each result is kept: the next block checks
+     * others).
+     */
+    std::vector<std::pair<Offence, DoubleProposal>> ChainEvidence(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view, uint64_t anchors, size_t max,
+                                                                  const std::set<Offence>& skip = {}) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
 
     bool BlockExtensions() const override { return true; }
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
