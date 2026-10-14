@@ -260,22 +260,30 @@ until its block is connected.
    node is connected to instead (below).
 3. **Volatile.** An unchecked header is not written to the block index
    database, and leaves the block index as soon as no peer holds it (its last
-   holder disconnected). Deleting from the block index is new to Bitcoin's code:
-   the entries go to a list before they are freed (the last batch whole, however
-   large, and up to 4096 before it: code that read one without the lock reads a
-   dead entry, never freed memory; what was read so, the locator of the best
-   header and the header tip notified, is now read with the lock held), and the
-   peers' pointers into them (best known block, blocks in flight) are moved to
-   the nearest block that stays, under the same lock. Code that keeps a pointer
-   into the block index across a release of the lock looks it up again by hash
-   if any entry left meanwhile (`m_unchecked_erasures`): `ActivateBestChain`
-   finds its most-work chain again (a holder that left while the node connected
-   its branch made it read a deleted block, a fatal error: review of audit 6),
-   and so do the headers and compact block handlers and the headers taken in
-   once the mainchain commits to them. A header whose block is
-   connected is checked: it leaves the set, is written to disk, and is kept like
-   any other. The node's own headers, and those read from disk or given by RPC,
-   have the node as holder, which never goes.
+   holder disconnected). Deleting from the block index is new to Bitcoin's code,
+   where an entry, once made, lives as long as the node: only unchecked headers
+   ever leave, any time `cs_main` is free, and a checked header stays so. So no
+   code uses an unchecked header's entry once it released `cs_main` since it
+   found it: each path that can reach one holds the lock while it uses it
+   (`getblockheader`, `getchaintips`, `getblock` of such a block, the wallet's
+   `findBlock`, what a block message reads of its parent, the block a producer
+   acknowledges...), or looks it up again by hash once it has the lock again if
+   any entry left meanwhile (`m_unchecked_erasures`: `ActivateBestChain`,
+   `InvalidateBlock` and its map of candidates, the headers and compact block
+   handlers; `PreciousBlock`, `InvalidateBlock` and the follower take a hash), or
+   never sees unchecked headers at all (`LookupCheckedBlockIndex`: the RPCs and
+   REST calls that read a block without the lock, `getblocktxn`, the wallet's
+   coinbase roles, the kernel library); a low-work headers sync never starts on
+   one. The peers' pointers into them (best known block, blocks in flight...) are
+   moved to the nearest block that stays, under the same lock. The full list is
+   the template's (doc/sidechain.md, "Pointers into the block index"; test
+   `unchecked_erased_while_used`, where a peer leaves exactly where each path
+   uses an entry). The entries taken out are freed a batch later (the last batch
+   whole, and up to 4096 before it): defence in depth only, so that a path
+   missed would read a dead entry rather than freed memory. A header whose block
+   is connected is checked: it leaves the set, is written to disk, and is kept
+   like any other. The node's own headers, and those read from disk or given by
+   RPC, have the node as holder, which never goes.
    **Their blocks are stored apart.** The block of an unchecked header is stored
    in a file of its own (`blocks/unchecked/unc?????.dat`, template
    `BlockManager::WriteVolatileBlock`), never in the block files, if its sender
@@ -301,7 +309,12 @@ until its block is connected.
    `REPLACE` if the node can tell, or any other one if it cannot (the one it has
    is known bad). And the node asks for the headers again from the block's
    parent (getheaders), once, from every peer that holds the header or whose best
-   chain has it: one pending request a peer. An honest peer answers with the
+   chain has it: one pending request a peer (with one pending already, from the
+   last block both share: the answer has the peer's copy of either). Nothing
+   else is kept for a failure, so there is nothing an attacker can fill (the
+   list of 64 failed blocks asked for again before could be filled: review of
+   audit 6, item 8a; `extension_failure_asked_again_whatever_fails`, 300 failures
+   of an attacker's own around an honest one). An honest peer answers with the
    leader's signature, which replaces the forged one, and the block is connected.
    The node never asks for a failed block again (`getdata`), nor keeps a list of
    such blocks.
@@ -366,13 +379,63 @@ Each against any number of peers, reconnections and new addresses.
   honest chain and whose blocks the sender withholds: the node asks the sender
   for them, the block download times it out and disconnects it, and its headers
   go with it; with blocks, the node tries them, the signature fails (5), and they
-  stay with their holders until those go. Limit: a branch longer than a peer's
-  budget beyond what the node can check (10000 slots, three and a half days, or
-  blocks of more than 32 MiB in all, from an outbound peer; 500 slots or 8 MiB
-  from inbound peers alone) is taken only as the node connects it,
-  which it cannot before the branch leads: a partition that long needs
-  `unchecked_headers_per_peer` (or `unchecked_block_bytes_per_peer`) raised, or a
-  restart with the other side's peers.
+  stay with their holders until those go. (f) A branch longer than a peer's
+  budget beyond what the node can check syncs in windows: once the part the
+  node holds leads, the node connects it, can check what follows, and the
+  budget frees as it connects; it asks the peer for its headers again once its
+  tip moved, and takes the next window (`feature_fastblocks_window.py`: a
+  partition branch several times the budget, from one outbound peer, inbound
+  attackers holding their whole budgets). Limit: the part before the branch
+  leads must fit (below).
+- **The limit of a long branch, and what the operator does.** A branch syncs in
+  windows once the part the node holds leads (f). Before it leads, the node
+  connects none of it (it connects only toward more work, and its own chain has
+  more), so every header of the branch up to the first that leads, past the
+  first epochs (whose sets are those of anchors below the fork, which the node
+  can check), must fit one peer's budget: 10000 headers and 32 MiB of blocks
+  from an outbound peer (500 and 8 MiB from an inbound one). That first header
+  that leads has one anchor more than the node's own chain since the fork. So
+  the limit is reached only when the node's own side kept anchoring too: the
+  node takes such headers only on a branch that leaves its chain at or above its
+  final block (`bad-pos-fork-too-deep`), which its side's anchors, net of the
+  commitments it skipped (the other side's), have not covered `final_anchors`
+  times; with an anchor in every mainchain block (about 20 slots apart), the
+  other side leads within 10000 slots as long as the node's side made fewer
+  than about 500 anchors since the fork: a partition of three days and more in
+  which both sides anchored about as often, or one whose blocks past the first
+  epochs weigh more than 32 MiB before the branch leads (five full blocks). The
+  node cannot take more without a new denial of service: before the branch
+  leads it cannot tell it from an attacker's, since a header it cannot check
+  counts an anchor for any commitment on record after the last one below it
+  (headers nobody can check claim as many anchors as there were commitments:
+  the inflated best header), and holding headers or blocks past the budget on
+  such a claim is the unbounded memory and disk the budget prevents. A safe way
+  would be a presync like Bitcoin's low-work headers sync: take the peer's
+  headers past its budget without storing them, check what needs no state of
+  the branch (links, slots, times, the order of acknowledgements, and each
+  anchor's ticket, which names a block of the branch, so that only commitments
+  won on the mainchain make anchors), keep a commitment to them, and store them
+  past the budget only once that work leads, downloading them again. Not built:
+  it needs the tickets of the other side's commitments and a presync of the
+  chain key. Until then, an operator whose node does not follow (`getchaintips`
+  shows the other branch, `headers-only`, with more work than the active tip;
+  with `-debug=validation`, its headers refused `over the budget
+  (unchecked-budget)`):
+  1. finds the fork: the height of the other branch's tip less its `branchlen`;
+  2. `invalidateblock` the first block of its own chain after the fork: its tip
+     goes back to the fork, the other branch leads at once, and the node takes it
+     as one that catches up does, an epoch at a time, checking each epoch's
+     headers once it connected the anchor that made its set (no budget needed);
+     its own side's transactions go back to its mempool;
+  3. once it is at the other side's tip, `reconsiderblock` the same block: its
+     own branch, with fewer anchors, stays a fork.
+  The same steps take a node past `bad-pos-fork-too-deep`, whatever its budgets,
+  when its side made more anchors since the fork than the window of sets its
+  state keeps (`evidence_window_anchors`: 1440 on main, 10 on regtest) or than
+  its final block allows: by design, it then takes no header it cannot check on
+  the other branch. (`feature_fastblocks_window.py` does both: on a node whose
+  side anchored after the fork, with budgets too small for the branch before it
+  leads, and on that side's validator when it is past the window of sets.)
 - **No punishment of honest peers.** A header refused for the budget is
   `BLOCK_HEADER_LOW_WORK`; one off a branch too deep, too (`bad-pos-fork-too-deep`);
   an extension failure is `BLOCK_TIME_FUTURE` for the block's sender and for every
@@ -411,6 +474,9 @@ adversarial review's `attack_unchecked_budget_locked_by_shared_headers`,
 `attack_unchecked_sybils_drop_honest_headers`,
 `attack_unchecked_blocks_fill_the_disk`,
 `attack_inflated_best_header_does_not_stop_the_chain`),
+`feature_fastblocks_window.py` (a partition branch several times the budget,
+synced in windows; and the operator's way past the limit), `unchecked_erased_while_used`
+and `extension_failure_asked_again_whatever_fails` (template),
 `feature_fastblocks_unchecked.py` (reconnection loops, many peers, each with
 its own budget, forged copies, an inflated best
 header while the node catches up, no honest peer punished; more inbound
@@ -946,6 +1012,7 @@ after every step:
 | `feature_fastblocks_restart.py` | A validator restarted refuses a BMM block 30 minutes ahead as the others do; every validator restarted while a committed ticket waits asks for it and acknowledges it; a validator whose data directory is wiped does not sign a slot it signed again; one killed between signing and relaying (`-posfaultaftersign`) does not sign that slot again |
 | `feature_fastblocks_soak.py` (extended) | 30-second slots (`-posslotseconds=30`), `--duration` minutes of rounds: restarts and kills, partitions, mainchain reorgs, bonds, unbonds, payments, withdrawals; after each, one tip, `pegbalance`, no node down, few failed slots |
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; a BMM block carries a proof (all validators stopped), its payee rewarded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
+| `feature_fastblocks_window.py` | Observer with small budgets of headers it cannot check (`-posuncheckedheaders`, `-posuncheckedbytes`): a partition branch several budgets long, synced in windows from one outbound peer while inbound attackers hold their whole budgets; a branch whose part before it leads exceeds the budgets (both sides anchored): not followed; the operator's `invalidateblock` of its side's first block after the fork, then `reconsiderblock`, takes it |
 
 Fuzz targets (`src/test/fuzz/fastblocks.cpp`): `pos_header`, `pos_ticket`,
 `pos_evidence`, `pos_state` (a whole chain from fuzzed choices, with bonds,
@@ -1281,6 +1348,44 @@ design: "Headers and blocks the node cannot check yet".)
 - The GUI calls a block of stake that records a BMM commitment a "BMM" block,
   the states soft, BMM-confirmed and final, and the anchor's pot "BMM reward(s)";
   the RPCs keep their names.
+
+### Closing the known gaps (2026-10-14)
+
+- **Pointers into the block index.** Unchecked headers leave the block index,
+  freed a batch later; no path relies on that delay any more (template; doc/sidechain.md,
+  "Pointers into the block index"). Found on the way: `InvalidateBlock` kept a map of
+  entries across releases of `cs_main`, and one that left could become the best
+  header (a dangling pointer); `getblock` and the wallet's `findBlock` read the
+  block of an unchecked header without the lock (its file deleted meanwhile);
+  `getblocktxn` asserted a read that a deleted file fails; the RPCs, REST calls
+  and the producer that read a block they looked up without the lock. Each path
+  now holds the lock, looks the entry up again, or never sees unchecked headers;
+  `unchecked_erased_while_used` has a peer leave exactly where each uses an entry
+  (it fails with any of the getblock, findBlock or InvalidateBlock fixes taken
+  out).
+- **Item 8a of the review** (the list of 64 failed blocks asked for again, which
+  an attacker could fill): the list is gone since the one design; nothing is
+  kept for a failure but one pending request a peer, now merged with a pending
+  one rather than replaced. `extension_failure_asked_again_whatever_fails`: 300
+  failures of an attacker's own around an honest block's, which is still asked
+  for and connects.
+- **Tests on a busy machine.** `feature_fastblocks_partition.py` ran on the
+  clock: under load, more than `max_unanchored_slots` passed between two anchors
+  and blocks of stake stopped (it failed five times in five with four tests at
+  once). It runs on mock time now, moved a slot at a time once the slot's
+  leaders made their blocks and their peers have them (`SlotClock`, test
+  framework: a block that reached the next leader late was left out, and its
+  maker jailed for the slot). `feature_fastblocks_idle.py` waits for each bid
+  that is due rather than 10 seconds; `feature_fastblocks_restart.py` read the
+  slot a validator signed last while its block was still on its way (it stops
+  the validators and checks that block is on every chain first). Every wait is
+  on a condition, with generous bounds; each of these, and
+  `feature_fastblocks_window.py`, passed five times in five with four tests at
+  once.
+- **A long partition branch** syncs in windows once the part the node holds
+  leads; the limit before it leads, why it stays, and the operator's way past
+  it: see "The limit of a long branch" above (`feature_fastblocks_window.py`;
+  regtest options `-posuncheckedheaders` and `-posuncheckedbytes`).
 
 ## Deviations from the design (phase 5)
 
