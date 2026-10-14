@@ -54,13 +54,19 @@ struct PosParams {
     int final_anchors{6};
     /**
      * Not consensus: the headers whose signature the node cannot check yet (their epoch's set made by
-     * an anchor it has not connected) that a peer may hold until their blocks are connected, and the
-     * bytes of their blocks the node stores (apart from the block files) for it. Each connected peer
-     * has the whole budget, whatever the others hold. See doc/fastblocks.md, "Headers and blocks the
-     * node cannot check yet".
+     * an anchor it has not connected) that an outbound (or manual) peer may hold until their blocks
+     * are connected, and the bytes of their blocks the node stores (apart from the block files) for
+     * it; an inbound peer's, smaller, and how many inbound peers may hold any at once. Each peer has
+     * its whole budget, whatever the others hold. Worst case, node-wide (19 outbound and manual peers
+     * at most, and 8 inbound ones): 194,000 headers (about 120 MB of memory) and 672 MiB of blocks.
+     * See doc/fastblocks.md, "Headers and blocks the node cannot check yet".
      */
     int64_t unchecked_headers_per_peer{10000};
-    int64_t unchecked_block_bytes_per_peer{int64_t{128} << 20};
+    int64_t unchecked_block_bytes_per_peer{int64_t{32} << 20};
+    int64_t unchecked_headers_per_inbound_peer{500};
+    //! (More than a block of the largest size.)
+    int64_t unchecked_block_bytes_per_inbound_peer{int64_t{8} << 20};
+    int64_t unchecked_inbound_holders{8};
     /**
      * The validators the chain starts with, a bootstrap (regtest's -posvalidators): in the set until
      * jailed or banned, with their stake as weight on top of what they bond. None on the main and test

@@ -215,7 +215,11 @@ bool FastBlocksHooks::HeaderCheckable(const CBlockHeader& header, const CBlockIn
 
 sidechain::ChainHooks::UncheckedBudget FastBlocksHooks::UncheckedLimits() const
 {
-    return {.per_peer = static_cast<size_t>(m_params.unchecked_headers_per_peer), .block_bytes_per_peer = static_cast<size_t>(m_params.unchecked_block_bytes_per_peer)};
+    return {.per_peer = static_cast<size_t>(m_params.unchecked_headers_per_peer),
+            .block_bytes_per_peer = static_cast<size_t>(m_params.unchecked_block_bytes_per_peer),
+            .per_inbound_peer = static_cast<size_t>(m_params.unchecked_headers_per_inbound_peer),
+            .block_bytes_per_inbound_peer = static_cast<size_t>(m_params.unchecked_block_bytes_per_inbound_peer),
+            .inbound_holders = static_cast<size_t>(m_params.unchecked_inbound_holders)};
 }
 
 bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& state) const

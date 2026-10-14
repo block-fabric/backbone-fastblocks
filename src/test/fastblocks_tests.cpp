@@ -21,6 +21,7 @@
 #include <kernel/chainparams.h>
 #include <key.h>
 #include <key_io.h>
+#include <net.h>
 #include <node/miner.h>
 #include <pos/evidence.h>
 #include <pos/finality.h>
@@ -607,6 +608,24 @@ BOOST_AUTO_TEST_CASE(network_parameters)
         BOOST_CHECK_EQUAL(params->GetConsensus().DifficultyAdjustmentInterval(), 2016);
     }
     BOOST_CHECK_EQUAL(CChainParams::Main()->GetConsensus().pos.stall_seconds, 30 * 60);
+    // Unchecked headers (review of audit 6, item 10): the worst case node-wide. Outbound and manual
+    // peers have the whole budget: 19 at most (CConnman's semOutbound and semAddnode); inbound ones a
+    // much smaller one, inbound_holders of them at most. Under 1 GiB of blocks on disk, and a few
+    // hundred MB of memory (1 KiB an unchecked header, with room to spare: doc/fastblocks.md).
+    for (const auto& params : {CChainParams::Main(), CChainParams::TestNet()}) {
+        const Consensus::PosParams& pos{params->GetConsensus().pos};
+        const int64_t outbound{MAX_OUTBOUND_FULL_RELAY_CONNECTIONS + MAX_BLOCK_RELAY_ONLY_CONNECTIONS + MAX_FEELER_CONNECTIONS + MAX_ADDNODE_CONNECTIONS};
+        BOOST_CHECK_EQUAL(outbound, 19);
+        const int64_t headers{outbound * pos.unchecked_headers_per_peer + pos.unchecked_inbound_holders * pos.unchecked_headers_per_inbound_peer};
+        const int64_t bytes{outbound * pos.unchecked_block_bytes_per_peer + pos.unchecked_inbound_holders * pos.unchecked_block_bytes_per_inbound_peer};
+        BOOST_CHECK_EQUAL(headers, 194'000);
+        BOOST_CHECK_EQUAL(bytes, int64_t{672} << 20);
+        BOOST_CHECK_LT(bytes, int64_t{1} << 30);
+        BOOST_CHECK_LT(headers * 1024, int64_t{200} << 20);
+        BOOST_CHECK_LE(pos.unchecked_headers_per_inbound_peer * 10, pos.unchecked_headers_per_peer);
+        // An inbound peer can still give a block of the largest size.
+        BOOST_CHECK_GE(pos.unchecked_block_bytes_per_inbound_peer, static_cast<int64_t>(params->GetConsensus().max_block_weight));
+    }
     BOOST_CHECK_EQUAL(Consensus::PosParams{}.slot_seconds * Consensus::PosParams{}.max_unanchored_slots, 60 * 60);
     // Regtest: one-second slots, stalls of 30 slots; -posslotseconds (a soak test) sets the slot.
     CChainParams::RegTestOptions options;

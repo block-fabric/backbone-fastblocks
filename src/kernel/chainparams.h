@@ -169,6 +169,8 @@ public:
         std::optional<int> pos_final_anchors{};
         //! FastBlocks: the length of a slot in seconds (-posslotseconds; 1 by default), and of a stall (30 slots).
         std::optional<int64_t> pos_slot_seconds{};
+        //! FastBlocks: the unchecked headers an inbound peer may hold (-posuncheckedinbound; not consensus).
+        std::optional<int64_t> pos_unchecked_inbound{};
     };
 
     struct MainNetOptions {

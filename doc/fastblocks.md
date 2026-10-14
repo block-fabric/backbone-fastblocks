@@ -121,7 +121,7 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | The record has the block that seeds the epoch; may come later (not a slot to come: below) | `pos-seed-unknown` |
 | Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
 | A header whose epoch's set the node does not know: the branch leaves the active chain at or above its final block, and the anchor that made the set is not on the active chain (the state pruned that one's set). Not punished | `bad-pos-fork-too-deep` |
-| ... and, from a peer, it fits the budget of headers the node cannot check yet: the peer holds fewer than `unchecked_headers_per_peer` (10000; 2000 on regtest), and their stored blocks weigh at most `unchecked_block_bytes_per_peer` (128 MiB; 32 MiB on regtest), whatever other peers hold: see "Headers and blocks the node cannot check yet" (template; not consensus). Not punished; asked again once the tip moved | `unchecked-budget` |
+| ... and, from a peer, it fits the budget of headers the node cannot check yet: the peer holds fewer than `unchecked_headers_per_peer` (10000; 2000 on regtest), and their stored blocks weigh at most `unchecked_block_bytes_per_peer` (32 MiB), whatever other peers hold; an inbound peer, `unchecked_headers_per_inbound_peer` (500; on regtest 2000, or `-posuncheckedinbound`) and `unchecked_block_bytes_per_inbound_peer` (8 MiB; 32 MiB on regtest), and only while fewer than `unchecked_inbound_holders` (8) other inbound peers hold any: see "Headers and blocks the node cannot check yet" (template; not consensus). Not punished; asked again once the tip moved | `unchecked-budget` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later if its leader signed it; one whose leader the node cannot tell (set or seed unknown) does not wait, nor is punished | `pos-time-future`, `pos-time-future-unchecked` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
@@ -231,8 +231,16 @@ until its block is connected.
    peer holds is the headers that have it as a holder.
 2. **Bounds, by peer.** A peer holds at most `unchecked_headers_per_peer`
    headers (10000; 2000 on regtest), and the blocks the node stored of the
-   headers it holds weigh at most `unchecked_block_bytes_per_peer` (128 MiB;
-   32 MiB on regtest). A header over either is refused (`unchecked-budget`,
+   headers it holds weigh at most `unchecked_block_bytes_per_peer` (32 MiB) --
+   an outbound or manual peer. An inbound peer, which anyone can open, holds at
+   most `unchecked_headers_per_inbound_peer` (500) and
+   `unchecked_block_bytes_per_inbound_peer` (8 MiB, more than a block of the
+   largest size), and only `unchecked_inbound_holders` (8) inbound peers hold
+   any at once: a further one is refused until one of them holds none (nothing
+   is dropped for it, nobody disconnected). The honest peer a node catches up
+   from is usually one it chose. (Regtest: inbound peers as outbound ones, 2000
+   headers and 32 MiB, since the test framework's peers are inbound;
+   `-posuncheckedinbound` gives them less.) A header over either is refused (`unchecked-budget`,
    `BLOCK_HEADER_LOW_WORK`: not punished; the node asks the peer for its headers
    again once its tip moved, when its connected blocks gave room back). Every
    connected peer has this whole budget whatever the others hold or share: no
@@ -297,13 +305,25 @@ until its block is connected.
 Each against any number of peers, reconnections and new addresses.
 
 - **Bounded memory and disk.** Unchecked headers in the block index: at most
-  `unchecked_headers_per_peer` for each connected peer, plus the node's own
-  (every admission checks the sender's budget); their stored blocks, at most
-  `unchecked_block_bytes_per_peer` for each (every block stored, and every header
-  held, is charged to its holders and checked against their budgets; a holder
-  over it stops holding). With the default 125 connections: 1.25 million index
-  entries and 16 GiB of blocks at the very worst, all of it unchecked and gone
-  with the peers (or at a restart). Reconnecting changes nothing: the count is
+  `unchecked_headers_per_peer` for each connected outbound or manual peer, and
+  `unchecked_headers_per_inbound_peer` for each of the `unchecked_inbound_holders`
+  inbound peers that may hold any, plus the node's own (every admission checks
+  the sender's budget); their stored blocks, at most the byte budgets likewise
+  (every block stored, and every header held, is charged to its holders and
+  checked against their budgets; a holder over it stops holding). Outbound and
+  manual peers are 19 at most, whatever `-maxconnections` (11 automatic ones,
+  extras and feelers included, share `semOutbound`; 8 `-addnode` ones share
+  `semAddnode`; `addnode onetry` and `-connect` are the operator's). So, with the
+  main and test networks' parameters, at the very worst: 19 x 10000 + 8 x 500 =
+  194,000 unchecked headers, at about 600 bytes each (block index entry and
+  map node about 240, extension about 128, `m_unchecked` entry about 80, an
+  `m_unchecked_held` node about 64 a holder) some 120 MB of memory, under
+  190 MiB at a full 1 KiB each, plus the entries freed a batch late (at most
+  10000 + 4096); and 19 x 32 MiB + 8 x 8 MiB = 672 MiB of blocks on disk. All of
+  it unchecked, and gone with the peers (or at a restart). (Until 2026-10-13
+  every peer had 10000 headers and 128 MiB, with no cap on inbound peers: with
+  125 connections, 1.25 million entries and 16 GiB at worst; review of audit 6,
+  item 10. `network_parameters` checks these figures.) Reconnecting changes nothing: the count is
   the number of headers and the bytes of their blocks, which leave with their
   last holder (the block's file deleted), so a new connection starts with no
   budget used and nothing left behind, on disk either: the same block sent
@@ -335,7 +355,8 @@ Each against any number of peers, reconnections and new addresses.
   go with it; with blocks, the node tries them, the signature fails (5), and they
   stay with their holders until those go. Limit: a branch longer than a peer's
   budget beyond what the node can check (10000 slots, three and a half days, or
-  blocks of more than 128 MiB in all) is taken only as the node connects it,
+  blocks of more than 32 MiB in all, from an outbound peer; 500 slots or 8 MiB
+  from inbound peers alone) is taken only as the node connects it,
   which it cannot before the branch leads: a partition that long needs
   `unchecked_headers_per_peer` (or `unchecked_block_bytes_per_peer`) raised, or a
   restart with the other side's peers.
@@ -363,11 +384,13 @@ Each against any number of peers, reconnections and new addresses.
   and it goes with its holders.
 
 FastBlocks' part: `HeaderCheckable` (the leader of the slot is `SET_UNKNOWN`),
-`UncheckedLimits` (`unchecked_headers_per_peer`, `unchecked_block_bytes_per_peer`),
+`UncheckedLimits` (`unchecked_headers_per_peer`, `unchecked_block_bytes_per_peer`,
+the inbound ones and `unchecked_inbound_holders`),
 `ExtensionFailure` (`bad-pos-sig`), and `CheckOtherExtension`. The template's is
 the rest, off unless a chain's `HeaderCheckable` says no. Tests: the template's
 `sidechain_hooks_tests.cpp` (`unchecked_*`, among them
-`unchecked_no_peer_drops_another` and `unchecked_blocks_stored_apart`,
+`unchecked_no_peer_drops_another`, `unchecked_inbound_budget_and_holders` and
+`unchecked_blocks_stored_apart`,
 `block_extension_unknown_taken`, `extension_failure_not_the_peers_fault`),
 `fastblocks_tests.cpp` (`unchecked_siblings_not_taken`,
 `unchecked_headers_checked_give_room`, `forged_signature_replaced`, and the
@@ -377,7 +400,9 @@ adversarial review's `attack_unchecked_budget_locked_by_shared_headers`,
 `attack_inflated_best_header_does_not_stop_the_chain`),
 `feature_fastblocks_unchecked.py` (reconnection loops, many peers, each with
 its own budget, forged copies, an inflated best
-header while the node catches up, no honest peer punished), and the fuzz
+header while the node catches up, no honest peer punished; more inbound
+attackers than may hold any, each within the inbound budget, while honest
+outbound peers give the node a stretch several inbound budgets long), and the fuzz
 targets `sidechain_unchecked` and `pos_state` (peers that come and go).
 `feature_fastblocks_fork.py` keeps the attacker connected (its forged header would
 otherwise go with it) and sees the forged signature replaced.

@@ -145,6 +145,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         if (*slot_seconds < 1 || *slot_seconds > 600) throw std::runtime_error("Invalid -posslotseconds");
         options.pos_slot_seconds = *slot_seconds;
     }
+    if (const auto inbound{args.GetIntArg("-posuncheckedinbound")}) {
+        if (*inbound < 1 || *inbound > 100000) throw std::runtime_error("Invalid -posuncheckedinbound");
+        options.pos_unchecked_inbound = *inbound;
+    }
     if (const auto lookahead{args.GetIntArg("-posseedlookahead")}) {
         if (*lookahead < 0 || *lookahead > 365 * 24 * 60 * 60) throw std::runtime_error("Invalid -posseedlookahead");
         options.pos_seed_lookahead = *lookahead;

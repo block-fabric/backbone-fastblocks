@@ -624,6 +624,10 @@ public:
             consensus.pos.final_anchors = opts.pos_final_anchors.value_or(1);
             consensus.pos.unchecked_headers_per_peer = 2000;
             consensus.pos.unchecked_block_bytes_per_peer = int64_t{32} << 20;
+            // Inbound peers as outbound ones (the test framework's peers are inbound), unless a test
+            // gives them less (-posuncheckedinbound); 8 of them hold unchecked headers at most.
+            consensus.pos.unchecked_headers_per_inbound_peer = opts.pos_unchecked_inbound.value_or(2000);
+            consensus.pos.unchecked_block_bytes_per_inbound_peer = int64_t{32} << 20;
             consensus.pos.genesis_validators = opts.pos_validators;
             consensus.pos.min_stake = COIN / 10000;
             consensus.pos.unbonding_anchors = 20;
