@@ -515,6 +515,19 @@ block follows (which ends such a stop, or a stall). At an anchor, a validator
 that made less than `liveness_min_bps` of the slots it led in an earlier epoch,
 having led `liveness_min_assigned` or more, is jailed: left out of the sets
 made in the next `jail_epochs` + 1 epochs. No coins are lost.
+Two epochs per anchor: the epochs whose liveness it counts (and the sets it
+may prune) are those before its *earliest* epoch, which is its own for a
+block of stake and, for a BMM block, two hours before its time (it may be that
+far ahead of the clock): only epochs surely over. The set it makes is made as
+of its *set epoch*: the later of that earliest epoch and the epoch of the
+median time of the mainchain block that committed to it, which whoever makes
+the block cannot move ahead and which is not ahead of the clock. A jail ends
+`jail_epochs` + 1 epochs after the set epoch, and a validator whose jail is over
+by the set epoch is in the set. (Until 2026-10-13 the set was made as of the
+earliest epoch: after blocks of stake stopped, the BMM blocks' sets left a
+validator whose jail was over out for two hours more, and with a small set
+blocks of stake could not start again: review of audit 6, item 9;
+`jailed_validator_back_after_pos_stops`.)
 
 **Slashing.** A block (of stake, or merged mined) may carry proofs that leaders signed two blocks
 for a slot (below). The offender loses `slash_bps` (10 %) of its stake, bonded
@@ -868,8 +881,10 @@ and the producer.
 - No correlated penalty above 1/3 of the stake, no forced unbond after three
   jails (design 5.2): not in the decisions of section 13.
 - Liveness charges at most an epoch of empty slots per block of stake; a
-  BMM block's epoch, for jailing and pruning, is taken two hours before its
-  time (it may be that far ahead of the clock).
+  BMM block's epoch, for counting liveness and pruning, is taken two hours
+  before its time (it may be that far ahead of the clock); the set it makes,
+  and the jails it gives, are as of the epoch of the median time of the
+  mainchain block that committed to it (see Jailing).
 - A validator is slashed once: proofs of other offences of a banned validator
   are not taken.
 

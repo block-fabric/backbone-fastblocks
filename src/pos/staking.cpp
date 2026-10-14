@@ -292,8 +292,9 @@ ValidatorSet Staking::MakeSet(const sidechain::StoreView& view, int64_t epoch) c
     return ValidatorSet{std::move(chosen), m_params};
 }
 
-Staking::PegStepResult Staking::PegStep(sidechain::StoreOverlay& out, const uint256& anchor, uint64_t anchors, int64_t slot, int64_t epoch, std::vector<CTxOut>& owed_tx) const
+Staking::PegStepResult Staking::PegStep(sidechain::StoreOverlay& out, const uint256& anchor, uint64_t anchors, int64_t slot, int64_t epoch, int64_t set_epoch, std::vector<CTxOut>& owed_tx) const
 {
+    set_epoch = std::max(set_epoch, epoch);
     LoadGenesis(out);
     StakeState stake{STAKE_STATE.Get(out)};
 
@@ -348,12 +349,16 @@ Staking::PegStepResult Staking::PegStep(sidechain::StoreOverlay& out, const uint
         const auto before{VALIDATORS.Get(out, key.pubkey)};
         if (!before) continue;
         ValidatorRecord after{*before};
-        after.jailed_until_epoch = std::max(after.jailed_until_epoch, epoch + 1 + m_params.jail_epochs);
+        // (From the epoch the set is made as of: from `epoch`, up to two hours before it for a BMM
+        // block, the jail could be over already, and the set made below would keep the validator.)
+        after.jailed_until_epoch = std::max(after.jailed_until_epoch, set_epoch + 1 + m_params.jail_epochs);
         PutValidator(out, key.pubkey, before, after);
     }
 
-    // The validator set this anchor makes: a new version if it changed.
-    const ValidatorSet set{MakeSet(out, epoch)};
+    // The validator set this anchor makes, as of set_epoch: a new version if it changed. (Not as of
+    // `epoch`: for a BMM block, two hours before its time, which would keep a validator whose jail
+    // is over out for two hours more, and blocks of stake stopped if they need it.)
+    const ValidatorSet set{MakeSet(out, set_epoch)};
     const auto current{SETS.Get(out, stake.set_version)};
     if (!current || *current != set.Validators()) {
         ++stake.set_version;

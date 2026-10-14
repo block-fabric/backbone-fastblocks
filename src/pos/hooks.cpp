@@ -614,16 +614,25 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
 
     // Staking: unbonded coins and rewards for proofs paid, a share of the penalties with the pot,
     // validators that missed their slots jailed, and the validator set of this anchor made. (A BMM
-    // block's time may be ahead of the clock, by two hours at most: its epoch at the earliest, then.)
+    // block's time may be ahead of the clock, by two hours at most: its epoch at the earliest, then,
+    // for liveness and pruning, which must count only epochs that are over.)
     const int64_t slot{SlotOf(block.nTime, m_params)};
     const bool pos_block{IsPosHeader(block) || !block.vSections.empty()};
     const int64_t earliest{pos_block ? slot : std::max<int64_t>(0, slot - MAX_FUTURE_BLOCK_TIME / m_params.slot_seconds)};
     // The anchor's slot, for the epochs whose set it makes (SetFor): not before the median time of the
     // mainchain block that committed to it (AnchorSlot), which whoever makes the block cannot set back.
+    // The set is made as of the epoch of that median time (or of `earliest`, if later), which they
+    // cannot move ahead either, and which is not ahead of the clock: not as of `earliest`, which for
+    // a BMM block is two hours before its time (review of audit 6, item 9: a validator whose jail was
+    // over stayed out of every set for two hours, and blocks of stake could not start again).
     int64_t anchor_slot{slot};
-    if (const auto main{chainman->m_mainchain ? chainman->m_mainchain->GetBlock(main_height) : std::nullopt}) anchor_slot = std::max(anchor_slot, SlotOf(main->time, m_params));
+    int64_t set_epoch{EpochOf(earliest, m_params)};
+    if (const auto main{chainman->m_mainchain ? chainman->m_mainchain->GetBlock(main_height) : std::nullopt}) {
+        anchor_slot = std::max(anchor_slot, SlotOf(main->time, m_params));
+        set_epoch = std::max(set_epoch, EpochOf(SlotOf(main->time, m_params), m_params));
+    }
     std::vector<CTxOut> staking_owed;
-    const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, anchor_slot, EpochOf(earliest, m_params), staking_owed)};
+    const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, anchor_slot, EpochOf(earliest, m_params), set_epoch, staking_owed)};
     const int64_t paid_out{pay + staked.release};
     if (paid_out > 0) owed_tx.emplace_back(paid_out, payee);
     owed_tx.insert(owed_tx.end(), staking_owed.begin(), staking_owed.end());

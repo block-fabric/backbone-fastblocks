@@ -149,13 +149,16 @@ public:
         bool set_active{false};
     };
     /**
-     * The staking peg actions of an anchor, the `anchors`-th, in a block of slot `slot` (BMM blocks: of
-     * their time), in epoch `epoch` at the earliest (a BMM block's time may be ahead of the clock):
-     * unbonds due are paid, rewards for proofs paid, a share of the reserve released, validators that
-     * made too few of their blocks in the epochs before `epoch` jailed, and the validator set made,
-     * noted under `anchor` (the block's hash).
+     * The staking peg actions of an anchor, the `anchors`-th, in a block of slot `slot` (the slot of
+     * the epochs whose set it makes: SetFor), in epoch `epoch` at the earliest (a BMM block's time may
+     * be ahead of the clock): unbonds due are paid, rewards for proofs paid, a share of the reserve
+     * released, validators that made too few of their blocks in the epochs before `epoch` jailed
+     * (`epoch` is for liveness and pruning only: those epochs are surely over), and the validator set
+     * made, noted under `anchor` (the block's hash). The set is made as of `set_epoch` (at least
+     * `epoch`; no later than the clock, and which whoever makes the block cannot move ahead): jails
+     * over by then are over for it, and jails given now run jail_epochs after it.
      */
-    PegStepResult PegStep(sidechain::StoreOverlay& out, const uint256& anchor, uint64_t anchors, int64_t slot, int64_t epoch, std::vector<CTxOut>& owed_tx) const;
+    PegStepResult PegStep(sidechain::StoreOverlay& out, const uint256& anchor, uint64_t anchors, int64_t slot, int64_t epoch, int64_t set_epoch, std::vector<CTxOut>& owed_tx) const;
 
     /** A block of stake at `slot` made by `producer`; the leaders of the slots it skipped (`missed`) are charged. */
     void NoteLiveness(sidechain::StoreOverlay& out, int64_t slot, const uint256& producer, const std::vector<std::pair<int64_t, uint256>>& missed) const;

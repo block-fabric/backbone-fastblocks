@@ -2304,7 +2304,7 @@ BOOST_AUTO_TEST_CASE(jailing)
     BOOST_CHECK(pos::GetLiveness(out, 0, b) == (pos::Liveness{.assigned = 12, .produced = 0}));
     // The first anchor of epoch 1 jails B; its set leaves B out.
     std::vector<CTxOut> owed;
-    const auto made{staking.PegStep(out, uint256{0xa1}, 1, 20, 1, owed)};
+    const auto made{staking.PegStep(out, uint256{0xa1}, 1, 20, 1, 1, owed)};
     BOOST_CHECK(made.set_active);
     BOOST_CHECK(owed.empty());
     BOOST_CHECK_EQUAL(pos::GetValidator(out, b)->jailed_until_epoch, 3);
@@ -2321,7 +2321,7 @@ BOOST_AUTO_TEST_CASE(jailing)
     // Out of the sets made in epoch 2 too; back in those of epoch 3.
     BOOST_CHECK(!staking.MakeSet(out, 2).Find(b));
     BOOST_CHECK(staking.MakeSet(out, 3).Find(b));
-    staking.PegStep(out, uint256{0xa2}, 2, 60, 3, owed);
+    staking.PegStep(out, uint256{0xa2}, 2, 60, 3, 3, owed);
     BOOST_CHECK(pos::ValidatorSet(*pos::GetSetVersion(out, pos::GetAnchorSet(out, uint256{0xa2})->version), params).Find(b));
 }
 
@@ -2917,6 +2917,54 @@ BOOST_FIXTURE_TEST_CASE(anchor_slot_from_the_commitment, FastBlocksSetup)
     // Its own: from the epoch after the next of its commitment.
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), pos::EpochOf(later, Pos()) + 2, nullptr, &set_anchors)));
     BOOST_CHECK_EQUAL(set_anchors, 2U);
+}
+
+BOOST_FIXTURE_TEST_CASE(jailed_validator_back_after_pos_stops, FastBlocksSetup)
+{
+    // Review of audit 6, item 9 (testnet, 2026-10-13): a validator is jailed, and blocks of stake stop
+    // without it (every validator is needed); BMM blocks follow, at the clock's time, one an epoch.
+    // The sets their anchors make take the validator back as soon as its jail is over: they are made
+    // as of the epoch of the median time of the mainchain block that committed to the anchor, not of
+    // the earliest epoch the BMM block's own time allows (two hours before it, as a block's time may
+    // be ahead of the clock), which left it out for two hours more and blocks of stake stopped.
+    auto& params{const_cast<Consensus::PosParams&>(Pos())};
+    const Consensus::PosParams before{params};
+    params.min_active_validators = keys.size();
+    params.liveness_min_assigned = 1;
+    const int64_t spe{params.slots_per_epoch};
+    const auto at{[&](int64_t slot) { return static_cast<int>(slot - base_slot); }};
+    StartPos();
+    // An epoch of blocks of stake in which the last validator makes none of those it leads.
+    const uint256 absent{XOnly(keys.back())};
+    const int64_t e0{pos::EpochOf(base_slot + 1, params) + 1};
+    int skipped{0};
+    for (int64_t slot{e0 * spe}; slot < (e0 + 1) * spe; ++slot) {
+        Slot(at(slot));
+        if (Hooks().ActiveLeaderOf(slot).pubkey == absent) {
+            ++skipped;
+            continue;
+        }
+        Take(PosBlock(at(slot)));
+    }
+    BOOST_REQUIRE(skipped > 0);
+    // The first anchor of the next epoch jails it: its set, and those after, are not active.
+    AckTip(at((e0 + 1) * spe + 1));
+    const int64_t jailed_until{Validator(absent)->jailed_until_epoch};
+    BOOST_REQUIRE_EQUAL(jailed_until, e0 + 2 + params.jail_epochs);
+    BOOST_REQUIRE(!WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), e0 + 3))->Active());
+    // Blocks of stake stop; BMM blocks, one an epoch, at the clock's time.
+    bool back{false};
+    for (int64_t epoch{e0 + 2}; epoch <= e0 + 1 + params.jail_epochs + 2 && !back; ++epoch) {
+        Slot(at(epoch * spe + 1));
+        MineBmm(BmmBlock(/*use_mempool=*/false));
+        const auto set{WITH_LOCK(::cs_main, return Hooks().SetFor(*Tip(), epoch + 2))};
+        BOOST_REQUIRE(set);
+        back = set->Active() && set->Find(absent);
+        BOOST_TEST_MESSAGE("epoch " << epoch << ": the set of epoch " << epoch + 2 << (back ? " has" : " has not") << " the validator back");
+    }
+    BOOST_CHECK(back);
+    BOOST_CHECK_GE(Validator(absent)->jailed_until_epoch, jailed_until);
+    params = before;
 }
 
 BOOST_AUTO_TEST_CASE(penalty_from_unbonding)

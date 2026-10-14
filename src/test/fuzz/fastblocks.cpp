@@ -1384,8 +1384,10 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
             ++anchors;
             slot += fdp.ConsumeIntegralInRange<int64_t>(0, 3 * params.slots_per_epoch);
             const int64_t epoch{std::max<int64_t>(0, pos::EpochOf(slot, params) - fdp.ConsumeIntegralInRange<int64_t>(0, 1))};
+            // The set as of the epoch of the slot at most (a mainchain median time), at least `epoch`.
+            const int64_t set_epoch{std::max(epoch, pos::EpochOf(slot, params) - fdp.ConsumeIntegralInRange<int64_t>(0, 1))};
             std::vector<CTxOut> owed;
-            const auto result{staking.PegStep(step, ArithToUint256(arith_uint256{anchors}), anchors, slot, epoch, owed)};
+            const auto result{staking.PegStep(step, ArithToUint256(arith_uint256{anchors}), anchors, slot, epoch, set_epoch, owed)};
             assert(result.release >= 0);
             out += result.release;
             for (const CTxOut& o : owed) {
@@ -1394,6 +1396,11 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
             }
             const auto entry{pos::GetAnchorSet(step, ArithToUint256(arith_uint256{anchors}))};
             assert(entry && entry->anchors == anchors && pos::GetSetVersion(step, entry->version));
+            // The set made has no validator jailed as of its epoch (jails given now included).
+            for (const Consensus::PosValidator& v : *pos::GetSetVersion(step, entry->version)) {
+                const auto record{pos::GetValidator(step, v.pubkey)};
+                assert(record && record->jailed_until_epoch <= set_epoch);
+            }
             break;
         }
         case 2: {
