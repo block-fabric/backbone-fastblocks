@@ -184,8 +184,8 @@ MadeBlocks g_made_blocks;
 
 std::vector<std::pair<int, int64_t>> BlocksMade(ChainstateManager& chainman, const std::vector<uint256>& keys)
 {
-    LOCK2(::cs_main, g_made_blocks.mutex);
     MadeBlocks& m{g_made_blocks};
+    LOCK2(::cs_main, m.mutex);
     const CChain& chain{chainman.ActiveChain()};
     if (m.keys != keys) {
         m.keys = keys;

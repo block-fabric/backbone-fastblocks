@@ -7,6 +7,7 @@
 #include <common/url.h>
 #include <rpc/util.h>
 #include <util/any.h>
+#include <util/check.h>
 #include <util/translation.h>
 #include <wallet/context.h>
 #include <wallet/wallet.h>
@@ -174,10 +175,11 @@ void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet)
     entry.pushKV("lastprocessedblock", std::move(lastprocessedblock));
 }
 
-const std::optional<interfaces::Chain::Anchors>& WalletAnchors::Get()
+const std::optional<interfaces::Chain::Anchors>& WalletAnchors::Get(const CWallet& wallet)
 {
-    AssertLockHeld(m_wallet.cs_wallet);
-    if (!m_anchors) m_anchors = m_wallet.chain().getAnchors(m_wallet.GetLastBlockHash());
+    AssertLockHeld(wallet.cs_wallet);
+    Assume(&wallet == &m_wallet);
+    if (!m_anchors) m_anchors = wallet.chain().getAnchors(wallet.GetLastBlockHash());
     return *m_anchors;
 }
 } // namespace wallet

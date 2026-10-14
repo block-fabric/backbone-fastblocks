@@ -70,7 +70,7 @@ public:
      *                    counted in Status::failed (the caller counts the slot once, when it gives it up)
      * @return its hash; nothing if no key of this node leads the slot, or, with `error` set, if no block could be made
      */
-    std::optional<uint256> Produce(int64_t slot, std::string& error, Retry* retry = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    std::optional<uint256> Produce(int64_t slot, std::string& error, Retry* retry = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_produce_mutex);
     /**
      * How long into a slot the producer keeps trying it after a failure before the signature (the node
      * still taking in a block that came at the slot's start, the tip moving while the block was built,
@@ -127,7 +127,7 @@ public:
     std::set<Offence> RefusedOffences() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
-    void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void Run() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_produce_mutex);
     /** A slot given up after failures before the signature: counted once. */
     void NoteFailedSlot() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 

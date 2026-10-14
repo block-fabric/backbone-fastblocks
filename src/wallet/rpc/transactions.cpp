@@ -36,7 +36,7 @@ static void WalletTxToJSON(const CWallet& wallet, const CWalletTx& wtx, UniValue
         entry.pushKV("blocktime", block_time);
         // FastBlocks: how final the block is, on the wallet's chain.
         if (confirms > 0) {
-            if (const auto& anchors{wallet_anchors.Get()}) {
+            if (const auto& anchors{wallet_anchors.Get(wallet)}) {
                 const pos::Finality finality{pos::FinalityAt(conf->confirmed_block_height, confirms, anchors->anchored_heights, anchors->final_anchors)};
                 entry.pushKV("finality", pos::FinalityName(finality.status));
             }

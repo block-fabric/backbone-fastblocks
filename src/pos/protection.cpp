@@ -43,16 +43,26 @@ std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& pat
         }
         g_locks.insert(LockPath(lock_dir, lock_name));
     }
-    std::unique_ptr<SlashingProtection> protection{new SlashingProtection(path, lock_dir, lock_name)};
+    // Made once the lock is taken (its destructor gives it back), and loaded in its constructor (m_slots
+    // is set before anyone else can see the object).
+    bool loaded{false};
+    std::unique_ptr<SlashingProtection> protection{new SlashingProtection(path, lock_dir, lock_name, merge_from, error, loaded)};
+    if (!loaded) return nullptr;
+    return protection;
+}
+
+SlashingProtection::SlashingProtection(fs::path path, fs::path lock_dir, fs::path lock_name, const std::vector<fs::path>& merge_from, std::string& error, bool& loaded)
+    : m_path{std::move(path)}, m_lock_dir{std::move(lock_dir)}, m_lock_name{std::move(lock_name)}
+{
     std::map<uint256, int64_t> slots;
-    if (!ReadSlots(path, slots, error)) return nullptr;
+    if (!ReadSlots(m_path, slots, error)) return;
     // Files kept elsewhere before (an older version of the node): what they hold counts too, the highest
     // slot of each key, and goes into this file at once. A file that does not read stops the node: it
     // may hold the last slot a key signed.
     bool merged{false};
     for (const fs::path& other : merge_from) {
         std::map<uint256, int64_t> other_slots;
-        if (!ReadSlots(other, other_slots, error)) return nullptr;
+        if (!ReadSlots(other, other_slots, error)) return;
         for (const auto& [key, slot] : other_slots) {
             auto [it, inserted]{slots.try_emplace(key, slot)};
             if (inserted || it->second < slot) {
@@ -61,10 +71,9 @@ std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& pat
             }
         }
     }
-    if (merged && !protection->Write(slots, error)) return nullptr;
-    LOCK(protection->m_mutex);
-    protection->m_slots = std::move(slots);
-    return protection;
+    if (merged && !Write(slots, error)) return;
+    m_slots = std::move(slots);
+    loaded = true;
 }
 
 bool SlashingProtection::ReadSlots(const fs::path& path, std::map<uint256, int64_t>& slots, std::string& error)

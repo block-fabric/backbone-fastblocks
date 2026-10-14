@@ -161,20 +161,20 @@ public:
 
     bool BlockExtensions() const override { return true; }
     sidechain::BlockKind Kind(const CBlockHeader& header) const override;
-    bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override;
+    bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex, !m_final_mutex);
     /**
      * A header of a block of stake whose leader the node cannot tell yet (LeaderOf: SET_UNKNOWN, the set
      * of its epoch made by an anchor the node has not connected) is taken unchecked, within the
      * template's budget (UncheckedLimits: unchecked_headers_per_peer, unchecked_block_bytes_per_peer). See
      * doc/fastblocks.md, "Headers and blocks the node cannot check yet". Called with cs_main held.
      */
-    bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const override;
+    bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
     UncheckedBudget UncheckedLimits() const override;
-    bool CheckBlock(const CBlock& block, BlockValidationState& state) const override;
+    bool CheckBlock(const CBlock& block, BlockValidationState& state) const override EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex, !m_acks_mutex);
     bool IsWaitReason(const std::string& reject_reason) const override;
     //! A node a little behind on the record after a mainchain reorg must not cut itself off from the peers that took an anchor back first.
     bool PardonRecordFailures() const override { return true; }
-    std::optional<int64_t> WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const override;
+    std::optional<int64_t> WaitingReady(const CBlockHeader& header, const sidechain::Mainchain& record) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     uint256 SectionsHash(std::span<const unsigned char> sections) const override;
     /**
      * Another signature of the slot's leader over a block of stake the node has the header of is the
@@ -182,7 +182,7 @@ public:
      * the node's (taken unchecked) does not, UNKNOWN if the node cannot tell the leader yet; INVALID
      * otherwise.
      */
-    sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override;
+    sidechain::OtherExtension CheckOtherExtension(const CBlockHeader& header, const CBlockIndex& index) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
     //! A block of stake whose signature fails: its header, taken unchecked, may have come with a forged one.
     bool ExtensionFailure(const std::string& reject_reason) const override { return reject_reason == "bad-pos-sig"; }
     /**
@@ -202,8 +202,8 @@ public:
     bool CustomChainOrder() const override { return true; }
     arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const override;
 
-    std::optional<uint256> CommitmentOf(const CBlockIndex& index) const override;
-    std::vector<uint256> BlocksCommittedBy(const uint256& commitment) const override;
+    std::optional<uint256> CommitmentOf(const CBlockIndex& index) const override EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
+    std::vector<uint256> BlocksCommittedBy(const uint256& commitment) const override EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
 
     bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& step, std::string& reject_reason) const override;
     bool RefundsOnlyInPegSteps() const override { return true; }
@@ -213,14 +213,14 @@ public:
     //! Bonds and unbonds.
     bool HasTxRules(const CTransaction& tx) const override;
     bool AfterBlock(sidechain::State& state, const CBlock& block, int height, const std::optional<sidechain::PegStep>& step, CAmount minted,
-                    const Consensus::SidechainParams& params, std::string& reject_reason) const override;
+                    const Consensus::SidechainParams& params, std::string& reject_reason) const override EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex, !m_acks_mutex);
 
     /** The proofs this node knows that the chain has not punished, in a BMM block's coinbase (MAX_MINED_EVIDENCE, one per validator). */
-    std::vector<CTxOut> MergeMinedOutputs(const sidechain::StoreView& view, const CBlockIndex& prev, int64_t time) const override;
-    bool FollowerRound(sidechain::Follower& follower) const override;
-    void StartServices(node::NodeContext& node) const override;
-    void StopServices(node::NodeContext& node) const override;
-    bool ProcessMessage(int64_t peer, const std::string& msg_type, DataStream& recv, std::string& misbehaving) const override;
+    std::vector<CTxOut> MergeMinedOutputs(const sidechain::StoreView& view, const CBlockIndex& prev, int64_t time) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    bool FollowerRound(sidechain::Follower& follower) const override EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex, !m_anchor_mutex, !m_sets_mutex);
+    void StartServices(node::NodeContext& node) const override EXCLUSIVE_LOCKS_REQUIRED(!m_anchor_mutex, !m_acks_mutex);
+    void StopServices(node::NodeContext& node) const override EXCLUSIVE_LOCKS_REQUIRED(!m_anchor_mutex);
+    bool ProcessMessage(int64_t peer, const std::string& msg_type, DataStream& recv, std::string& misbehaving) const override EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex, !m_sets_mutex);
 
     //
     // For the producer, the anchorer and RPC.
@@ -254,7 +254,7 @@ public:
      * Check a proof that a leader signed two blocks for one slot, keep it and relay it (but to `except`).
      * @return the offence; nothing, with `reason` set, if the proof is not one
      */
-    std::optional<Offence> AddEvidence(const DoubleProposal& proof, std::string& reason, std::optional<int64_t> except = std::nullopt) const;
+    std::optional<Offence> AddEvidence(const DoubleProposal& proof, std::string& reason, std::optional<int64_t> except = std::nullopt) const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
     /** Relay the proofs found since the last call (by watching headers). */
     void RelayNewEvidence() const;
     /**
@@ -262,14 +262,14 @@ public:
      * among those it may acknowledge (Acknowledgeable), if any, but the tickets in `skip` (by hash).
      * Called with cs_main held.
      */
-    std::optional<AnchorAck> NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot, const std::set<uint256>* skip = nullptr) const;
+    std::optional<AnchorAck> NextAck(const CBlockIndex& tip, const FastState& fast, int64_t slot, const std::set<uint256>* skip = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_tickets_mutex, !m_acks_mutex);
     /**
      * Whether a PoS block of `slot` on top of `tip` may acknowledge a ticket, as far as the chain tells
      * (not the record): a ticket of version 1 with a payee, for a block on the chain at or after the
      * block the last anchor anchored, and not so old that the blocks of stake above it would be
      * uncovered for max_unanchored_slots. Called with cs_main held.
      */
-    bool Acknowledgeable(const AnchorTicket& ticket, const CBlockIndex& tip, const FastState& fast, int64_t slot) const;
+    bool Acknowledgeable(const AnchorTicket& ticket, const CBlockIndex& tip, const FastState& fast, int64_t slot) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * The block a ticket made at `slot` would anchor: the block before the tip (ticket depth 1), or the
      * tip if that one is not after the last block anchored (`after_anchor_point`: the last anchor
@@ -277,7 +277,7 @@ public:
      * in the next slot (blocks of stake stopped for want of an anchor: nothing is built on the tip
      * until one comes). Called with cs_main held.
      */
-    const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot, bool after_anchor_point = true) const;
+    const CBlockIndex* TicketTarget(const CBlockIndex& tip, const FastState& fast, int64_t slot, bool after_anchor_point = true) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Where a block on `prev` that acknowledges `ack`, which anchors `anchored`, takes the peg actions:
      * as if it followed the mainchain up to the block before the commitment, with a bundle of the
@@ -287,7 +287,7 @@ public:
      * on the block anchored alone only if no peg actions came between it and the acknowledgement.
      * Called with cs_main held.
      */
-    sidechain::PegStep AckPegStep(const AnchorAck& ack, const CBlockIndex& anchored, const CBlockIndex& prev) const;
+    sidechain::PegStep AckPegStep(const AnchorAck& ack, const CBlockIndex& anchored, const CBlockIndex& prev) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** A validator's own anchorer (-validatoranchorbid): where the pot it wins goes, and its bid; none if off. */
     std::optional<std::pair<CScript, CAmount>> ValidatorAnchoring() const EXCLUSIVE_LOCKS_REQUIRED(!m_anchor_mutex);
     /**
@@ -301,7 +301,7 @@ public:
      * The block an anchor on the chain anchors (P): for an acknowledgement, the block its ticket
      * names; for a BMM block, its parent. Nothing for a block that is no anchor. Called with cs_main held.
      */
-    const CBlockIndex* AnchoredBy(const CBlockIndex& index) const;
+    const CBlockIndex* AnchoredBy(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_acks_mutex);
     /**
      * Blocks of stake on the active chain whose leader the record no longer agrees with (a mainchain
      * reorg moved the seed of their epoch): taken back, as blocks that lost their commitment are; and

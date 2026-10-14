@@ -1108,7 +1108,7 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
         // about to give it back now that the record has it again: acknowledging it here too would only
         // fork the chain (both branches with the same anchor; the longer wins).
         const auto acked{BlocksCommittedBy(ticket.Hash())};
-        if (std::any_of(acked.begin() + 1, acked.end(), [&](const uint256& hash) {
+        if (std::any_of(acked.begin() + 1, acked.end(), [&](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
                 const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(hash)};
                 return index && (index->nStatus & BLOCK_FAILED_VALID) && record.GetFailure(hash) == sidechain::Mainchain::Failure::RECORD;
             })) {

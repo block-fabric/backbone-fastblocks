@@ -52,7 +52,8 @@ public:
     bool MaySign(const uint256& key, int64_t slot, std::string& error) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
-    SlashingProtection(fs::path path, fs::path lock_dir, fs::path lock_name) : m_path{std::move(path)}, m_lock_dir{std::move(lock_dir)}, m_lock_name{std::move(lock_name)} {}
+    //! (With the lock taken: the destructor gives it back.) `loaded` false, with `error` set, if a file does not read.
+    SlashingProtection(fs::path path, fs::path lock_dir, fs::path lock_name, const std::vector<fs::path>& merge_from, std::string& error, bool& loaded);
     bool Write(const std::map<uint256, int64_t>& slots, std::string& error) const;
     /** Add the slots of the file `path` to `slots` (the highest of each key); nothing if it does not exist. */
     static bool ReadSlots(const fs::path& path, std::map<uint256, int64_t>& slots, std::string& error);

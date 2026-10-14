@@ -82,8 +82,8 @@ struct SkippedCommitment {
     //! Where a chain that has it as an anchor leaves this one, as far as the node knows: any fork
     //! (a commitment whose ticket or block it does not know); at or above a height (the ticket names
     //! a block of this chain there); or exactly at a height (a block of another branch).
-    std::optional<int> min_fork;
-    std::optional<int> exact_fork;
+    std::optional<int> min_fork{};
+    std::optional<int> exact_fork{};
     /** Whether a chain that leaves this one above `fork` can have it. */
     bool UsableAt(int fork) const { return exact_fork ? fork == *exact_fork : (!min_fork || fork >= *min_fork); }
 };

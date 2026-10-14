@@ -135,7 +135,7 @@ public:
      * Merged mine one round with these settings in place of those of SetMining (a sidechain's own
      * bidder: FastBlocks validators merge mine when blocks of stake stall, whatever setbmm says).
      */
-    void MineWith(const Mining& mining) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex);
+    void MineWith(const Mining& mining) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex, !m_sync_mutex, !m_act_mutex);
 
     const MainClient& Client() const { return m_client; }
 

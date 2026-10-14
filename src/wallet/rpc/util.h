@@ -75,8 +75,8 @@ class WalletAnchors
 {
 public:
     explicit WalletAnchors(const CWallet& wallet) : m_wallet{wallet} {}
-    //! (With the wallet's lock held.)
-    const std::optional<interfaces::Chain::Anchors>& Get();
+    //! (`wallet` is the one this was made for: named here for the lock analysis to see the lock held.)
+    const std::optional<interfaces::Chain::Anchors>& Get(const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 private:
     const CWallet& m_wallet;
