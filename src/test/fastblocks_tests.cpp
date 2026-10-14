@@ -3976,4 +3976,181 @@ BOOST_FIXTURE_TEST_CASE(wallet_finality_on_its_own_chain, FastBlocksSetup)
 }
 #endif // ENABLE_WALLET
 
+
+//
+// Adversarial review (2026-10-13): attacks on the headers and blocks the node cannot check yet, by
+// peers without validator keys. Each test asserts what doc/fastblocks.md promises; one that FAILS is
+// an attack that SUCCEEDS on the code it ran against.
+//
+
+namespace {
+/**
+ * A fork the node cannot check: a BMM block on the tip, committed to, whose header alone the node has
+ * (one mainchain commitment, which anyone can buy), and the clock two epochs later. Headers of blocks
+ * of stake on it are unchecked (their epoch's set is that of an anchor the node never connected), and
+ * anyone can make them. Returns {the BMM block, a header to copy the version from, a slot to use}.
+ */
+struct UncheckedFork {
+    CBlock other;
+    CBlockHeader like;
+    int64_t slot{0};
+};
+} // namespace
+
+#define MAKE_UNCHECKED_FORK(fork)                                                                                       \
+    StartPos();                                                                                                         \
+    Take(PosBlock(1));                                                                                                  \
+    UncheckedFork fork;                                                                                                 \
+    fork.like = Tip()->GetBlockHeader();                                                                                \
+    fork.other = BmmBlock(/*use_mempool=*/false);                                                                       \
+    Commit(fork.other.GetHash());                                                                                       \
+    BOOST_REQUIRE_EQUAL(HeaderReason({fork.other}), "");                                                                \
+    Mock(pos::SlotTime(pos::SlotOf(GetTime(), Pos()) + 2 * Pos().slots_per_epoch, Pos()));                              \
+    Main();                                                                                                             \
+    fork.slot = pos::SlotOf(GetTime(), Pos());                                                                          \
+    BOOST_REQUIRE(!WITH_LOCK(::cs_main, return Hooks().SetFor(*Index(fork.other.GetHash()), pos::EpochOf(fork.slot - 10, Pos()))));
+
+BOOST_FIXTURE_TEST_CASE(attack_unchecked_budget_locked_by_shared_headers, FastBlocksSetup)
+{
+    // ATTACK THAT SUCCEEDS (this test fails on the code it was written against): attackers fill the
+    // node's whole budget of unchecked headers with headers that two of them hold each. Eviction takes
+    // only headers a peer holds *alone* (m_unchecked_sole), so nothing is ever evicted, and an honest
+    // peer that holds nothing gets `unchecked-budget` for as long as the attackers stay connected: a
+    // node on the other side of a partition (doc (b)) never takes the honest branch. Four inbound
+    // connections on regtest (4000 = 2 x 2000), ten on main (50000 = 5 x 10000), one commitment.
+    auto& params{const_cast<Consensus::PosParams&>(Pos())};
+    const int64_t per_peer_before{params.unchecked_headers_per_peer}, total_before{params.unchecked_headers_total};
+    params.unchecked_headers_per_peer = 4;
+    params.unchecked_headers_total = 8;
+    MAKE_UNCHECKED_FORK(fork);
+    for (const int64_t first : {1, 3}) {
+        std::vector<CBlockHeader> chain;
+        uint256 prev{fork.other.GetHash()};
+        for (int i{0}; i < 4; ++i) {
+            chain.push_back(UnsignedHeader(fork.like, prev, fork.slot - 10 + i, 0, static_cast<uint8_t>(first)));
+            prev = chain.back().GetHash();
+        }
+        BOOST_REQUIRE_EQUAL(HeaderReason(chain, /*source=*/first), "");
+        // The second attacker sends the newest header only: it holds the chain below it too.
+        BOOST_REQUIRE_EQUAL(HeaderReason({chain.back()}, /*source=*/first + 1), "");
+    }
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return Chainman().m_unchecked.size()), 8U);
+    // The honest peer holds nothing; its budget is its own (doc: "attackers cannot use, take nor drop" it).
+    const CBlockHeader honest{UnsignedHeader(fork.like, fork.other.GetHash(), fork.slot - 10, 0, 9)};
+    BOOST_CHECK_EQUAL(HeaderReason({honest}, /*source=*/5), "");
+    WITH_LOCK(::cs_main, Chainman().CheckUnchecked());
+    params.unchecked_headers_per_peer = per_peer_before;
+    params.unchecked_headers_total = total_before;
+}
+
+BOOST_FIXTURE_TEST_CASE(attack_unchecked_sybils_drop_honest_headers, FastBlocksSetup)
+{
+    // ATTACK THAT SUCCEEDS (this test fails on the code it was written against): an honest peer that
+    // holds its whole budget (unchecked_headers_per_peer) loses headers to new attacker connections:
+    // each newcomer evicts from the peer that alone holds the most (ties: the lowest peer id, which
+    // an honest outbound peer, connected first, has). With N attackers the honest peer keeps about
+    // total / (N + 1) headers (50000 / 115 = 434 slots on main), not per_peer: doc (b) says the
+    // honest peer's budget cannot be taken nor dropped, and the "Limit" is per_peer slots.
+    auto& params{const_cast<Consensus::PosParams&>(Pos())};
+    const int64_t per_peer_before{params.unchecked_headers_per_peer}, total_before{params.unchecked_headers_total};
+    params.unchecked_headers_per_peer = 6;
+    params.unchecked_headers_total = 12;
+    MAKE_UNCHECKED_FORK(fork);
+    const auto chain_of{[&](uint8_t salt) {
+        std::vector<CBlockHeader> chain;
+        uint256 prev{fork.other.GetHash()};
+        for (int i{0}; i < 6; ++i) {
+            chain.push_back(UnsignedHeader(fork.like, prev, fork.slot - 10 + i, 0, salt));
+            prev = chain.back().GetHash();
+        }
+        return chain;
+    }};
+    // The honest peer (the lowest id), with as many headers as its budget allows.
+    const std::vector<CBlockHeader> honest{chain_of(0x40)};
+    BOOST_REQUIRE_EQUAL(HeaderReason(honest, /*source=*/1), "");
+    // Sybils, each with its own siblings.
+    for (int64_t peer{2}; peer <= 6; ++peer) HeaderReason(chain_of(static_cast<uint8_t>(0x40 + peer)), peer);
+    size_t kept{0};
+    for (const CBlockHeader& header : honest) kept += Index(header.GetHash()) != nullptr;
+    BOOST_TEST_MESSAGE("honest headers kept: " << kept << " of " << honest.size());
+    BOOST_CHECK_EQUAL(kept, honest.size());
+    WITH_LOCK(::cs_main, Chainman().CheckUnchecked());
+    params.unchecked_headers_per_peer = per_peer_before;
+    params.unchecked_headers_total = total_before;
+}
+
+BOOST_FIXTURE_TEST_CASE(attack_unchecked_blocks_fill_the_disk, FastBlocksSetup)
+{
+    // ATTACK THAT SUCCEEDS (this test fails on the code it was written against): the block of an
+    // unchecked header is written to the block files (unrequested: it has more work than the tip and
+    // is near it), and when its holder disconnects the header leaves the block index but the bytes stay
+    // in blk*.dat for ever. Reconnecting and sending the same block again writes it again: disk grows
+    // without bound, for free (no signature, no punishment, and the "new block" even protects the
+    // attacker from inbound eviction: CNode::m_last_block_time).
+    MAKE_UNCHECKED_FORK(fork);
+    const int height{Tip()->nHeight + 2};
+    CBlock block;
+    static_cast<CBlockHeader&>(block) = UnsignedHeader(fork.like, fork.other.GetHash(), fork.slot - 10, 0, 0x55);
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript() << height << OP_0;
+    coinbase.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>(100000, 0x42));
+    block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    const size_t size{::GetSerializeSize(TX_WITH_WITNESS(block))};
+    std::optional<std::pair<int, unsigned int>> first;
+    std::pair<int, unsigned int> last;
+    for (int64_t peer{100}; peer < 120; ++peer) {
+        WITH_LOCK(::cs_main, Chainman().UncheckedSourceAdded(peer));
+        bool new_block{false};
+        Chainman().ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/false, /*min_pow_checked=*/true, &new_block, peer);
+        const CBlockIndex* index{Index(block.GetHash())};
+        BOOST_REQUIRE(index);
+        BOOST_REQUIRE_MESSAGE(WITH_LOCK(::cs_main, return index->m_unchecked && (index->nStatus & BLOCK_HAVE_DATA)), "the attacker's block was not stored: " + Reason(block));
+        last = WITH_LOCK(::cs_main, return std::make_pair(index->nFile, index->nDataPos));
+        if (!first) first = last;
+        // The peer disconnects: the header leaves the block index, the block's bytes stay on disk.
+        WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(peer));
+        BOOST_REQUIRE(!Index(block.GetHash()));
+    }
+    const int64_t grown{last.first == first->first ? int64_t{last.second} - int64_t{first->second} : int64_t{1} << 40};
+    BOOST_TEST_MESSAGE("block of " << size << " bytes; block files grew by " << grown << " bytes over 20 reconnections");
+    // Bounded disk: the same block, sent again, is not written again (nor are blocks no one holds kept).
+    BOOST_CHECK_LE(grown, static_cast<int64_t>(size));
+}
+
+BOOST_FIXTURE_TEST_CASE(attack_inflated_best_header_does_not_stop_the_chain, FastBlocksSetup)
+{
+    // Attack that fails (a regression test): an attacker that stays connected keeps a best header
+    // inflated by unchecked headers that claim every commitment on record (more anchors than any
+    // chain). Nothing that makes progress waits on it: the leader still makes its blocks on the tip
+    // (Producer::Behind looks at blocks, not headers), and they are connected.
+    MAKE_UNCHECKED_FORK(fork);
+    std::vector<uint32_t> commitments;
+    for (uint8_t i{1}; i <= 3; ++i) {
+        Commit(uint256{static_cast<uint8_t>(0xd0 + i)});
+        commitments.push_back(static_cast<uint32_t>(Record().Height()));
+    }
+    std::vector<CBlockHeader> inflated;
+    uint256 prev{fork.other.GetHash()};
+    for (size_t i{0}; i < commitments.size(); ++i) {
+        inflated.push_back(UnsignedHeader(fork.like, prev, fork.slot - 10 + static_cast<int64_t>(i), commitments[i], 0x66));
+        prev = inflated.back().GetHash();
+    }
+    BOOST_REQUIRE_EQUAL(HeaderReason(inflated, /*source=*/1), "");
+    BOOST_REQUIRE(BestHeader() == inflated.back().GetHash());
+    const int next{static_cast<int>(pos::SlotOf(GetTime(), Pos()) - base_slot) + 1};
+    for (int i{0}; i < 3; ++i) {
+        const CBlockIndex* tip{Tip()};
+        const int64_t slot{Slot(next + i)};
+        std::string error;
+        const auto made{producer->Produce(slot, error)};
+        BOOST_CHECK_MESSAGE(made, error);
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        BOOST_CHECK(made && Tip()->GetBlockHash() == *made && Tip()->pprev == tip);
+    }
+    BOOST_CHECK(BestHeader() == inflated.back().GetHash());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
