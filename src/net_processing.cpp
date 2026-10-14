@@ -2437,13 +2437,23 @@ void PeerManagerImpl::BlockChecked(const std::shared_ptr<const CBlock>& block, c
         mapBlockSource.erase(it);
     // An unchecked header's extension failure (the copy's fault): the peers that hold the header, or
     // whose best chain has it, are asked for its headers again, for their copy of the extension, which
-    // replaces the node's (AcceptBlockHeader). One pending request a peer.
+    // replaces the node's (AcceptBlockHeader). One pending request a peer, from the last block both
+    // failures share if one is pending already: the peer's answer (its headers after the fork of that
+    // point with its best chain) has its copy of whichever it has, so no failure crowds out another
+    // (unlike the bounded list of blocks asked for again before, which an attacker could fill: review
+    // of audit 6, item 8a). Nothing else is kept, so there is nothing to fill.
     if (state.IsInvalid() && block->IsExtended() && sidechain::Hooks().ExtensionFailure(state.GetRejectReason())) {
         const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(hash)};
         if (index && index->pprev && m_chainman.UncheckedExtensionFailed(*index)) {
             for (auto& [node_id, node_state] : m_node_states) {
                 if (m_chainman.HoldsUnchecked(*index, node_id) || (node_state.pindexBestKnownBlock && node_state.pindexBestKnownBlock->GetAncestor(index->nHeight) == index)) {
-                    node_state.m_reask_headers_from = index->pprev->GetBlockHash();
+                    const CBlockIndex* from{index->pprev};
+                    if (node_state.m_reask_headers_from) {
+                        if (const CBlockIndex* pending{m_chainman.m_blockman.LookupBlockIndex(*node_state.m_reask_headers_from)}) {
+                            from = LastCommonAncestor(pending, from);
+                        }
+                    }
+                    node_state.m_reask_headers_from = from->GetBlockHash();
                 }
             }
         }

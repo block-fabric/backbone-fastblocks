@@ -9,12 +9,15 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <hash.h>
+#include <net.h>
+#include <net_processing.h>
 #include <interfaces/chain.h>
 #include <interfaces/mining.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <protocol.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <sidechain/hooks.h>
@@ -23,6 +26,7 @@
 #include <sidechain/store.h>
 #include <streams.h>
 #include <sync.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <univalue.h>
@@ -2162,6 +2166,130 @@ BOOST_FIXTURE_TEST_CASE(unchecked_erased_while_used, SidechainSetup)
     }
     chainman.CheckBlockIndex();
     chainman.CheckUnchecked();
+}
+
+namespace {
+/** A peer of the node's (PeerManager), whose messages the test sends. */
+struct TestPeer {
+    CNode node;
+    TestPeer(NodeId id, ConnmanTestMsg& connman) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+        : node{id, /*sock=*/nullptr, CAddress{CService{CNetAddr{in_addr{htonl(0x0a000001 + static_cast<uint32_t>(id))}}, 8333}, NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0, CAddress{}, /*addrNameIn=*/"", ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0}
+    {
+        connman.Handshake(node, /*successfully_connected=*/true, ServiceFlags(NODE_NETWORK | NODE_WITNESS), ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                          PROTOCOL_VERSION, /*relay_txs=*/false);
+    }
+    void Send(ConnmanTestMsg& connman, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        // (What the node sent the peer is dropped: the transport takes one message at a time.)
+        connman.FlushSendBuffer(node);
+        (void)connman.ReceiveMsgFrom(node, std::move(msg));
+        node.fPauseSend = false;
+        while (connman.ProcessMessagesOnce(node)) {}
+        connman.FlushSendBuffer(node);
+    }
+    void Headers(ConnmanTestMsg& connman, const std::vector<CBlockHeader>& headers) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        std::vector<CBlock> blocks;
+        for (const CBlockHeader& header : headers) blocks.emplace_back(header);
+        Send(connman, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(blocks)));
+    }
+    void Block(ConnmanTestMsg& connman, const CBlock& block) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        Send(connman, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(block)));
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(extension_failure_asked_again_whatever_fails, SidechainSetup)
+{
+    // Review of audit 6, item 8a: the blocks that failed with a forged extension were asked for again
+    // from a list of at most 64 (m_extension_reask); an attacker filled it with blocks of its own that
+    // failed so, and an honest block's failure was then never asked for again: its branch stalled. That
+    // list is gone (a failure asks the peers that hold the header, or whose best chain has it, for its
+    // headers again, one pending request a peer, from where the pending one and the new one meet), and
+    // nothing is kept for a failure that an attacker could fill. Here an attacker makes 150 blocks of
+    // its own fail before, and 150 after, the honest block's failure (the forged copy of its header
+    // the attacker sent first): the honest peer is still asked, and its answer connects the block.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    InstallHooks installed{std::make_unique<LateCheckedHooks>()};
+    sidechain::MainBlock first;
+    first.hash = uint256{0x3e};
+    BOOST_REQUIRE(Record().Append(first));
+    ChainstateManager& chainman{*m_node.chainman};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(99999s);
+    // (As the node does: the test setup does not.)
+    m_node.validation_signals->RegisterValidationInterface(m_node.peerman.get());
+    TestPeer honest{0, connman};
+    TestPeer attacker{1, connman};
+    const uint256 tip{WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash())};
+
+    CBlock block{Build()};
+    block.nVersion |= BLOCK_EXTENSION_BIT;
+    block.ext.hashSections.SetNull();
+    block.ext.sig.fill(5);
+    CBlockHeader forged{block};
+    forged.ext.sig.fill(9);
+    // Blocks of the attacker's own on the tip, each failing for its forged extension when connected.
+    int tag{0};
+    const auto fail_own{[&](int count) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        for (int i{0}; i < count; ++i) {
+            CBlock own{Build(block.nTime + 1 + tag)};
+            CMutableTransaction coinbase{*own.vtx[0]};
+            ++tag;
+            coinbase.vin[0].scriptSig << std::vector<unsigned char>{static_cast<unsigned char>(tag), static_cast<unsigned char>(tag >> 8), 0xa7};
+            own.vtx[0] = MakeTransactionRef(std::move(coinbase));
+            own.nVersion |= BLOCK_EXTENSION_BIT;
+            own.ext.hashSections.SetNull();
+            own.ext.sig.fill(9);
+            own.hashMerkleRoot = BlockMerkleRoot(own);
+            while (!CheckProofOfWork(own.GetHash(), own.nBits, chainman.GetConsensus())) ++own.nNonce;
+            attacker.Block(connman, own);
+            LOCK(::cs_main);
+            const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(own.GetHash())};
+            BOOST_REQUIRE(index && chainman.UncheckedExtensionFailed(*index));
+        }
+    }};
+    fail_own(150);
+    // The attacker sends the honest header with a forged signature first; the honest peer its own
+    // (another signature the node cannot check: it keeps the first), then the block, which fails.
+    attacker.Headers(connman, {forged});
+    honest.Headers(connman, {block});
+    honest.Block(connman, block);
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+        BOOST_REQUIRE(index && chainman.UncheckedExtensionFailed(*index));
+        BOOST_REQUIRE(chainman.HoldsUnchecked(*index, honest.node.GetId()));
+        BOOST_CHECK(chainman.ActiveChain().Tip()->GetBlockHash() == tip);
+    }
+    fail_own(150);
+    // The honest peer is asked for the headers after the tip (the block's parent).
+    std::optional<CBlockLocator> asked;
+    const auto capture_orig{CaptureMessage};
+    m_node.connman->SetCaptureMessages(true);
+    CaptureMessage = [&](const CAddress&, const std::string& msg_type, std::span<const unsigned char> data, bool is_incoming) {
+        if (is_incoming || msg_type != NetMsgType::GETHEADERS) return;
+        CBlockLocator locator;
+        SpanReader{data} >> locator;
+        asked = locator;
+    };
+    // (Past the wait between two getheaders to one peer.)
+    SetMockTime(std::chrono::seconds{GetTime() + 5 * 60});
+    m_node.peerman->SendMessages(honest.node);
+    CaptureMessage = capture_orig;
+    m_node.connman->SetCaptureMessages(false);
+    BOOST_REQUIRE(asked && !asked->vHave.empty());
+    BOOST_CHECK(asked->vHave.front() == tip);
+    // Its answer: its own signature replaces the forged one, and the block is connected.
+    honest.Headers(connman, {block});
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->GetBlockHash()) == block.GetHash());
+    BOOST_CHECK(!honest.node.fDisconnect);
+    m_node.peerman->FinalizeNode(honest.node);
+    m_node.peerman->FinalizeNode(attacker.node);
+    m_node.validation_signals->UnregisterValidationInterface(m_node.peerman.get());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
