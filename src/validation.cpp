@@ -7197,7 +7197,7 @@ double ChainstateManager::GuessVerificationProgress(const CBlockIndex* pindex) c
     const int64_t nNow{TicksSinceEpoch<std::chrono::seconds>(NodeClock::now())};
     // With a chain order of a sidechain's own, the header of the most work may be lower than the tip
     // (a sidechain's key need not grow with the height alone): not a bug then.
-    const auto best_header_above{[&] {
+    const auto best_header_above{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         return sidechain::Hooks().CustomChainOrder() ? m_best_header->nHeight >= pindex->nHeight : Assume(m_best_header->nHeight >= pindex->nHeight);
     }};
     const auto block_time{
