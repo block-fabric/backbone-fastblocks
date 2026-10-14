@@ -11,8 +11,8 @@ with peers of the test framework:
     unsigned siblings, leaves, and comes back, again and again: the block index never holds more
     than a peer's budget of such headers, and what the attacker held goes with it (it grew by a
     budget each time: finding 6a of the review of audit 6);
-  - many attackers at once: the node holds no more than its total (each had a budget of its own,
-    with no total: finding 6b);
+  - many attackers at once: each holds its own budget and no more, so the node holds no more than
+    their budgets (a node-wide total, which attackers sharing headers locked, is gone);
   - an attacker serves forged copies of the honest blocks and inflates the best header with headers
     nobody can check, then honest nodes connect: the node catches up to the honest tip, every
     signature it keeps is the leader's, no honest peer is punished, and when the attacker leaves its
@@ -43,9 +43,8 @@ from test_framework.util import assert_equal, assert_greater_than, assert_raises
 
 #: Headers a node takes in one message, at most.
 MAX_HEADERS = 2000
-#: The budget of headers the node cannot check yet, regtest's: a peer's, and the node's in all.
+#: The budget of headers the node cannot check yet, regtest's: each peer's, whatever the others hold.
 UNCHECKED_PER_PEER = 2000
-UNCHECKED_TOTAL = 4000
 SIBLINGS = 2500
 ROUNDS = 4
 ATTACKERS = 4
@@ -205,7 +204,7 @@ class FastBlocksUncheckedTest(SidechainTest):
             self.wait_until(lambda: self.tips(late) <= base + 1, timeout=30)
         assert_equal(late.getblockcount(), 0)
 
-        self.log.info("Many attackers at once: the node holds no more than its total")
+        self.log.info("Many attackers at once: each holds its own budget, no more")
         attackers = [late.add_p2p_connection(FastBlocksPeer()) for _ in range(ATTACKERS)]
         for k, attacker in enumerate(attackers):
             self.send_headers(attacker, forged)
@@ -215,7 +214,7 @@ class FastBlocksUncheckedTest(SidechainTest):
             assert attacker.is_connected
         held = self.tips(late)
         self.log.debug(f"{held} chain tips with {ATTACKERS} attackers connected")
-        assert_greater_than(UNCHECKED_TOTAL + base + 2, held)
+        assert_greater_than(ATTACKERS * UNCHECKED_PER_PEER + base + 2, held)
         for attacker in attackers:
             attacker.peer_disconnect()
             attacker.wait_for_disconnect()
