@@ -1260,13 +1260,19 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
         // none, for a proof an honest peer checked. Dropped, not blamed (a few signature checks: the
         // first header's fails, and the second is not checked).
         std::string reason;
+        if (!CheckEvidenceForm(proof, m_params, reason)) {
+            misbehaving = "invalid evidence: " + reason;
+            return true;
+        }
+        // Since a proof whose signatures fail is not the peer's fault, a peer could have the node check
+        // signatures without end: a rate per peer of proofs checked (a known one costs no check). Past
+        // it, proofs are dropped unchecked, and the peer is not blamed for that either.
+        if (!m_evidence.Known(proof) && !m_evidence_rate.Allow(peer, std::chrono::duration_cast<std::chrono::milliseconds>(NodeClock::now().time_since_epoch()))) {
+            LogDebug(BCLog::NET, "FastBlocks: evidence from peer=%d dropped unchecked: more than its rate\n", peer);
+            return true;
+        }
         if (!AddEvidence(proof, reason, peer)) {
-            std::string form;
-            if (!CheckEvidenceForm(proof, m_params, form)) {
-                misbehaving = "invalid evidence: " + reason;
-            } else {
-                LogDebug(BCLog::NET, "FastBlocks: evidence from peer=%d dropped: %s\n", peer, reason);
-            }
+            LogDebug(BCLog::NET, "FastBlocks: evidence from peer=%d dropped: %s\n", peer, reason);
         }
         return true;
     }

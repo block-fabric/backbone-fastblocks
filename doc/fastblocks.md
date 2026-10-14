@@ -701,7 +701,11 @@ and not blamed: that leader depends on the chain a node has. A new node has an
 inactive set at its tip (the main and test networks start with no validators)
 and none of the headers' parents, and a node on another branch may find another
 leader, for a true proof an honest peer checked (review 4 of audit 6, attack
-2). It costs the sender a message per signature check or two.
+2). So that a peer cannot have the node check signatures without end, the node
+checks those of 64 proofs from a peer at once, then 2 a second (a token bucket
+per peer, for 1024 peers at most): past that rate, a proof is dropped unchecked,
+and the peer is not blamed for it either (`evidence_relay_rate`). A proof the
+node keeps already costs no check, and is not counted.
 
 The result of each signature check of a proof is kept, by proof and leader (the
 last 4000; a proof the pool keeps counts as checked against its offender), so
@@ -731,7 +735,7 @@ by being pushed out, so that floor only rises.
 |---|---|---|
 | `fbticket` | A ticket | Kept and relayed if the mainchain committed to it, or if it names a block the node knows: of those, 8 a peer per mainchain block at most (anyone can make them by the thousand) |
 | `fbgettickets` | Up to 16 h* | The node sends the tickets it has; more than 16 is misbehaving |
-| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) the node takes (new, and not older than its full pool); a peer that sends one whose form is wrong misbehaves (not one whose signatures do not check against the leader this node finds: that depends on its chain) |
+| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) the node takes (new, and not older than its full pool); a peer that sends one whose form is wrong misbehaves (not one whose signatures do not check against the leader this node finds: that depends on its chain); past 64 proofs checked at once, 2 a second, a peer's proofs are dropped unchecked, not blamed |
 
 **Catching up.** Headers and blocks come as usual and are checked in full
 (leader signatures included); an acknowledgement waits until the node's own

@@ -34,6 +34,12 @@ inline constexpr size_t MAX_SIGNED_HEADERS{4000};
 inline constexpr size_t MAX_CHECKED_SIGNATURES{4 * MAX_EVIDENCE};
 //! Proofs whose signatures a block this node makes (of stake, or merged mined) checks, at most, beyond those checked before.
 inline constexpr size_t MAX_EVIDENCE_SIG_CHECKS{32};
+//! Proofs relayed by a peer whose signatures the node checks: at most this many at once...
+inline constexpr double EVIDENCE_CHECKS_BURST{64};
+//! ... and this many a second after.
+inline constexpr double EVIDENCE_CHECKS_PER_SECOND{2};
+//! Peers whose relay of proofs is counted, at most.
+inline constexpr size_t MAX_EVIDENCE_RATE_PEERS{1024};
 
 /**
  * Two headers the leader of a slot signed for that slot: the proof that it signed twice, which
@@ -146,6 +152,30 @@ private:
 public:
     /** What identifies a proof, in either order. */
     static uint256 ProofId(const DoubleProposal& proof);
+};
+
+/**
+ * How many proofs relayed by each peer the node checks the signatures of: a token bucket per peer
+ * (EVIDENCE_CHECKS_BURST at once, EVIDENCE_CHECKS_PER_SECOND after). A peer is not blamed for a proof
+ * whose signatures do not check (its chain may name another leader), so it could send such proofs
+ * without end; past its rate they are dropped unchecked, and it is not blamed for that either.
+ * Bounded (MAX_EVIDENCE_RATE_PEERS). Thread safe.
+ */
+class EvidenceRateLimiter
+{
+public:
+    /** Whether `peer` may have the signatures of one more proof checked at `now` (it takes a token if so). */
+    bool Allow(int64_t peer, std::chrono::milliseconds now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    size_t Peers() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    struct Bucket {
+        double tokens{EVIDENCE_CHECKS_BURST};
+        std::chrono::milliseconds updated{0};
+    };
+    static void Refill(Bucket& bucket, std::chrono::milliseconds now);
+    mutable Mutex m_mutex;
+    std::map<int64_t, Bucket> m_buckets GUARDED_BY(m_mutex);
 };
 
 } // namespace pos

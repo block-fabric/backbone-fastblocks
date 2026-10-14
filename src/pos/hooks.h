@@ -386,6 +386,8 @@ private:
     mutable std::deque<std::pair<uint256, uint256>> m_ack_order GUARDED_BY(m_acks_mutex);
 
     mutable EvidencePool m_evidence;
+    //! Proofs relayed by each peer whose signatures this node checks (the rest are dropped).
+    mutable EvidenceRateLimiter m_evidence_rate;
 
     mutable Mutex m_tickets_mutex;
     mutable std::map<uint256, AnchorTicket> m_tickets GUARDED_BY(m_tickets_mutex);

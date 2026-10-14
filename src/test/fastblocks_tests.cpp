@@ -4414,6 +4414,99 @@ BOOST_FIXTURE_TEST_CASE(evidence_sig_checks_bounded, FastBlocksSetup)
     BOOST_CHECK(pool.SigsKnown(first, uint256{0xff}));
 }
 
+BOOST_AUTO_TEST_CASE(evidence_rate_limiter)
+{
+    using namespace std::chrono_literals;
+    pos::EvidenceRateLimiter limiter;
+    const std::chrono::milliseconds start{1'000'000};
+    // A burst, then nothing more...
+    for (int i{0}; i < static_cast<int>(pos::EVIDENCE_CHECKS_BURST); ++i) BOOST_CHECK(limiter.Allow(1, start));
+    BOOST_CHECK(!limiter.Allow(1, start));
+    BOOST_CHECK(!limiter.Allow(1, start + 400ms));
+    // ... but the rate (2 a second: one each half second); another peer has its own.
+    BOOST_CHECK(limiter.Allow(2, start));
+    BOOST_CHECK(limiter.Allow(1, start + 500ms));
+    BOOST_CHECK(!limiter.Allow(1, start + 500ms));
+    BOOST_CHECK(limiter.Allow(1, start + 1500ms));
+    BOOST_CHECK(limiter.Allow(1, start + 1500ms));
+    BOOST_CHECK(!limiter.Allow(1, start + 1500ms));
+    // A clock that goes back gives nothing.
+    BOOST_CHECK(!limiter.Allow(1, start));
+    // A burst again after a long while, no more.
+    for (int i{0}; i < static_cast<int>(pos::EVIDENCE_CHECKS_BURST); ++i) BOOST_CHECK(limiter.Allow(1, start + 1h));
+    BOOST_CHECK(!limiter.Allow(1, start + 1h));
+    // Bounded: peers whose buckets are full go first (peer 2's refilled), then the oldest.
+    for (int64_t peer{10}; peer < 10 + static_cast<int64_t>(pos::MAX_EVIDENCE_RATE_PEERS) - 1; ++peer) BOOST_CHECK(limiter.Allow(peer, start + 1h));
+    BOOST_CHECK_EQUAL(limiter.Peers(), pos::MAX_EVIDENCE_RATE_PEERS);
+    BOOST_CHECK(!limiter.Allow(1, start + 1h));
+    BOOST_CHECK(limiter.Allow(5000, start + 1h));
+    BOOST_CHECK_EQUAL(limiter.Peers(), pos::MAX_EVIDENCE_RATE_PEERS);
+    // (Peer 1 went: a new bucket, full.)
+    BOOST_CHECK(limiter.Allow(1, start + 1h));
+}
+
+BOOST_FIXTURE_TEST_CASE(evidence_relay_rate, FastBlocksSetup)
+{
+    // A peer relays proofs whose signatures fail here (not its fault: its chain may name other
+    // leaders), without end. The node checks EVIDENCE_CHECKS_BURST of them, then EVIDENCE_CHECKS_PER_SECOND
+    // a second: the rest are dropped unchecked -- a true proof among them too -- and the peer is not
+    // blamed. Other peers have their own rate; a proof the node keeps already costs nothing.
+    StartPos();
+    const CBlock first{PosBlock(1)};
+    const int64_t slot{pos::SlotOf(first.nTime, Pos())};
+    const CKey& other{NotLeader(slot)};
+    const auto send{[&](int64_t peer, const pos::DoubleProposal& proof) {
+        DataStream stream{};
+        stream << proof;
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(peer, pos::MSG_EVIDENCE, stream, misbehaving));
+        return misbehaving;
+    }};
+    const auto forged{[&](uint64_t n) {
+        CBlock a{first}, b{first};
+        a.hashMerkleRoot = ArithToUint256(arith_uint256{2 * n + 1});
+        b.hashMerkleRoot = ArithToUint256(arith_uint256{2 * n + 2});
+        BOOST_REQUIRE(pos::Producer::Sign(a, other, Genesis()));
+        BOOST_REQUIRE(pos::Producer::Sign(b, other, Genesis()));
+        return pos::DoubleProposal{.a = a, .b = b};
+    }};
+    CBlock second{first};
+    SetCoinbase(second, [](CMutableTransaction& tx) { tx.vout.emplace_back(0, CScript() << OP_RETURN); });
+    Resign(second);
+    const pos::DoubleProposal proof{.a = first, .b = second};
+
+    int dropped{0};
+    const auto callback{LogInstance().PushBackCallback([&](const std::string& line) {
+        if (line.find("dropped unchecked") != std::string::npos) ++dropped;
+    })};
+    const bool net_logged{LogInstance().WillLogCategory(BCLog::NET)};
+    LogInstance().EnableCategory(BCLog::NET);
+    uint64_t n{0};
+    for (; n < static_cast<uint64_t>(pos::EVIDENCE_CHECKS_BURST); ++n) BOOST_CHECK_EQUAL(send(3, forged(n)), "");
+    BOOST_CHECK_EQUAL(dropped, 0);
+    for (int i{0}; i < 100; ++i) BOOST_CHECK_EQUAL(send(3, forged(n++)), "");
+    BOOST_CHECK_EQUAL(dropped, 100);
+    // The true proof, from that peer: dropped as well; from another, taken.
+    BOOST_CHECK_EQUAL(send(3, proof), "");
+    BOOST_CHECK_EQUAL(dropped, 101);
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 0U);
+    BOOST_CHECK_EQUAL(send(4, proof), "");
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
+    // Known now: from the first peer, no check, nothing dropped.
+    BOOST_CHECK_EQUAL(send(3, proof), "");
+    BOOST_CHECK_EQUAL(dropped, 101);
+    // A second later, the first peer has its rate again.
+    Mock(GetTime() + 1);
+    for (int i{0}; i < static_cast<int>(pos::EVIDENCE_CHECKS_PER_SECOND); ++i) BOOST_CHECK_EQUAL(send(3, forged(n++)), "");
+    BOOST_CHECK_EQUAL(dropped, 101);
+    BOOST_CHECK_EQUAL(send(3, forged(n++)), "");
+    BOOST_CHECK_EQUAL(dropped, 102);
+    // A proof whose form is wrong is the peer's fault, over its rate or not.
+    BOOST_CHECK_EQUAL(send(3, {.a = first, .b = first}), "invalid evidence: bad-pos-evidence-same");
+    LogInstance().DeleteCallback(callback);
+    if (!net_logged) LogInstance().DisableCategory(BCLog::NET);
+}
+
 BOOST_FIXTURE_TEST_CASE(attack4_evicted_proof_relayed_again, FastBlocksSetup)
 {
     // ATTACK (a single validator, or one that has unbonded: it loses nothing). The evidence pool keeps

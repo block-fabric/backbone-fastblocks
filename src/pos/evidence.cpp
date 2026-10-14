@@ -168,6 +168,43 @@ bool EvidencePool::SigsKnown(const DoubleProposal& proof, const uint256& pubkey)
     return m_sigs.contains({id, pubkey});
 }
 
+void EvidenceRateLimiter::Refill(Bucket& bucket, std::chrono::milliseconds now)
+{
+    if (now <= bucket.updated) return;
+    const double seconds{std::chrono::duration<double>(now - bucket.updated).count()};
+    bucket.tokens = std::min(EVIDENCE_CHECKS_BURST, bucket.tokens + seconds * EVIDENCE_CHECKS_PER_SECOND);
+    bucket.updated = now;
+}
+
+bool EvidenceRateLimiter::Allow(int64_t peer, std::chrono::milliseconds now)
+{
+    LOCK(m_mutex);
+    auto it{m_buckets.find(peer)};
+    if (it == m_buckets.end()) {
+        if (m_buckets.size() >= MAX_EVIDENCE_RATE_PEERS) {
+            // A full bucket is one that was never used: those go first, then the oldest peers (the
+            // lowest ids: a node numbers its peers in the order they connect).
+            std::erase_if(m_buckets, [&](auto& entry) {
+                Refill(entry.second, now);
+                return entry.second.tokens >= EVIDENCE_CHECKS_BURST;
+            });
+            while (m_buckets.size() >= MAX_EVIDENCE_RATE_PEERS) m_buckets.erase(m_buckets.begin());
+        }
+        it = m_buckets.emplace(peer, Bucket{.tokens = EVIDENCE_CHECKS_BURST, .updated = now}).first;
+    }
+    Bucket& bucket{it->second};
+    Refill(bucket, now);
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
+}
+
+size_t EvidenceRateLimiter::Peers() const
+{
+    LOCK(m_mutex);
+    return m_buckets.size();
+}
+
 std::optional<DoubleProposal> EvidencePool::NoteSigned(const CBlockHeader& header, int64_t slot, const uint256& signer)
 {
     LOCK(m_mutex);
