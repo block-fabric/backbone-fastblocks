@@ -54,11 +54,13 @@ struct PosParams {
     int final_anchors{6};
     /**
      * Not consensus: the headers whose signature the node cannot check yet (their epoch's set made by
-     * an anchor it has not connected) that a peer may hold, and that the node holds in all, until their
-     * blocks are connected. See doc/fastblocks.md, "Headers and blocks the node cannot check yet".
+     * an anchor it has not connected) that a peer may hold until their blocks are connected, and the
+     * bytes of their blocks the node stores (apart from the block files) for it. Each connected peer
+     * has the whole budget, whatever the others hold. See doc/fastblocks.md, "Headers and blocks the
+     * node cannot check yet".
      */
     int64_t unchecked_headers_per_peer{10000};
-    int64_t unchecked_headers_total{50000};
+    int64_t unchecked_block_bytes_per_peer{int64_t{128} << 20};
     /**
      * The validators the chain starts with, a bootstrap (regtest's -posvalidators): in the set until
      * jailed or banned, with their stake as weight on top of what they bond. None on the main and test

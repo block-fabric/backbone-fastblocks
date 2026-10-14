@@ -820,11 +820,16 @@ struct FastChain {
         const bool prev_unchecked{WITH_LOCK(::cs_main, return prev->m_unchecked)};
         Chainman().ProcessNewBlockHeaders({{header}}, /*min_pow_checked=*/true, state, nullptr, source);
         LOCK(::cs_main);
-        // The budget of unchecked headers: each peer's, and the node's in all (but its own).
+        // The budget of unchecked headers: each peer's (so the node's: the peers', but its own).
         Chainman().CheckUnchecked();
         const auto limits{Hooks().UncheckedLimits()};
-        for (int64_t peer{0}; peer < 4; ++peer) assert(Chainman().UncheckedHeld(peer) <= limits.per_peer);
-        assert(Chainman().m_unchecked.size() <= limits.total + Chainman().UncheckedHeld(-1));
+        size_t peers_held{0};
+        for (int64_t peer{0}; peer < 4; ++peer) {
+            assert(Chainman().UncheckedHeld(peer) <= limits.per_peer);
+            assert(Chainman().UncheckedBytes(peer) <= limits.block_bytes_per_peer);
+            peers_held += Chainman().UncheckedHeld(peer);
+        }
+        assert(Chainman().m_unchecked.size() <= peers_held + Chainman().UncheckedHeld(-1));
         const CBlockIndex* index{Chainman().m_blockman.LookupBlockIndex(header.GetHash())};
         if (!index || had) return;
         // Taken unchecked (its leader unknown, or on an unchecked header): held by its sender.

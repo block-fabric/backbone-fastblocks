@@ -4019,9 +4019,8 @@ BOOST_FIXTURE_TEST_CASE(attack_unchecked_budget_locked_by_shared_headers, FastBl
     // node on the other side of a partition (doc (b)) never takes the honest branch. Four inbound
     // connections on regtest (4000 = 2 x 2000), ten on main (50000 = 5 x 10000), one commitment.
     auto& params{const_cast<Consensus::PosParams&>(Pos())};
-    const int64_t per_peer_before{params.unchecked_headers_per_peer}, total_before{params.unchecked_headers_total};
+    const int64_t per_peer_before{params.unchecked_headers_per_peer};
     params.unchecked_headers_per_peer = 4;
-    params.unchecked_headers_total = 8;
     MAKE_UNCHECKED_FORK(fork);
     for (const int64_t first : {1, 3}) {
         std::vector<CBlockHeader> chain;
@@ -4040,7 +4039,6 @@ BOOST_FIXTURE_TEST_CASE(attack_unchecked_budget_locked_by_shared_headers, FastBl
     BOOST_CHECK_EQUAL(HeaderReason({honest}, /*source=*/5), "");
     WITH_LOCK(::cs_main, Chainman().CheckUnchecked());
     params.unchecked_headers_per_peer = per_peer_before;
-    params.unchecked_headers_total = total_before;
 }
 
 BOOST_FIXTURE_TEST_CASE(attack_unchecked_sybils_drop_honest_headers, FastBlocksSetup)
@@ -4052,9 +4050,8 @@ BOOST_FIXTURE_TEST_CASE(attack_unchecked_sybils_drop_honest_headers, FastBlocksS
     // total / (N + 1) headers (50000 / 115 = 434 slots on main), not per_peer: doc (b) says the
     // honest peer's budget cannot be taken nor dropped, and the "Limit" is per_peer slots.
     auto& params{const_cast<Consensus::PosParams&>(Pos())};
-    const int64_t per_peer_before{params.unchecked_headers_per_peer}, total_before{params.unchecked_headers_total};
+    const int64_t per_peer_before{params.unchecked_headers_per_peer};
     params.unchecked_headers_per_peer = 6;
-    params.unchecked_headers_total = 12;
     MAKE_UNCHECKED_FORK(fork);
     const auto chain_of{[&](uint8_t salt) {
         std::vector<CBlockHeader> chain;
@@ -4076,7 +4073,6 @@ BOOST_FIXTURE_TEST_CASE(attack_unchecked_sybils_drop_honest_headers, FastBlocksS
     BOOST_CHECK_EQUAL(kept, honest.size());
     WITH_LOCK(::cs_main, Chainman().CheckUnchecked());
     params.unchecked_headers_per_peer = per_peer_before;
-    params.unchecked_headers_total = total_before;
 }
 
 BOOST_FIXTURE_TEST_CASE(attack_unchecked_blocks_fill_the_disk, FastBlocksSetup)

@@ -165,7 +165,7 @@ public:
     /**
      * A header of a block of stake whose leader the node cannot tell yet (LeaderOf: SET_UNKNOWN, the set
      * of its epoch made by an anchor the node has not connected) is taken unchecked, within the
-     * template's budget (UncheckedLimits: unchecked_headers_per_peer, unchecked_headers_total). See
+     * template's budget (UncheckedLimits: unchecked_headers_per_peer, unchecked_block_bytes_per_peer). See
      * doc/fastblocks.md, "Headers and blocks the node cannot check yet". Called with cs_main held.
      */
     bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const override;
