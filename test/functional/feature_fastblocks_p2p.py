@@ -196,7 +196,8 @@ class FastBlocksP2PTest(SidechainTest):
         assert_greater_than(len(pos), 20)
         for i in pos:
             forged[i][112:176] = bytes(64)
-        assert_equal([header_hash(h) for h in forged[-3:]], [n0.getblockhash(n0.getblockcount() - k) for k in (2, 1, 0)])
+        # (At the heights of the snapshot: n0 may have made blocks since.)
+        assert_equal([header_hash(h) for h in forged[-3:]], [n0.getblockhash(len(forged) - k) for k in (2, 1, 0)])
         attacker = late.add_p2p_connection(FastBlocksPeer())
         for start in range(0, len(forged), MAX_HEADERS):
             attacker.send_and_ping(headers_message(forged[start:start + MAX_HEADERS]))
