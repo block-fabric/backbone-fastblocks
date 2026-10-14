@@ -1248,10 +1248,21 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
             misbehaving = "malformed evidence";
             return true;
         }
-        // Relayed only if it is a proof (one this node does not know yet). One that is not (two
-        // signature checks for nothing) is the peer's fault: the validator set is the chain's.
+        // Relayed only if it is a proof (one this node does not know yet). Only one whose form is
+        // wrong (any node sees it, whatever chain it has) is the peer's fault. The leader a signature
+        // is checked against depends on what chain a node has: a new node (an inactive set at its
+        // tip, none of the headers' parents), or one on another branch, may find another leader, or
+        // none, for a proof an honest peer checked. Dropped, not blamed (a few signature checks: the
+        // first header's fails, and the second is not checked).
         std::string reason;
-        if (!AddEvidence(proof, reason, peer) && reason != "pos-evidence-unknown") misbehaving = "invalid evidence: " + reason;
+        if (!AddEvidence(proof, reason, peer)) {
+            std::string form;
+            if (!CheckEvidenceForm(proof, m_params, form)) {
+                misbehaving = "invalid evidence: " + reason;
+            } else {
+                LogDebug(BCLog::NET, "FastBlocks: evidence from peer=%d dropped: %s\n", peer, reason);
+            }
+        }
         return true;
     }
     return false;
@@ -1265,6 +1276,8 @@ std::optional<Offence> FastBlocksHooks::AddEvidence(const DoubleProposal& proof,
     // The leader of the slot: as the chain below either header says, or the active chain.
     std::optional<Offence> offence;
     bool unknown{false};
+    // (Each leader once: the chains below both headers and the active one most often name one.)
+    std::set<uint256> checked;
     if (ChainstateManager* chainman{Chainman()}) {
         LOCK(::cs_main);
         const int64_t slot{SlotOf(proof.a.nTime, m_params)};
@@ -1274,7 +1287,8 @@ std::optional<Offence> FastBlocksHooks::AddEvidence(const DoubleProposal& proof,
             if (!prev) continue;
             const SlotLeader leader{LeaderOf(*prev, slot)};
             if (leader.status == LeaderStatus::SET_UNKNOWN || leader.status == LeaderStatus::SEED_UNKNOWN) unknown = true;
-            if (leader.status != LeaderStatus::OK) continue;
+            if (leader.status != LeaderStatus::OK || checked.contains(leader.pubkey)) continue;
+            checked.insert(leader.pubkey);
             offence = CheckEvidence(proof, leader.pubkey, Genesis(), m_params, reason);
             if (offence) break;
         }

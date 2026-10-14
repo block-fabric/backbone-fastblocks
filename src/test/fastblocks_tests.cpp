@@ -1630,8 +1630,9 @@ BOOST_FIXTURE_TEST_CASE(acks_noted_only_when_signed, FastBlocksSetup)
 
 BOOST_FIXTURE_TEST_CASE(false_evidence_misbehaves, FastBlocksSetup)
 {
-    // A proof that is none costs two signature checks: the peer that sends it misbehaves (the
-    // validator set is the chain's: an honest node relays only proofs that check).
+    // A proof whose form is wrong is the peer's fault, whatever chain the node has: it misbehaves.
+    // (One whose signatures do not check against the leader this node finds is dropped, not blamed:
+    // that leader depends on the chain the node has; attack4_fresh_node_blames_honest_evidence_relay.)
     StartPos();
     const CBlock first{PosBlock(1)};
     const auto send{[&](const pos::DoubleProposal& proof) {
