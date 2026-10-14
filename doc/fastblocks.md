@@ -121,7 +121,7 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | The record has the block that seeds the epoch; may come later (not a slot to come: below) | `pos-seed-unknown` |
 | Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
 | A header whose epoch's set the node does not know: the branch leaves the active chain at or above its final block, and the anchor that made the set is not on the active chain (the state pruned that one's set). Not punished | `bad-pos-fork-too-deep` |
-| ... and, from a peer, it fits the budget of headers the node cannot check yet: the peer holds fewer than `unchecked_headers_per_peer` (10000; 2000 on regtest) and the node fewer than `unchecked_headers_total` (50000; 4000 on regtest), or makes room by the rule of "Headers and blocks the node cannot check yet" (template; not consensus). Not punished; asked again once the tip moved | `unchecked-budget` |
+| ... and, from a peer, it fits the budget of headers the node cannot check yet: the peer holds fewer than `unchecked_headers_per_peer` (10000; 2000 on regtest), and their stored blocks weigh at most `unchecked_block_bytes_per_peer` (128 MiB; 32 MiB on regtest), whatever other peers hold: see "Headers and blocks the node cannot check yet" (template; not consensus). Not punished; asked again once the tip moved | `unchecked-budget` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later if its leader signed it; one whose leader the node cannot tell (set or seed unknown) does not wait, nor is punished | `pos-time-future`, `pos-time-future-unchecked` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
@@ -229,26 +229,42 @@ until its block is connected.
    block, and the peers that sent a header on top of it (a peer that sends a
    header holds the chain below it too). The accounting is by header: what a
    peer holds is the headers that have it as a holder.
-2. **Bounds.** A peer holds at most `unchecked_headers_per_peer` headers (10000;
-   2000 on regtest); the node holds at most `unchecked_headers_total` (50000;
-   4000 on regtest). A header that would pass the first is refused
-   (`unchecked-budget`, `BLOCK_HEADER_LOW_WORK`: not punished; the node asks the
-   peer for its headers again once its tip moved, when its connected blocks gave
-   room back). A header that would pass the second makes room: the peer that
-   alone holds the most headers, if it alone holds more than the sender, gives up
-   its newest headers it alone holds; otherwise the header is refused the same
-   way.
-3. **Volatile.** An unchecked header is not written to disk, and leaves the
-   block index, with its block if the node has it, as soon as no peer holds it
-   (its last holder disconnected, or gave it up by the rule above). Deleting
-   from the block index is new to Bitcoin's code: the entries go to a bounded
-   list before they are freed (code that read one without the lock reads a dead
-   entry, never freed memory), and the peers' pointers into them (best known
-   block, blocks in flight) are moved to the nearest block that stays, under the
-   same lock. A header whose block is connected is checked: it leaves the set,
-   is written to disk, and is kept like any other. The node's own headers, and
-   those read from disk or given by RPC, have the node as holder, which never
-   goes.
+2. **Bounds, by peer.** A peer holds at most `unchecked_headers_per_peer`
+   headers (10000; 2000 on regtest), and the blocks the node stored of the
+   headers it holds weigh at most `unchecked_block_bytes_per_peer` (128 MiB;
+   32 MiB on regtest). A header over either is refused (`unchecked-budget`,
+   `BLOCK_HEADER_LOW_WORK`: not punished; the node asks the peer for its headers
+   again once its tip moved, when its connected blocks gave room back). Every
+   connected peer has this whole budget whatever the others hold or share: no
+   header is ever dropped to make room for another peer's. There is no node-wide
+   total: one smaller than the peers' budgets put together can always be taken
+   from an honest peer (attackers that hold the same headers in pairs locked
+   it, and new connections took headers from the peer that alone held the most:
+   the adversarial review of the earlier design, which had
+   `unchecked_headers_total` and eviction). Memory is bounded by the peers the
+   node is connected to instead (below).
+3. **Volatile.** An unchecked header is not written to the block index
+   database, and leaves the block index as soon as no peer holds it (its last
+   holder disconnected). Deleting from the block index is new to Bitcoin's code:
+   the entries go to a list before they are freed (the last batch whole, however
+   large, and up to 4096 before it: code that read one without the lock reads a
+   dead entry, never freed memory; what was read so, the locator of the best
+   header and the header tip notified, is now read with the lock held), and the
+   peers' pointers into them (best known block, blocks in flight) are moved to
+   the nearest block that stays, under the same lock. A header whose block is
+   connected is checked: it leaves the set, is written to disk, and is kept like
+   any other. The node's own headers, and those read from disk or given by RPC,
+   have the node as holder, which never goes.
+   **Their blocks are stored apart.** The block of an unchecked header is stored
+   in a file of its own (`blocks/unchecked/unc?????.dat`, template
+   `BlockManager::WriteVolatileBlock`), never in the block files, if its sender
+   holds the header and the block fits the sender's byte budget (else it is not
+   stored; no fault of the peer's). It is charged to every holder of the header;
+   a holder it does not fit stops holding that header and those on it. The file
+   is deleted with the header (its number reused), and the block is written to
+   the block files only once it passed every rule as it is connected (before
+   its undo data). The directory is emptied when the node starts, and
+   `-reindex` never sees these blocks.
 4. **One extension a header.** The node keeps one signature for each header:
    the first that came, until it can tell the leader. Another valid one replaces
    it if the node's own is not valid (`CheckOtherExtension`, `REPLACE`); a block
@@ -280,28 +296,33 @@ until its block is connected.
 
 Each against any number of peers, reconnections and new addresses.
 
-- **Bounded memory.** Unchecked headers in the block index: at most
-  `unchecked_headers_total`, plus the node's own (every admission checks the
-  total, and makes room only by deleting). Reconnecting changes nothing: the count is the
-  number of headers, which leave with their last holder, so a new connection
-  starts with no budget used and no headers left behind either; new addresses
-  only share the same total. Other extensions: none are stored (4). Retry state:
-  one pending getheaders a peer (5), and the template's ask-again-after-the-tip
-  (2), both in the peer's state, gone with it. What may be dropped is only
-  unchecked: checked headers (the whole best chain the node checked), their
-  signatures and their blocks are never deleted nor replaced; a header two peers
-  hold is never dropped to make room; and a header an honest peer alone holds is
-  dropped only if that peer alone holds the most, and more than the sender: a
-  flood from any number of attackers takes room from the attackers first, and
-  never from a peer that holds no more than its share of the total.
+- **Bounded memory and disk.** Unchecked headers in the block index: at most
+  `unchecked_headers_per_peer` for each connected peer, plus the node's own
+  (every admission checks the sender's budget); their stored blocks, at most
+  `unchecked_block_bytes_per_peer` for each (every block stored, and every header
+  held, is charged to its holders and checked against their budgets; a holder
+  over it stops holding). With the default 125 connections: 1.25 million index
+  entries and 16 GiB of blocks at the very worst, all of it unchecked and gone
+  with the peers (or at a restart). Reconnecting changes nothing: the count is
+  the number of headers and the bytes of their blocks, which leave with their
+  last holder (the block's file deleted), so a new connection starts with no
+  budget used and nothing left behind, on disk either: the same block sent
+  again after a reconnection reuses the file of the one deleted. Other
+  extensions: none are stored (4). Retry state: one pending getheaders a peer
+  (5), and the template's ask-again-after-the-tip (2), both in the peer's state,
+  gone with it. What may be dropped is only unchecked, and only by its own
+  holders going (or by a holder that cannot afford the block of a header it
+  holds): checked headers (the whole best chain the node checked), their
+  signatures and their blocks are never deleted nor replaced, and no peer's
+  headers are ever dropped for another's.
 - **No stall.** (a) Checked headers need no budget: a node that catches up takes
   the honest chain as far as it can check (the sets are known an epoch and more
   ahead of the connected blocks), connects it, and can check further; whatever
   fills the budget, it progresses an epoch at a time, and unchecked headers only
   let it fetch ahead. (b) A branch whose sets the node never had (the other side
   of a partition) needs the honest peer's unchecked headers: the honest peer has
-  its own budget, which attackers cannot use (each peer's own), take (eviction
-  takes from whoever alone holds the most) nor drop (a header is deleted only
+  its own budget, which attackers cannot use (each peer's own), take (there is
+  no node-wide total, nor eviction) nor drop (a header is deleted only
   without holders, and the honest peer holds what it sent). (c) A forged
   signature on an honest header fails as an extension failure (5), not the
   block; the honest peers are asked for the header, whose valid signature
@@ -313,10 +334,11 @@ Each against any number of peers, reconnections and new addresses.
   for them, the block download times it out and disconnects it, and its headers
   go with it; with blocks, the node tries them, the signature fails (5), and they
   stay with their holders until those go. Limit: a branch longer than a peer's
-  budget beyond what the node can check (10000 slots, three and a half days) is
-  taken only as the node connects it, which it cannot before the branch leads: a
-  partition that long needs `unchecked_headers_per_peer` raised, or a restart
-  with the other side's peers.
+  budget beyond what the node can check (10000 slots, three and a half days, or
+  blocks of more than 128 MiB in all) is taken only as the node connects it,
+  which it cannot before the branch leads: a partition that long needs
+  `unchecked_headers_per_peer` (or `unchecked_block_bytes_per_peer`) raised, or a
+  restart with the other side's peers.
 - **No punishment of honest peers.** A header refused for the budget is
   `BLOCK_HEADER_LOW_WORK`; one off a branch too deep, too (`bad-pos-fork-too-deep`);
   an extension failure is `BLOCK_TIME_FUTURE` for the block's sender and for every
@@ -332,7 +354,8 @@ Each against any number of peers, reconnections and new addresses.
   it tries first, as for a block it does not have yet: the block whose valid
   signature exists connects on every node that gets it. An extension failure is
   never final (in memory, taken back by any other signature); unchecked headers
-  are not written to disk, so a restart starts with none and takes them again
+  are not written to the block index database (nor their blocks to the block
+  files), so a restart starts with none and takes them again
   from peers; nothing read from memory (the sets read before) is a rule of a
   block.
 - **Fork choice.** Unchecked headers can make the best header, but nothing waits
@@ -340,14 +363,20 @@ Each against any number of peers, reconnections and new addresses.
   and it goes with its holders.
 
 FastBlocks' part: `HeaderCheckable` (the leader of the slot is `SET_UNKNOWN`),
-`UncheckedLimits` (`unchecked_headers_per_peer`, `unchecked_headers_total`),
+`UncheckedLimits` (`unchecked_headers_per_peer`, `unchecked_block_bytes_per_peer`),
 `ExtensionFailure` (`bad-pos-sig`), and `CheckOtherExtension`. The template's is
 the rest, off unless a chain's `HeaderCheckable` says no. Tests: the template's
-`sidechain_hooks_tests.cpp` (`unchecked_*`, `block_extension_unknown_taken`,
-`extension_failure_not_the_peers_fault`), `fastblocks_tests.cpp`
-(`unchecked_siblings_not_taken`, `unchecked_headers_checked_give_room`,
-`forged_signature_replaced`), `feature_fastblocks_unchecked.py`
-(reconnection loops, many peers, eviction floods, forged copies, an inflated best
+`sidechain_hooks_tests.cpp` (`unchecked_*`, among them
+`unchecked_no_peer_drops_another` and `unchecked_blocks_stored_apart`,
+`block_extension_unknown_taken`, `extension_failure_not_the_peers_fault`),
+`fastblocks_tests.cpp` (`unchecked_siblings_not_taken`,
+`unchecked_headers_checked_give_room`, `forged_signature_replaced`, and the
+adversarial review's `attack_unchecked_budget_locked_by_shared_headers`,
+`attack_unchecked_sybils_drop_honest_headers`,
+`attack_unchecked_blocks_fill_the_disk`,
+`attack_inflated_best_header_does_not_stop_the_chain`),
+`feature_fastblocks_unchecked.py` (reconnection loops, many peers, each with
+its own budget, forged copies, an inflated best
 header while the node catches up, no honest peer punished), and the fuzz
 targets `sidechain_unchecked` and `pos_state` (peers that come and go).
 `feature_fastblocks_fork.py` keeps the attacker connected (its forged header would
