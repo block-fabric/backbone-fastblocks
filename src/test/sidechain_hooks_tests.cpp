@@ -1694,7 +1694,7 @@ BOOST_FIXTURE_TEST_CASE(waiting_headers_keep_their_peers, SidechainSetup)
     BOOST_REQUIRE_EQUAL(taken.size(), chain.size());
     for (size_t i{0}; i < chain.size(); ++i) {
         // Parents first, each with its peer.
-        BOOST_CHECK(taken[i].first->GetBlockHash() == chain[i].GetHash());
+        BOOST_CHECK(taken[i].first == chain[i].GetHash());
         BOOST_CHECK_EQUAL(taken[i].second, int64_t(10 + i));
     }
     {
@@ -1715,8 +1715,8 @@ BOOST_FIXTURE_TEST_CASE(waiting_headers_keep_their_peers, SidechainSetup)
     Commit(after.GetHash());
     const auto last{chainman.RetryBmmWaiting()};
     BOOST_REQUIRE_EQUAL(last.size(), 2U);
-    BOOST_CHECK(last[0].first->GetBlockHash() == uncommitted.GetHash());
-    BOOST_CHECK(last[1].first->GetBlockHash() == after.GetHash());
+    BOOST_CHECK(last[0].first == uncommitted.GetHash());
+    BOOST_CHECK(last[1].first == after.GetHash());
     BOOST_CHECK_EQUAL(last[0].second, 30);
     BOOST_CHECK_EQUAL(last[1].second, 30);
     BOOST_CHECK(WITH_LOCK(::cs_main, return waiting.empty()));
@@ -1890,6 +1890,82 @@ BOOST_FIXTURE_TEST_CASE(attack_holder_leaves_while_its_blocks_connect, Sidechain
     for (const CBlockIndex* index{tip}; index; index = index->pprev) {
         BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(index->GetBlockHash()) == index);
     }
+}
+
+namespace {
+/** LateCheckedHooks whose extended headers wait (as for a commitment not on record) while `wait` is set. */
+struct WaitingLateHooks final : LateCheckedHooks {
+    bool wait{true};
+    bool CheckHeader(const CBlockHeader& header, const CBlockIndex& prev, const ChainstateManager& chainman, BlockValidationState& state) const override
+    {
+        if (wait) return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "test-wait", "waits");
+        return LateCheckedHooks::CheckHeader(header, prev, chainman, state);
+    }
+    bool IsWaitReason(const std::string& reject_reason) const override { return reject_reason == "test-wait" || LateCheckedHooks::IsWaitReason(reject_reason); }
+    std::optional<int64_t> WaitingReady(const CBlockHeader&, const sidechain::Mainchain&) const override
+    {
+        if (wait) return std::nullopt;
+        return 0;
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(waiting_unchecked_header_is_never_the_nodes_own, SidechainSetup)
+{
+    // A header that waits is kept without a peer by validation (a block message: the net layer tells
+    // who sent it). Tried again, one whose sender is not known is not taken as the node's own
+    // (UNKNOWN_SOURCE): it holds no unchecked header. One whose peer is known is taken within its budget.
+    auto owned{std::make_unique<WaitingLateHooks>()};
+    WaitingLateHooks& hooks{*owned};
+    hooks.limits.per_peer = 10;
+    InstallHooks installed{std::move(owned)};
+    ChainstateManager& chainman{*m_node.chainman};
+    WITH_LOCK(::cs_main, chainman.m_bmm_waiting.clear());
+    constexpr int64_t peer{7};
+    WITH_LOCK(::cs_main, chainman.UncheckedSourceAdded(peer));
+    const auto unchecked_block{[&](uint8_t salt) {
+        CBlock block{Build()};
+        block.nVersion |= BLOCK_EXTENSION_BIT;
+        block.ext.hashSections.SetNull();
+        block.ext.sig.fill(5);
+        CMutableTransaction coinbase{*block.vtx[0]};
+        coinbase.vin[0].scriptSig << static_cast<int64_t>(salt);
+        block.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        return block;
+    }};
+    // A block from the peer, as a `block` message: it waits, without a peer (validation does not know it).
+    const CBlock unknown{unchecked_block(1)};
+    bool new_block{false};
+    chainman.ProcessNewBlock(std::make_shared<const CBlock>(unknown), /*force_processing=*/false, /*min_pow_checked=*/true, &new_block, peer);
+    BOOST_REQUIRE(!new_block);
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(::cs_main, return chainman.m_bmm_waiting.at(unknown.GetHash()).peer), -1);
+    // Another, whose sender the net layer recorded.
+    const CBlock known{unchecked_block(2)};
+    {
+        LOCK(::cs_main);
+        chainman.AddBmmWaiting(known, peer);
+    }
+    hooks.wait = false;
+    const auto taken{chainman.RetryBmmWaiting()};
+    BOOST_REQUIRE_EQUAL(taken.size(), 1U);
+    BOOST_CHECK(taken[0].first == known.GetHash());
+    BOOST_CHECK_EQUAL(taken[0].second, peer);
+    LOCK(::cs_main);
+    // The one without a peer is not in the block index, nor waiting; the node holds nothing.
+    BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(unknown.GetHash()));
+    BOOST_CHECK(!chainman.m_bmm_waiting.contains(unknown.GetHash()));
+    BOOST_CHECK_EQUAL(chainman.UncheckedHeld(-1), 0U);
+    BOOST_CHECK_EQUAL(chainman.UncheckedHeld(ChainstateManager::UNKNOWN_SOURCE), 0U);
+    // The other is the peer's, and leaves with it.
+    const CBlockIndex* index{chainman.m_blockman.LookupBlockIndex(known.GetHash())};
+    BOOST_REQUIRE(index && index->m_unchecked);
+    BOOST_CHECK(chainman.HoldsUnchecked(*index, peer));
+    chainman.CheckUnchecked();
+    chainman.UncheckedSourceGone(peer);
+    BOOST_CHECK(!chainman.m_blockman.LookupBlockIndex(known.GetHash()));
+    BOOST_CHECK(chainman.m_unchecked.empty());
+    chainman.CheckUnchecked();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
