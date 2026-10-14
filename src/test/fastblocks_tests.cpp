@@ -4216,4 +4216,67 @@ BOOST_FIXTURE_TEST_CASE(attack_inflated_best_header_does_not_stop_the_chain, Fas
     BOOST_CHECK(BestHeader() == inflated.back().GetHash());
 }
 
+BOOST_FIXTURE_TEST_CASE(attack_waiting_block_held_by_the_node, FastBlocksSetup)
+{
+    // ATTACK THAT SUCCEEDS (this test fails on the code it was written against): unchecked headers
+    // that leave no trace in any peer's budget, and never leave the block index. A peer sends, as
+    // `block` messages (unsolicited), blocks of stake on a branch the node cannot check, each
+    // acknowledging the next mainchain height (not on record yet: `pos-ack-unknown`, a wait reason).
+    // ContextualCheckBlockHeader keeps each header to try again with peer -1 (AddBmmWaiting), and only
+    // the headers message path puts the peer's id there: the block path does not. When the mainchain
+    // has a commitment at that height (any BMM block or anchor), RetryBmmWaiting takes them with
+    // source -1, the node's own: no budget is checked, and the node holds them (and the unchecked
+    // headers below them) until it restarts. 1000 a commitment (MAX_BMM_WAITING), again and again:
+    // memory grows without bound, beyond the documented worst case (doc: "gone with the peers").
+    auto& params{const_cast<Consensus::PosParams&>(Pos())};
+    const int64_t per_peer_before{params.unchecked_headers_per_peer};
+    params.unchecked_headers_per_peer = 3;
+    MAKE_UNCHECKED_FORK(fork);
+    constexpr int64_t attacker{9};
+    const uint32_t next_height{static_cast<uint32_t>(Record().Height() + 1)};
+    const size_t waiting_before{Waiting()};
+    const size_t unchecked_before{WITH_LOCK(::cs_main, return Chainman().m_unchecked.size())};
+    std::vector<uint256> sent;
+    for (uint8_t salt{1}; salt <= 10; ++salt) {
+        CBlock block;
+        static_cast<CBlockHeader&>(block) = UnsignedHeader(fork.like, fork.other.GetHash(), fork.slot - 10, next_height, salt);
+        pos::PosSections sections;
+        sections.ack = pos::AnchorAck{.ticket = Ticket(uint256{salt}, script), .main_height = static_cast<int32_t>(next_height)};
+        block.vSections = sections.Encode();
+        block.ext.hashSections = pos::SectionsHash(block.vSections);
+        CMutableTransaction coinbase;
+        coinbase.vin.resize(1);
+        coinbase.vin[0].prevout.SetNull();
+        coinbase.vin[0].scriptSig = CScript() << (Tip()->nHeight + 2) << static_cast<int64_t>(salt);
+        coinbase.vout.emplace_back(0, CScript() << OP_TRUE);
+        block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        bool new_block{false};
+        // As net_processing's ProcessBlock does for a `block` message from the attacker.
+        Chainman().ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/false, /*min_pow_checked=*/true, &new_block, attacker);
+        BOOST_REQUIRE(!new_block);
+        sent.push_back(block.GetHash());
+    }
+    // They wait, with no peer (as the node's own).
+    BOOST_REQUIRE_EQUAL(Waiting(), waiting_before + sent.size());
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Chainman().m_bmm_waiting.at(sent[0]).peer), -1);
+    // The mainchain block at that height commits to something (any anchor or BMM block of the chain).
+    Commit(uint256{0xee});
+    BOOST_REQUIRE_EQUAL(static_cast<uint32_t>(Record().Height()), next_height);
+    (void)Chainman().RetryBmmWaiting();
+    // The attacker leaves.
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(attacker));
+    size_t kept{0};
+    for (const uint256& hash : sent) kept += Index(hash) != nullptr;
+    const size_t unchecked_after{WITH_LOCK(::cs_main, return Chainman().m_unchecked.size())};
+    BOOST_TEST_MESSAGE("attacker's headers still in the block index after it left: " << kept << " of " << sent.size()
+                       << " (its budget: " << params.unchecked_headers_per_peer << "); unchecked headers " << unchecked_before << " -> " << unchecked_after
+                       << ", the node holds " << WITH_LOCK(::cs_main, return Chainman().UncheckedHeld(-1)));
+    // What a peer sent leaves with it, and it never held more than its budget.
+    BOOST_CHECK_EQUAL(kept, 0U);
+    BOOST_CHECK_EQUAL(unchecked_after, unchecked_before);
+    WITH_LOCK(::cs_main, Chainman().CheckUnchecked());
+    params.unchecked_headers_per_peer = per_peer_before;
+}
+
 BOOST_AUTO_TEST_SUITE_END()
