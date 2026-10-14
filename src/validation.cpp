@@ -4491,7 +4491,7 @@ void ChainstateManager::EraseUnchecked(std::vector<const CBlockIndex*> doomed)
     std::vector<std::pair<const CBlockIndex*, const CBlockIndex*>> moved;
     moved.reserve(doomed.size());
     for (const CBlockIndex* index : doomed) {
-        Assume(index->m_unchecked && !(index->nStatus & BLOCK_VALID_SCRIPTS));
+        Assume(index->m_unchecked && !index->IsValid(BLOCK_VALID_SCRIPTS));
         const CBlockIndex* stays{index->pprev};
         while (stays && erased.contains(stays)) stays = stays->pprev;
         moved.emplace_back(index, stays);
