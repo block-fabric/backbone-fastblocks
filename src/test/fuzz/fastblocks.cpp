@@ -1397,7 +1397,8 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
             const auto entry{pos::GetAnchorSet(step, ArithToUint256(arith_uint256{anchors}))};
             assert(entry && entry->anchors == anchors && pos::GetSetVersion(step, entry->version));
             // The set made has no validator jailed as of its epoch (jails given now included).
-            for (const Consensus::PosValidator& v : *pos::GetSetVersion(step, entry->version)) {
+            const auto made{pos::GetSetVersion(step, entry->version)};
+            for (const Consensus::PosValidator& v : *made) {
                 const auto record{pos::GetValidator(step, v.pubkey)};
                 assert(record && record->jailed_until_epoch <= set_epoch);
             }
