@@ -691,7 +691,24 @@ payee, the script of its coinbase's first output:
 `submitevidence <hex>` (the two headers, serialized) and `listevidence`. A
 proof whose leader a node cannot tell yet (`pos-evidence-unknown`) is dropped
 without blaming the peer. One the node keeps already is found before any
-signature is checked, and dropped.
+signature is checked, and dropped. Each leader found (below either header, or
+at the tip) is checked once.
+
+From a peer, only a proof whose form is wrong (`-kind`, `-slot`, `-same`: any node
+sees it, whatever chain it has) is the peer's fault. One whose signatures do not
+check against the leader this node finds (`bad-pos-evidence-sig`) is dropped
+and not blamed: that leader depends on the chain a node has. A new node has an
+inactive set at its tip (the main and test networks start with no validators)
+and none of the headers' parents, and a node on another branch may find another
+leader, for a true proof an honest peer checked (review 4 of audit 6, attack
+2). It costs the sender a message per signature check or two.
+
+The pool is bounded and takes each proof once at most: full (1000), a proof of
+a slot not after the oldest kept is not taken, nor relayed (it would be the one
+pushed out at once, and new again the next time it came: a validator that
+signed twice at 1001 slots, or unbonded, had nodes in a cycle relay it round for
+ever, each time logged; review 4 of audit 6, attack 1). Proofs only ever leave
+by being pushed out, so that floor only rises.
 
 ## P2P
 
@@ -699,7 +716,7 @@ signature is checked, and dropped.
 |---|---|---|
 | `fbticket` | A ticket | Kept and relayed if the mainchain committed to it, or if it names a block the node knows: of those, 8 a peer per mainchain block at most (anyone can make them by the thousand) |
 | `fbgettickets` | Up to 16 h* | The node sends the tickets it has; more than 16 is misbehaving |
-| `fbevidence` | Two headers | Kept and relayed if it is a proof (above); a peer that sends one that is not misbehaves (not one whose leader the node cannot tell yet) |
+| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) the node takes (new, and not older than its full pool); a peer that sends one whose form is wrong misbehaves (not one whose signatures do not check against the leader this node finds: that depends on its chain) |
 
 **Catching up.** Headers and blocks come as usual and are checked in full
 (leader signatures included); an acknowledgement waits until the node's own
