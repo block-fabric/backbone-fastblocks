@@ -672,7 +672,7 @@ BOOST_AUTO_TEST_CASE(leader_schedule)
 
 BOOST_AUTO_TEST_CASE(slashing_protection)
 {
-    const fs::path dir{fs::temp_directory_path() / fs::PathFromString(strprintf("fastblocks_protection_%d", static_cast<uint64_t>(GetRandHash().GetUint64(0))))};
+    const fs::path dir{fs::path{fs::temp_directory_path()} / fs::PathFromString(strprintf("fastblocks_protection_%d", static_cast<uint64_t>(GetRandHash().GetUint64(0))))};
     fs::create_directories(dir);
     const fs::path file{dir / "protection.dat"};
     std::string error;
@@ -1989,7 +1989,8 @@ BOOST_AUTO_TEST_CASE(staking_parameters)
     }
     CChainParams::RegTestOptions options;
     options.sidechain_slot = 5;
-    const Consensus::PosParams& reg{CChainParams::RegTest(options)->GetConsensus().pos};
+    const auto regtest{CChainParams::RegTest(options)};
+    const Consensus::PosParams& reg{regtest->GetConsensus().pos};
     BOOST_CHECK_EQUAL(reg.min_stake, COIN / 10000);
     BOOST_CHECK_EQUAL(reg.min_active_validators, 1U);
     BOOST_CHECK_EQUAL(reg.max_validators, 8U);
