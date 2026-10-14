@@ -115,6 +115,9 @@ REGTEST_GENESIS_TIME = 1296688602
 
 #: max_unanchored_slots on regtest: without an anchor, blocks of stake stop.
 REGTEST_MAX_UNANCHORED_SLOTS = 100
+#: stall_seconds on regtest: a mainchain block this long after the last block of stake shows the chain
+#: stalled, and merged mined blocks take over.
+REGTEST_STALL_SECONDS = 30
 
 
 class SlotClock:

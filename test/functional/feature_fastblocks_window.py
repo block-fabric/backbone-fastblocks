@@ -30,6 +30,8 @@ from decimal import Decimal
 from feature_sidechain import SidechainTest
 from test_framework.fastblocks import (
     KEYS,
+    REGTEST_MAX_UNANCHORED_SLOTS,
+    REGTEST_STALL_SECONDS,
     SLOT,
     XONLY,
     MsgRawBlock,
@@ -133,12 +135,55 @@ class FastBlocksWindowTest(SidechainTest):
             self.connect_nodes(a, b)
 
     def anchor(self, side):
-        """A mainchain block with the merged miner's ticket in it; the next leader of `side` acknowledges it."""
+        """A mainchain block with the merged miner's ticket in it; the next leader of `side` acknowledges
+        it. Unless the blocks of stake of `side` stopped, for want of an anchor (max_unanchored_slots:
+        side B, while side A anchors, as many slots as side A's anchors took): no leader acknowledges
+        it, and a merged mined block anchors, once the mainchain shows the chain stalled (bmm_anchor).
+        Whether they stopped is read slot by slot: the same steps whatever the load of the machine."""
         before = [n.getposinfo()["anchors"] for n in side]
+
+        def anchored():
+            return all(n.getposinfo()["anchors"] > b for n, b in zip(side, before))
+
         self.wait_until(lambda: len(self.main.getrawmempool()) > 0, timeout=120)
         # (The clock stays: a slot passed without its leader's block would be charged to it.)
         self.mine_main()
-        self.clock.advance_until(lambda: all(n.getposinfo()["anchors"] > b for n, b in zip(side, before)), 40)
+        for _ in range(40):
+            if anchored():
+                return
+            if all(self.stopped(n) for n in side):
+                self.bmm_anchor(side, anchored)
+                return
+            self.clock.step()
+        assert anchored(), "no anchor after 40 slots"
+
+    def stopped(self, node):
+        """Whether the blocks of stake of `node`'s chain stopped for want of an anchor."""
+        first = node.getposinfo()["firstunanchoredslot"]
+        return first >= 0 and self.clock.slot() - first >= REGTEST_MAX_UNANCHORED_SLOTS
+
+    def bmm_anchor(self, side, anchored):
+        """The anchor of `side`, whose blocks of stake stopped: slots until a mainchain block would show
+        the chain stalled (stall_seconds after its last block of stake), that mainchain block, and then
+        the merged mined block its merged miner asks for. (A leader may acknowledge a ticket meanwhile:
+        an anchor all the same.)"""
+        last = max(n.getposinfo()["lastposslot"] for n in side)
+        while self.clock.slot() < last + REGTEST_STALL_SECONDS:
+            if anchored():
+                return
+            self.clock.step()
+        self.mine_main()
+        # The merged miner asks for a block once it sees the mainchain block (in real time); a request
+        # it made before (a ticket, for the mainchain block before) may come first: mined, and waited past.
+        for _ in range(5):
+            self.wait_until(lambda: len(self.main.getrawmempool()) > 0, timeout=120)
+            self.mine_main()
+            try:
+                self.wait_until(anchored, timeout=30)
+                return
+            except AssertionError:
+                pass
+        assert anchored(), "no merged mined block anchored the stalled side"
 
     def run_slots(self, count, side):
         """`count` slots, an anchor of `side` every MAIN_EVERY of them (its merged miner on)."""
