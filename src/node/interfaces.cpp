@@ -938,7 +938,9 @@ public:
             }
             return true;
         }};
-        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupBlockIndex(block_hash))};
+        // (Used once cs_main is released: not an unchecked header, which may leave the block index then,
+        // its block deleted, ChainstateManager::EraseUnchecked. The blocks below a checked one are checked.)
+        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupCheckedBlockIndex(block_hash))};
         CBlock block;
         std::optional<uint256> proposer;
         if (!index || index->nHeight == 0 || !read(*index, block, proposer)) return {};

@@ -289,16 +289,23 @@ std::optional<CBlock> Producer::Build(int64_t slot, const std::optional<AnchorAc
     PosSections sections;
     sections.evidence = evidence;
     if (ack) {
-        const CBlockIndex* anchored{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(ack->ticket.anchored))};
-        if (!anchored) {
+        // The bundle is P's (design 4.3.4): its withdrawals, its hash as the nonce, its height as the
+        // lock time; none if P is below the last anchor point. (P looked up and read with cs_main held: an
+        // unchecked header may leave the block index as soon as it is released, EraseUnchecked.)
+        std::optional<sidechain::PegStep> step;
+        {
+            LOCK(::cs_main);
+            if (const CBlockIndex* anchored{chainman.m_blockman.LookupBlockIndex(ack->ticket.anchored)}) {
+                step = m_hooks.AckPegStep(*ack, *anchored, *Assert(chainman.ActiveChain().Tip()));
+            }
+        }
+        if (!step) {
             error = "the block the ticket anchors is unknown";
             return std::nullopt;
         }
         sections.ack = ack;
         assembly.peg = node::SidechainAssembly::Peg::STEP;
-        // The bundle is P's (design 4.3.4): its withdrawals, its hash as the nonce, its height as the
-        // lock time; none if P is below the last anchor point.
-        assembly.step = WITH_LOCK(::cs_main, return m_hooks.AckPegStep(*ack, *anchored, *Assert(chainman.ActiveChain().Tip())));
+        assembly.step = std::move(*step);
         assembly.sections = sections.Encode();
     } else {
         assembly.peg = node::SidechainAssembly::Peg::NONE;
