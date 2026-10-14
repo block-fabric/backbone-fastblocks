@@ -113,6 +113,109 @@ def slot_of(time_):
 REGTEST_GENESIS_TIME = 1296688602
 
 
+#: max_unanchored_slots on regtest: without an anchor, blocks of stake stop.
+REGTEST_MAX_UNANCHORED_SLOTS = 100
+
+
+class SlotClock:
+    """Mock time for the nodes of a test and its mainchain, moved on a slot at a time, and only when
+    every validator that leads the slot (on its own chain, staking, not stalled) made its block: a
+    test runs the same slots whatever the load of the machine (a busy machine only takes longer).
+    Every wait is on a condition, bounded generously."""
+
+    def __init__(self, test, nodes, slot_seconds=1, produce_timeout=120):
+        self.test = test
+        self.nodes = nodes
+        self.slot_seconds = slot_seconds
+        self.produce_timeout = produce_timeout
+        self.now = None
+
+    def set_time(self, t):
+        self.now = t
+        self.test.main.setmocktime(t)
+        for n in self.nodes:
+            if n.running:
+                n.setmocktime(t)
+
+    def slot(self):
+        return (self.now - REGTEST_GENESIS_TIME) // self.slot_seconds
+
+    def made_their_blocks(self, slot):
+        """Whether each running validator that leads `slot` on its chain made its block of it."""
+        for n in self.nodes:
+            if not n.running:
+                continue
+            staking = n.getstakinginfo()
+            if not staking["validator"] or not staking["enabled"] or staking["slot"] != slot:
+                if staking["validator"] and staking["enabled"]:
+                    return False
+                continue
+            info = n.getposinfo()
+            keys = {k["pubkey"] for k in staking["keys"]}
+            first = info["firstunanchoredslot"]
+            stalled = first >= 0 and slot - first >= REGTEST_MAX_UNANCHORED_SLOTS
+            if info.get("leader") in keys and info["active"] and not stalled and staking["lastslot"] != slot:
+                return False
+        return True
+
+    def peers(self, node):
+        """The test's nodes `node` is connected to."""
+        indices = set()
+        for peer in node.getpeerinfo():
+            subver = peer.get("subver", "")
+            if "(testnode" in subver:
+                indices.add(int(subver.split("(testnode")[1].split(")")[0]))
+        return [n for n in self.nodes if n.index in indices and n.running]
+
+    @staticmethod
+    def has_on_chain(node, block_hash):
+        try:
+            return node.getblockheader(block_hash)["confirmations"] > 0
+        except Exception:
+            return False
+
+    def relayed(self, slot):
+        """Whether each block of `slot` is on the chain of every node connected to its maker: the next
+        leader builds on it (else it would leave it out, and its maker be jailed for a slot it led)."""
+        for n in self.nodes:
+            if not n.running or n.getstakinginfo()["lastslot"] != slot:
+                continue
+            tip = n.getbestblockhash()
+            if any(not self.has_on_chain(peer, tip) for peer in self.peers(n)):
+                return False
+        return True
+
+    def step(self):
+        """The clock on to the next slot; returns it once its leaders made their blocks and their peers
+        have them (or by produce_timeout: a block that could not be made, which the test sees as a
+        missing block)."""
+        slot = self.slot() + 1
+        self.set_time(REGTEST_GENESIS_TIME + slot * self.slot_seconds)
+        deadline = time.time() + self.produce_timeout
+        while not (self.made_their_blocks(slot) and self.relayed(slot)):
+            if time.time() > deadline:
+                self.test.log.warning(f"slot {slot}: a leader made no block, or its peers do not have it")
+                break
+            time.sleep(0.05)
+        return slot
+
+    def advance(self, count):
+        for _ in range(count):
+            self.step()
+
+    def advance_until(self, predicate, max_slots):
+        """Slot after slot until `predicate` holds; it must within `max_slots`."""
+        for _ in range(max_slots):
+            if predicate():
+                return
+            self.step()
+        if not predicate():
+            for n in self.nodes:
+                if n.running:
+                    self.test.log.error(f"node {n.index}: {n.getposinfo()} {n.getstakinginfo()} tip {n.getblockcount()}")
+            raise AssertionError(f"not true after {max_slots} slots")
+
+
 class RawMessage:
     """A P2P message kept as its bytes: FastBlocks' own, and those with extended headers (the
     framework's block and headers have Bitcoin's 80-byte header)."""

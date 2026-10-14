@@ -17,6 +17,11 @@ Three genesis validators with 30-second slots (-posslotseconds=30), their anchor
   - blocks of stake stopped (staking off everywhere): after stall_seconds the validators merge mine
     BMM blocks for their bid, whatever the fees;
   - the validators restarted keep bidding (no setbmm to call again).
+
+Every wait is on a condition (a block of each slot, a bid in the mainchain's mempool), bounded
+generously: the clock moves only when the test moves it, so a busy machine makes the test slower, not
+different. (It waited 10 seconds for a bid and counted a block without one as uncommitted: under load,
+the rate fell below 90 %.)
 """
 
 import os
@@ -76,11 +81,11 @@ class FastBlocksIdleTest(SidechainTest):
         (real time) for the anchorers, which look once a second: slots are 30 seconds apart."""
         slot = (self.now - REGTEST_GENESIS_TIME) // SLOT_SECONDS + 1
         self.set_time(REGTEST_GENESIS_TIME + slot * SLOT_SECONDS)
-        self.wait_until(lambda: all(self.tip_slot(n) == slot for n in self.nodes), timeout=30)
+        self.wait_until(lambda: all(self.tip_slot(n) == slot for n in self.nodes), timeout=120)
         time.sleep(settle)
         return slot
 
-    def bid_waiting(self, timeout=10):
+    def bid_waiting(self, timeout=120):
         """Whether a ticket request of this chain is in the mainchain's mempool (an anchorer's bid), waiting for one a while."""
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -89,9 +94,10 @@ class FastBlocksIdleTest(SidechainTest):
             time.sleep(0.2)
         return False
 
-    def mine(self):
-        """A mainchain block, a second on; whether it has a commitment of this chain."""
-        committed = self.bid_waiting()
+    def mine(self, bid_timeout=120):
+        """A mainchain block, a second on; whether it has a commitment of this chain (a bid is waited
+        for, bid_timeout at most: one is due, except where blocks of stake stopped)."""
+        committed = self.bid_waiting(bid_timeout)
         if not committed:
             self.log.debug(f"no bid after mainchain block {self.main.getbestblockhash()} at {self.main.getblockcount()}")
         self.set_time(self.now + 1)
@@ -180,7 +186,8 @@ class FastBlocksIdleTest(SidechainTest):
             self.set_time(self.now + SLOT_SECONDS)
             time.sleep(0.3)
             if k % 3 == 2:
-                self.mine()
+                # (No bid is due before the stall: no block to anchor after the last ticket's.)
+                self.mine(bid_timeout=3)
         def merged_mined():
             if n0.getblock(n0.getbestblockhash())["kind"] == "bmm" and n0.getblockcount() > bmm_before:
                 return True

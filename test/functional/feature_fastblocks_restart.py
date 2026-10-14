@@ -13,6 +13,10 @@ or kept next to the key. Three bonded validators (no -posvalidators) and an obse
     slashing protection is next to the key file), and goes on making blocks;
   - a validator killed between signing a block and relaying it (-posfaultaftersign): restarted, it does
     not sign that slot again, and goes on making blocks.
+
+Waits are on conditions, bounded generously. (On a busy machine, the block a validator signed last
+could still be on its way, or off its peers' chain, when the test read it: it now stops the
+validators and checks that block is on everyone's chain first.)
 """
 
 import os
@@ -85,6 +89,13 @@ class FastBlocksRestartTest(SidechainTest):
 
     def validator_args(self, i):
         return self.side_args + [f"-validatorkeyfile={self.key_files[i]}", f"-validatorpayout={self.payouts[i]}"]
+
+    @staticmethod
+    def on_chain(node, block_hash):
+        try:
+            return node.getblockheader(block_hash)["confirmations"] > 0
+        except Exception:
+            return False
 
     def wait_in_sync(self, nodes=None, timeout=90):
         nodes = nodes or self.nodes
@@ -205,14 +216,28 @@ class FastBlocksRestartTest(SidechainTest):
         assert_peg_balance(main, self.nodes)
 
         self.log.info("A validator's data directory wiped, its key kept: it does not sign a slot it signed again")
-        self.wait_until(lambda: n2.getstakinginfo()["produced"] > 0, timeout=60)
-        last = n2.getstakinginfo()["lastsignedslot"]
+        # The slot node 2 signed last, with its block on everyone's chain: the validators stop (so that
+        # node 2 signs nothing more meanwhile) and agree; on a busy machine its last block may have
+        # come too late to its peers and be off their chain, then they make blocks a while more.
+        for _ in range(10):
+            produced = n2.getstakinginfo()["produced"]
+            self.wait_until(lambda: n2.getstakinginfo()["produced"] > produced, timeout=120)
+            for n in self.validators():
+                n.setstaking(False)
+            self.wait_in_sync()
+            last = n2.getstakinginfo()["lastsignedslot"]
+            own = n0.getbestblockhash()
+            while n0.getblock(own)["kind"] != "pos" or n0.getblock(own)["slot"] > last:
+                own = n0.getblock(own)["previousblockhash"]
+            if n0.getblock(own)["slot"] == last:
+                break
+            for n in self.validators():
+                n.setstaking(True)
         assert_equal(self.protected_slot(2), last)
-        own = n0.getbestblockhash()
-        while n0.getblock(own)["kind"] != "pos" or n0.getblock(own)["slot"] > last:
-            own = n0.getblock(own)["previousblockhash"]
         assert_equal(n0.getblock(own)["slot"], last)
         below = n0.getblock(own)["previousblockhash"]
+        for n in (n0, n1):
+            n.setstaking(True)
         self.stop_node(2)
         shutil.rmtree(os.path.join(n2.datadir_path, self.chain))
         # Its clock just before that slot: it takes in the chain below its block, not the block (a slot
@@ -223,12 +248,17 @@ class FastBlocksRestartTest(SidechainTest):
         self.wait_until(lambda: n2.getbestblockhash() == below, timeout=60)
         self.disconnect_nodes(2, 0)
         self.disconnect_nodes(2, 1)
-        with n2.assert_debug_log([f"no block for slot {last}: slashing protection"], unexpected_msgs=[f"of slot {last}"], timeout=20):
+        with n2.assert_debug_log([f"no block for slot {last}: slashing protection"], unexpected_msgs=[f"of slot {last}"], timeout=60):
             n2.setmocktime(slot_time(last))
+        # Back on the clock, it takes in its block of that slot before it makes blocks again (one made on
+        # the block below could leave its block out).
+        n2.setstaking(False)
         n2.setmocktime(0)
         self.connect_to_all(2)
+        self.wait_until(lambda: self.on_chain(n2, own), timeout=120)
+        n2.setstaking(True)
         produced = n2.getstakinginfo()["produced"]
-        self.wait_until(lambda: n2.getstakinginfo()["produced"] > produced, timeout=60)
+        self.wait_until(lambda: n2.getstakinginfo()["produced"] > produced, timeout=120)
         self.wait_in_sync()
         assert_equal(n0.getblock(own)["confirmations"] > 0, True)
         self.assert_no_evidence()
@@ -236,8 +266,10 @@ class FastBlocksRestartTest(SidechainTest):
 
         self.log.info("A validator killed between signing a block and relaying it: restarted, it does not sign that slot again")
         # (Its peers from the start: it may stop before an RPC could connect it.)
-        self.restart_node(1, extra_args=self.validator_args(1) + ["-posfaultaftersign"] + [f"-addnode=127.0.0.1:{p2p_port(i)}" for i in (0, 2, 3)])
-        n1.wait_until_stopped(expected_ret_code=1, timeout=60)
+        # (Not waiting for its RPC: it may stop before one could connect.)
+        self.stop_node(1)
+        n1.start(extra_args=self.validator_args(1) + ["-posfaultaftersign"] + [f"-addnode=127.0.0.1:{p2p_port(i)}" for i in (0, 2, 3)])
+        n1.wait_until_stopped(expected_ret_code=1, timeout=120)
         signed = self.protected_slot(1)
         with open(n1.debug_log_path, encoding="utf-8") as log:
             assert f"the block of slot {signed} is signed; the node stops at once" in log.read()

@@ -18,13 +18,18 @@ Three validators (one key per node) and an observer, against one mainchain node:
   - initial block download: the observer takes in the whole chain, blocks of stake, acknowledgements,
     BMM blocks and the branches, and comes to the same state;
   - after every step, the coins of every node are the mainchain's escrow (pegbalance).
+
+On mock time (every node and the mainchain), moved on a slot at a time once the slot's leaders made
+their blocks (SlotClock): the same slots whatever the load of the machine. (On the clock, a busy
+machine let max_unanchored_slots pass between two anchors, and blocks of stake stopped.)
 """
 
 import os
+import time
 from decimal import Decimal
 
 from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
-from test_framework.fastblocks import KEYS, SLOT, XONLY, PosBlock, assert_peg_balance, stop_bmm
+from test_framework.fastblocks import KEYS, SLOT, XONLY, PosBlock, SlotClock, assert_peg_balance, stop_bmm
 from test_framework.messages import CTxIn
 from test_framework.script import CScript
 from test_framework.util import assert_equal, assert_greater_than, rpc_port
@@ -61,23 +66,64 @@ class FastBlocksPartitionTest(SidechainTest):
 
     def wait_in_sync(self, nodes=None):
         nodes = nodes or self.validators()
-        self.wait_until(lambda: len({n.getbestblockhash() for n in nodes}) == 1, timeout=60)
+        self.wait_until(lambda: len({n.getbestblockhash() for n in nodes}) == 1, timeout=120)
 
     def check_peg(self, nodes=None):
         balance = assert_peg_balance(self.main, nodes or self.validators())
         self.log.debug(f"pegbalance {balance}")
 
-    def wait_slots(self, node, count):
-        slot = node.getposinfo()["slot"]
-        self.wait_until(lambda: node.getposinfo()["slot"] >= slot + count, timeout=count + 30)
 
     def anchor(self, nodes):
         """One more anchor on `nodes`: wait for a merged miner's ticket request, mine it, wait for its acknowledgement."""
         before = [n.getposinfo()["anchors"] for n in nodes]
-        self.wait_until(lambda: len(self.main.getrawmempool()) > 0, timeout=60)
+        self.wait_until(lambda: len(self.main.getrawmempool()) > 0, timeout=120)
         self.mine_main()
-        self.wait_until(lambda: all(n.getposinfo()["anchors"] > b for n, b in zip(nodes, before)), timeout=60)
+        # Acknowledged by the next leader that sees the commitment.
+        self.clock.advance_until(lambda: all(n.getposinfo()["anchors"] > b for n, b in zip(nodes, before)), 40)
         return self.main.getblockcount()
+
+    def validators_back(self):
+        """Anchors until every validator but the banned one has been in the set three epochs on end:
+        those that led slots of the other side's chain during the partition are jailed there a while,
+        and in a set again once an anchor after their jail made one."""
+        n0 = self.nodes[0]
+        payee = n0.getnewaddress()
+        n0.setbmm(True, payee, True, Decimal("0.0001"))
+        since = None
+        for _ in range(60):
+            keys = [n.getstakinginfo()["keys"][0] for n in self.validators()]
+            if all(k["inset"] or k.get("bond", {}).get("banned", False) for k in keys):
+                since = self.clock.slot() if since is None else since
+                if self.clock.slot() - since >= 60:
+                    break
+            else:
+                since = None
+            self.clock.advance(5)
+            if self.main.getrawmempool():
+                self.mine_main()
+        else:
+            raise AssertionError("validators not back in the set")
+        self.stop_bmm(n0)
+        self.wait_in_sync()
+
+    def bid_on_own_side(self, i, other):
+        """Node i's merged miner on, its ticket naming a block of its own side: not one `other` has too
+        (both sides would acknowledge that one). Its merged miner names the block before its tip,
+        unless that is below its last anchor point: a few more slots of its own, if needed."""
+        node = self.nodes[i]
+        payee = node.getaddressinfo(self.ticket_addresses[i])["scriptPubKey"]
+        for _ in range(10):
+            node.setbmm(True, self.ticket_addresses[i], True, Decimal("0.0001"))
+            self.wait_until(lambda: any(t["payee"] == payee and "committedheight" not in t for t in node.getanchorinfo()["tickets"]), timeout=120)
+            self.wait_until(lambda: len(self.main.getrawmempool()) > 0, timeout=120)
+            ticket = next(t for t in node.getanchorinfo()["tickets"] if t["payee"] == payee and "committedheight" not in t)
+            try:
+                other.getblockheader(ticket["anchored"])
+            except Exception:
+                return
+            self.stop_bmm(node)
+            self.clock.advance(4)
+        raise AssertionError(f"node {i}'s tickets name blocks of both sides")
 
     def stop_bmm(self, node):
         stop_bmm(self.main, self.main_address, node, self.nodes)
@@ -108,14 +154,21 @@ class FastBlocksPartitionTest(SidechainTest):
             path = os.path.join(self.options.tmpdir, f"validator{i}.key")
             with open(path, "w") as f:
                 f.write(key.hex() + "\n")
-            self.restart_node(i, extra_args=self.side_args + [f"-validatorkeyfile={path}"])
+        # Mock time from here, a slot at a time: the mainchain's clock first (mining many blocks put its
+        # times ahead).
+        self.clock = SlotClock(self, self.nodes)
+        start = max(int(time.time()), main.getblock(main.getbestblockhash())["time"]) + 5
+        for i, key in enumerate(KEYS):
+            path = os.path.join(self.options.tmpdir, f"validator{i}.key")
+            self.restart_node(i, extra_args=self.side_args + [f"-validatorkeyfile={path}", f"-mocktime={start}"])
         self.connect_validators()
-        self.wait_until(lambda: all(n.getstakinginfo()["produced"] > 0 for n in self.validators()), timeout=120)
+        self.clock.set_time(start)
+        self.clock.advance_until(lambda: all(n.getstakinginfo()["produced"] > 0 for n in self.validators()), 60)
         self.wait_in_sync()
         # Coins for everyone, and anchors.
         for n in (n1, n2):
             txid = n0.sendtoaddress(n.getnewaddress(), 10)
-            self.wait_until(lambda: n0.gettransaction(txid)["confirmations"] > 0, timeout=60)
+            self.clock.advance_until(lambda: n0.gettransaction(txid)["confirmations"] > 0, 30)
         self.ticket_addresses = [n.getnewaddress() for n in self.validators()]
         n0.setbmm(True, self.ticket_addresses[0], True, Decimal("0.0001"))
         self.anchor(self.validators())
@@ -124,6 +177,8 @@ class FastBlocksPartitionTest(SidechainTest):
         self.check_peg()
 
         self.log.info("Equivocation: a leader signs a second block for a slot it made a block of")
+        # Node 0's or node 1's: the one that signs twice is banned, and node 2 is alone on a side below.
+        self.clock.advance_until(lambda: n0.getblock(n0.getbestblockhash()).get("proposer") in XONLY[:2], 30)
         tip = n0.getblock(n0.getbestblockhash())
         assert_equal(tip["kind"], "pos")
         original = PosBlock(n0.getblock(tip["hash"], 0))
@@ -135,7 +190,7 @@ class FastBlocksPartitionTest(SidechainTest):
         # A valid block, on the same parent: the node takes it as a branch, and sees two headers its leader signed for one slot.
         # (Valid, and not on the best chain: "inconclusive".)
         assert_equal(n1.submitblock(rival.serialize().hex()), "inconclusive")
-        self.wait_until(lambda: all(len(n.listevidence()) == 1 for n in self.validators()), timeout=60)
+        self.wait_until(lambda: all(len(n.listevidence()) == 1 for n in self.validators()), timeout=120)
         listed = n2.listevidence()[0]
         assert_equal((listed["pubkey"], listed["slot"]), (tip["proposer"], tip["slot"]))
         assert_equal(sorted(listed["hashes"]), sorted([original.hash, rival.hash]))
@@ -152,15 +207,15 @@ class FastBlocksPartitionTest(SidechainTest):
         # Both sides make blocks of stake, at the slots of their leaders; a payment on each.
         txid_a = n0.sendtoaddress(n0.getnewaddress(), 1)
         txid_b = n2.sendtoaddress(n2.getnewaddress(), 1)
-        self.wait_until(lambda: n0.gettransaction(txid_a)["confirmations"] > 0 and n2.gettransaction(txid_b)["confirmations"] > 0, timeout=60)
-        self.wait_until(lambda: n0.getbestblockhash() != n2.getbestblockhash(), timeout=30)
+        self.clock.advance_until(lambda: n0.gettransaction(txid_a)["confirmations"] > 0 and n2.gettransaction(txid_b)["confirmations"] > 0, 40)
+        self.clock.advance_until(lambda: n0.getbestblockhash() != n2.getbestblockhash(), 20)
         # Side B's anchor is committed first (its ticket names a block of its own side).
-        n2.setbmm(True, self.ticket_addresses[2], True, Decimal("0.0001"))
+        self.bid_on_own_side(2, n0)
         committed_b = self.anchor([n2])
         self.stop_bmm(n2)
         assert_equal(n2.getposinfo()["lastanchormainheight"], committed_b)
-        # Then side A's, which side A acknowledges.
-        n0.setbmm(True, self.ticket_addresses[0], True, Decimal("0.0001"))
+        # Then side A's, which side A acknowledges (its ticket names a block of its own side too).
+        self.bid_on_own_side(0, n2)
         committed_a = self.anchor([n0, n1])
         self.stop_bmm(n0)
         assert_greater_than(committed_a, committed_b)
@@ -191,10 +246,12 @@ class FastBlocksPartitionTest(SidechainTest):
         assert_equal(n0.getblock(fork)["confirmations"] > 0, True)
         assert_equal(n0.getposinfo()["lastanchormainheight"], committed_b)
         # Side A's payment goes back to the mempool, and into a block again.
-        self.wait_until(lambda: n0.gettransaction(txid_a)["confirmations"] > 0, timeout=60)
-        self.wait_until(lambda: n2.gettransaction(txid_b)["confirmations"] > 0, timeout=60)
+        self.clock.advance_until(lambda: n0.gettransaction(txid_a)["confirmations"] > 0, 40)
+        self.clock.advance_until(lambda: n2.gettransaction(txid_b)["confirmations"] > 0, 40)
         self.wait_in_sync()
         self.check_peg()
+
+        self.validators_back()
 
         self.log.info("An anchor of a branch the validators left: nobody can acknowledge it")
         # Node 2 alone on a branch; its merged miner's ticket names a block of that branch; node 2
@@ -203,10 +260,10 @@ class FastBlocksPartitionTest(SidechainTest):
         self.disconnect_nodes(1, 2)
         split_slot = n2.getposinfo()["slot"]
         # Two blocks of its own on its branch, at least: the block before its tip is its own.
-        self.wait_until(lambda: n2.getblock(n2.getblockheader(n2.getbestblockhash())["previousblockhash"]).get("slot", -1) > split_slot + 1, timeout=60)
+        self.clock.advance_until(lambda: n2.getblock(n2.getblockheader(n2.getbestblockhash())["previousblockhash"]).get("slot", -1) > split_slot + 1, 40)
         assert_equal(main.getrawmempool(), [])
         n2.setbmm(True, self.ticket_addresses[2], True, Decimal("0.0001"))
-        self.wait_until(lambda: len(main.getrawmempool()) > 0, timeout=60)
+        self.wait_until(lambda: len(main.getrawmempool()) > 0, timeout=120)
         n2.setstaking(False)
         n2.setbmm(False)
         self.mine_main()
@@ -215,7 +272,7 @@ class FastBlocksPartitionTest(SidechainTest):
         abandoned_ticket = [t for t in n2.getanchorinfo()["tickets"] if t.get("committedheight") == abandoned][0]
         assert_greater_than(n2.getblock(abandoned_ticket["anchored"])["slot"], split_slot)
         # The others' branch is the longer (as many anchors on both): node 2 leaves its own.
-        self.wait_until(lambda: n0.getblockcount() > n2.getblockcount() + 2, timeout=60)
+        self.clock.advance_until(lambda: n0.getblockcount() > n2.getblockcount() + 2, 40)
         assert_equal(n2.getposinfo()["lastanchormainheight"] < abandoned, True)
         self.connect_nodes(0, 2)
         self.connect_nodes(1, 2)
