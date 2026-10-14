@@ -285,7 +285,7 @@ class FastBlocksP2PTest(SidechainTest):
         with n1.assert_debug_log(["bad-pos-sig"]):
             peer.send_without_ping(headers_message(attack))
             peer.wait_for_disconnect()
-        assert_equal(self.side_tips(n1), tips)
+        assert self.side_tips(n1) <= tips, f"new chain tips: {self.side_tips(n1) - tips}"
         assert self.unknown(n1, attack)
 
         self.log.info("Restarted, the sets forgotten and pruned: 70 unsigned acknowledging headers from deep in the chain")
@@ -301,9 +301,10 @@ class FastBlocksP2PTest(SidechainTest):
         peer = n2.add_p2p_connection(FastBlocksPeer())
         with n2.assert_debug_log(["bad-pos-fork-too-deep"]):
             peer.send_and_ping(headers_message(attack))
-        # Refused, not punished (its chain may be another); no new chain tip, no reorg.
+        # Refused, not punished (its chain may be another); no new chain tip, no reorg. (A tip off the
+        # active chain may go meanwhile: the validators go on, and the active chain may take it in.)
         assert peer.is_connected
-        assert_equal(self.side_tips(n2), tips)
+        assert self.side_tips(n2) <= tips, f"new chain tips: {self.side_tips(n2) - tips}"
         assert self.unknown(n2, attack)
         self.wait_in_sync()
         assert_equal(n2.getblockhash(fork["height"] + 1), fork_child)
