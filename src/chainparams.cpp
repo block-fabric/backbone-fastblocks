@@ -149,6 +149,14 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         if (*inbound < 1 || *inbound > 100000) throw std::runtime_error("Invalid -posuncheckedinbound");
         options.pos_unchecked_inbound = *inbound;
     }
+    if (const auto headers{args.GetIntArg("-posuncheckedheaders")}) {
+        if (*headers < 1 || *headers > 100000) throw std::runtime_error("Invalid -posuncheckedheaders");
+        options.pos_unchecked_headers = *headers;
+    }
+    if (const auto bytes{args.GetIntArg("-posuncheckedbytes")}) {
+        if (*bytes < 1 || *bytes > (int64_t{1} << 30)) throw std::runtime_error("Invalid -posuncheckedbytes");
+        options.pos_unchecked_bytes = *bytes;
+    }
     if (const auto lookahead{args.GetIntArg("-posseedlookahead")}) {
         if (*lookahead < 0 || *lookahead > 365 * 24 * 60 * 60) throw std::runtime_error("Invalid -posseedlookahead");
         options.pos_seed_lookahead = *lookahead;

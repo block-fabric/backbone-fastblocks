@@ -171,6 +171,10 @@ public:
         std::optional<int64_t> pos_slot_seconds{};
         //! FastBlocks: the unchecked headers an inbound peer may hold (-posuncheckedinbound; not consensus).
         std::optional<int64_t> pos_unchecked_inbound{};
+        //! FastBlocks: the unchecked headers an outbound peer may hold, and the bytes of their blocks any
+        //! peer may (-posuncheckedheaders, -posuncheckedbytes; not consensus).
+        std::optional<int64_t> pos_unchecked_headers{};
+        std::optional<int64_t> pos_unchecked_bytes{};
     };
 
     struct MainNetOptions {
