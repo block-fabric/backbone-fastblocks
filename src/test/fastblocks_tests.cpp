@@ -21,6 +21,7 @@
 #include <kernel/chainparams.h>
 #include <key.h>
 #include <key_io.h>
+#include <logging.h>
 #include <net.h>
 #include <node/miner.h>
 #include <pos/evidence.h>
@@ -58,6 +59,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <memory>
@@ -4278,6 +4280,89 @@ BOOST_FIXTURE_TEST_CASE(attack_waiting_block_held_by_the_node, FastBlocksSetup)
     BOOST_CHECK_EQUAL(unchecked_after, unchecked_before);
     WITH_LOCK(::cs_main, Chainman().CheckUnchecked());
     params.unchecked_headers_per_peer = per_peer_before;
+}
+
+//
+// Adversarial review 4 (attacks; a failing check is an attack that works).
+//
+
+BOOST_FIXTURE_TEST_CASE(attack4_evicted_proof_relayed_again, FastBlocksSetup)
+{
+    // ATTACK (a single validator, or one that has unbonded: it loses nothing). The evidence pool keeps
+    // MAX_EVIDENCE proofs, the oldest slots go first, and relay has no window: a validator signs two
+    // headers for each of MAX_EVIDENCE + 1 slots it leads (old slots are as good as new ones). Once the
+    // pool is full, the proof of the oldest slot is taken again each time it comes (it is no longer
+    // known, it is added, and it is the one pushed out at once): each time logged as a warning and
+    // relayed to every peer but the sender. Nodes in a cycle send it round for ever.
+    StartPos();
+    const CBlock base{PosBlock(1)};
+    const uint256 attacker{XOnly(keys[0])};
+    std::vector<pos::DoubleProposal> proofs;
+    for (int64_t slot{base_slot + 2}; proofs.size() <= pos::MAX_EVIDENCE && slot < base_slot + 3500; ++slot) {
+        const auto leader{Hooks().ActiveLeaderOf(slot)};
+        if (leader.status != pos::FastBlocksHooks::LeaderStatus::OK || leader.pubkey != attacker) continue;
+        CBlock a{base};
+        a.nTime = pos::SlotTime(slot, Pos());
+        BOOST_REQUIRE(pos::Producer::Sign(a, keys[0], Genesis()));
+        CBlock b{a};
+        b.hashMerkleRoot = ArithToUint256(arith_uint256{static_cast<uint64_t>(slot)});
+        BOOST_REQUIRE(pos::Producer::Sign(b, keys[0], Genesis()));
+        proofs.push_back({.a = a, .b = b});
+    }
+    BOOST_REQUIRE_EQUAL(proofs.size(), pos::MAX_EVIDENCE + 1);
+    std::string reason;
+    for (const auto& proof : proofs) BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof, reason), reason);
+    BOOST_REQUIRE_EQUAL(Hooks().Evidence().Size(), pos::MAX_EVIDENCE);
+    // The oldest one, sent again (by the attacker, or by an honest peer that relays it on).
+    std::atomic<int> taken{0};
+    const auto callback{LogInstance().PushBackCallback([&](const std::string& line) {
+        if (line.find("signed two blocks for slot") != std::string::npos) ++taken;
+    })};
+    for (int i{0}; i < 3; ++i) BOOST_CHECK(Hooks().AddEvidence(proofs[0], reason));
+    LogInstance().DeleteCallback(callback);
+    BOOST_TEST_MESSAGE("the oldest proof, sent 3 times more, was taken as new (logged and relayed) " << taken.load() << " times");
+    BOOST_CHECK_MESSAGE(taken.load() == 0, "attack works: a proof pushed out of the pool is relayed again each time it comes back");
+}
+
+BOOST_AUTO_TEST_CASE(attack4_fresh_node_blames_honest_evidence_relay)
+{
+    // ATTACK (a single validator signs twice; or one that unbonded, for an old slot: at no cost). The
+    // main and test networks start with no validators. A node that does not have the chain yet (a
+    // new node, before its headers) has an inactive set at its tip, and none of the headers' parents:
+    // a true proof, relayed by an honest peer, is "bad-pos-evidence-sig", the honest peer misbehaves
+    // and is disconnected. (Only an unknown set or seed is excused, not an inactive set.)
+    std::vector<unsigned char> message;
+    {
+        // A node with the chain: validators bond, blocks of stake, and the leader signs twice.
+        NoValidatorsSetup node;
+        COutPoint coin;
+        CTxOut spent{node.Fund(COIN, coin)};
+        const CKey& validator{node.keys[0]};
+        node.Accept(node.Pay(coin, spent, {node.BondOut(validator, node.Pos().min_stake, node.Owner(node.key), &node.key, coin)}));
+        node.MineBmm(node.BmmBlock());
+        node.MineBmm(node.BmmBlock(/*use_mempool=*/false));
+        const int64_t epoch{pos::EpochOf(pos::SlotOf(node.Tip()->nTime, node.Pos()), node.Pos()) + 2};
+        const int64_t slot{epoch * node.Pos().slots_per_epoch};
+        Mock(pos::SlotTime(slot, node.Pos()));
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(node.producer->Produce(slot, error), error);
+        CBlock rival{node.Tip()->GetBlockHeader()};
+        rival.hashMerkleRoot = uint256{7};
+        BOOST_REQUIRE(pos::Producer::Sign(rival, validator, node.Genesis()));
+        const pos::DoubleProposal proof{.a = node.Tip()->GetBlockHeader(), .b = rival};
+        std::string reason;
+        BOOST_REQUIRE_MESSAGE(node.Hooks().AddEvidence(proof, reason), reason);
+        DataStream s{};
+        s << proof;
+        message.assign(UCharCast(s.data()), UCharCast(s.data()) + s.size());
+    }
+    // A new node (same network, same time) gets it from an honest peer.
+    NoValidatorsSetup fresh;
+    DataStream recv{message};
+    std::string misbehaving;
+    BOOST_CHECK(fresh.Hooks().ProcessMessage(3, pos::MSG_EVIDENCE, recv, misbehaving));
+    BOOST_TEST_MESSAGE("the new node says of the honest peer that relayed a true proof: '" << misbehaving << "'");
+    BOOST_CHECK_MESSAGE(misbehaving.empty(), "attack works: an honest peer relaying a true proof is punished");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
