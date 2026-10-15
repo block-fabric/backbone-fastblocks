@@ -8,7 +8,7 @@
   import Amount from './Amount.svelte';
   import SafeText from './SafeText.svelte';
   import { css } from '../lib/actions';
-  import { feeTint, fillPercent, intervalTone, shortInterval, type RibbonBlock } from '../lib/blocks';
+  import { BLOCK_WEIGHT, feeTint, fillPercent, intervalTone, shortInterval, type RibbonBlock } from '../lib/blocks';
   import { formatCount, niceTimeOffset } from '../lib/format';
   import { CHAIN } from '../chain/config';
 
@@ -35,7 +35,7 @@
 
   const mainName = CHAIN.mainchain?.name ?? '';
 
-  const fill = $derived(fillPercent(block.weight ?? 0, block.nTx));
+  const fill = $derived(fillPercent(block.weight ?? 0, block.nTx, BLOCK_WEIGHT));
   const tint = $derived(feeTint(block.feeRate));
   const tone = $derived(intervalTone(secs, median));
   const reward = $derived(block.subsidy === null ? null : block.subsidy + (block.fees ?? 0));

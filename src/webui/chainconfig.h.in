@@ -28,6 +28,8 @@ inline constexpr std::string_view TICKER{"@WEBUI_CHAIN_TICKER@"};
 inline constexpr std::string_view COIN_NAME{"@WEBUI_CHAIN_COIN_NAME@"};
 //! The hue the icon of the app is turned by (degrees), before the tint of a test network.
 inline constexpr int ICON_HUE{@WEBUI_CHAIN_ICON_HUE@};
+//! The weight a block of the chain may have, as chain.json says (blockWeight; 0 when it does not).
+inline constexpr unsigned int BLOCK_WEIGHT{@WEBUI_CHAIN_BLOCK_WEIGHT@};
 //! The name of the mainchain (the chain a sidechain is pegged to).
 inline constexpr std::string_view MAINCHAIN_NAME{"@WEBUI_MAINCHAIN_NAME@"};
 

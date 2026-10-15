@@ -1,8 +1,12 @@
 // The block ribbon of the explorer (components/BlockRibbon.svelte, BlockBox.svelte): what a box of a block
 // shows, from the numbers of the node. Apart from the components so that it can be tested on its own.
 
+import { CHAIN } from '../chain/config';
+
 /** The most weight a block of Chains may have (consensus.h CHAINS_MAX_BLOCK_WEIGHT). */
 export const CHAINS_MAX_BLOCK_WEIGHT = 800_000;
+/** The most weight a block of this chain may have (chain.json blockWeight; Chains' by default). */
+export const BLOCK_WEIGHT = CHAIN.blockWeight ?? CHAINS_MAX_BLOCK_WEIGHT;
 /** The pace Chains aims at: a block a minute (nPowTargetSpacing). */
 export const TARGET_SPACING = 60;
 

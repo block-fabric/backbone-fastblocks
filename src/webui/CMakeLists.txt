@@ -17,6 +17,11 @@ string(JSON WEBUI_CHAIN_URI_SCHEME GET "${webui_chain}" uriScheme)
 string(JSON WEBUI_CHAIN_TICKER GET "${webui_chain}" coin ticker)
 string(JSON WEBUI_CHAIN_COIN_NAME GET "${webui_chain}" coin name)
 string(JSON WEBUI_CHAIN_ICON_HUE GET "${webui_chain}" brand iconHue)
+# The weight a block of the chain may have (consensus.max_block_weight), when chain.json says it; 0 otherwise.
+string(JSON WEBUI_CHAIN_BLOCK_WEIGHT ERROR_VARIABLE webui_no_block_weight GET "${webui_chain}" blockWeight)
+if(webui_no_block_weight)
+  set(WEBUI_CHAIN_BLOCK_WEIGHT 0)
+endif()
 if(NOT WEBUI_CHAIN_NAME STREQUAL CLIENT_NAME OR NOT WEBUI_CHAIN_BIN STREQUAL CLIENT_BIN_NAME)
   message(FATAL_ERROR "${webui_chain_json} names the chain ${WEBUI_CHAIN_NAME} (${WEBUI_CHAIN_BIN}), CMakeLists.txt ${CLIENT_NAME} (${CLIENT_BIN_NAME}): "
                       "set the same in both (contrib/sidechain/rename.py does).")

@@ -5,6 +5,7 @@
   "role": "sidechain",
   "coin": { "ticker": "CHN", "name": "Chains" },
   "uriScheme": "sidechain",
+  "blockWeight": 6000000,
   "brand": {
     "color": "#4fa3ff",
     "iconHue": 150,

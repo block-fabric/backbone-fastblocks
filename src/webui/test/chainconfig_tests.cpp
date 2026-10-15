@@ -40,6 +40,8 @@ BOOST_AUTO_TEST_CASE(chain_json_matches_the_node)
             BOOST_CHECK_EQUAL(params->GetDefaultPort(), network.p2p_port);
             BOOST_CHECK_EQUAL(params->Bech32HRP(), std::string{network.hrp});
             BOOST_CHECK_EQUAL(CreateBaseChainParams(*chain)->RPCPort(), network.rpc_port);
+            // The weight its blocks are drawn against (the explorer's boxes) is the chain's.
+            if (webui::chain::BLOCK_WEIGHT) BOOST_CHECK_EQUAL(params->GetConsensus().max_block_weight, webui::chain::BLOCK_WEIGHT);
 #if WEBUI_SIDECHAIN
             BOOST_CHECK(params->GetConsensus().sidechain.enabled);
             BOOST_CHECK_GT(network.mainchain_rpc_port, 0);
