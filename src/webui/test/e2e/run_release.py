@@ -101,18 +101,24 @@ def main():
     digest = hashlib.sha256(args.package.read_bytes()).hexdigest()
     check(failures, "SHA256SUMS names the package with its hash", sums.exists() and f"{digest}  {args.package.name}" in sums.read_text(), sums)
     root = unpack(args.package, base / "unpacked")
-    exe = ".exe" if args.windows else ""
-    bindir = root / "bin"
-    app = bindir / f"{STEM}-app{exe}"
-    expected = [app, bindir / f"{STEM}d{exe}", bindir / f"{STEM}-cli{exe}", root / "COPYING"]
     if args.windows:
-        expected.append(root / "README-windows.txt")
+        # The folder of the installation: the app at the top, the programs of the node in daemon.
+        app = root / f"{STEM}-app.exe"
+        bindir = root / "daemon"
+        exe = ".exe"
+        expected = [app, bindir / f"{STEM}d.exe", bindir / f"{STEM}-cli.exe", root / "COPYING.txt", root / "readme.txt"]
+        setup = args.package.parent / args.package.name.replace(".zip", "-setup.exe")
+        check(failures, "the installer is next to the zip, in SHA256SUMS", setup.exists() and setup.name in sums.read_text(), setup)
     else:
-        expected += [root / f"share/applications/{STEM}-app.desktop", root / "README.md"]
+        bindir = root / "bin"
+        app = bindir / f"{STEM}-app"
+        exe = ""
+        expected = [app, bindir / f"{STEM}d", bindir / f"{STEM}-cli", root / "COPYING", root / f"share/applications/{STEM}-app.desktop", root / "README.md"]
     missing = [str(p.relative_to(root)) for p in expected if not p.exists()]
-    check(failures, "the app, the node, its command line program, the licence (and the desktop entry on Linux) are in it", not missing, missing)
+    check(failures, "the app, the node, its command line program, the licence and the readme (and the desktop entry on Linux) are in it", not missing, missing)
+    del exe
     if not args.windows:
-        icons = list(root.glob(f"share/icons/**/{STEM}-app.*")) + list(root.glob(f"share/pixmaps/{STEM}-app.*"))
+        icons = list(root.glob(f"share/icons/**/{STEM}*.png")) + list(root.glob(f"share/pixmaps/{STEM}*"))
         check(failures, "the icon of the app is in it", bool(icons))
         desktop = (root / f"share/applications/{STEM}-app.desktop").read_text() if (root / f"share/applications/{STEM}-app.desktop").exists() else ""
         check(failures, f"the desktop entry opens {CHAIN['uriScheme']}: links with the app", f"x-scheme-handler/{CHAIN['uriScheme']}" in desktop, desktop[:200])
@@ -159,8 +165,8 @@ def main():
             shutil.copytree(root, folder)
             datadir_win = folder_win + "\\data"
             (folder / "data").mkdir()
-            app_cmd = [str(folder / "bin" / f"{STEM}-app.exe")] + node_args + [f"-datadir={datadir_win}", f"-webuiconfig={folder_win}\\app.json", "-webuiregisteruri=0"]
-            cli_cmd = [str(folder / "bin" / f"{STEM}-cli.exe"), "-regtest", f"-rpcport={args.port + 3}", "-rpcuser=rel", "-rpcpassword=release-test"]
+            app_cmd = [str(folder / f"{STEM}-app.exe")] + node_args + [f"-datadir={datadir_win}", f"-webuiconfig={folder_win}\\app.json", "-webuiregisteruri=0"]
+            cli_cmd = [str(folder / "daemon" / f"{STEM}-cli.exe"), "-regtest", f"-rpcport={args.port + 3}", "-rpcuser=rel", "-rpcpassword=release-test"]
             env = None
             datadir = folder / "data"
         else:
