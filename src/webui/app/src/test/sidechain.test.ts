@@ -292,6 +292,15 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     expect(cells[3].dataset.label).toBe('Amount');
     const css = readFileSync(join(__dirname, '../styles/side.css'), 'utf8');
     expect(css).toMatch(/@container \(max-width: 36rem\)[\s\S]*td\[data-label\]::before/);
+    // As the other long lists (user decision): rows per page and how many of the latest are kept.
+    expect([...(screen.getByLabelText('Rows per page') as HTMLSelectElement).options].map((o) => o.value)).toEqual(['25', '50', '100']);
+    const latest = screen.getByLabelText('How many of the latest deposits') as HTMLSelectElement;
+    expect([...latest.options].map((o) => o.value)).toEqual(['25', '50', '100', '250', '500', '1000', '0']);
+    expect(latest.options[latest.options.length - 1].textContent).toBe('All');
+    await fireEvent.change(latest, { target: { value: '25' } });
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Deposits to this chain' })).getAllByText('yours').length).toBe(2));
+    // Merged mining: a tab of Drivechains, next to Bundle (user decision).
+    expect(screen.getAllByRole('tab').map((x) => x.textContent?.trim().replace(/\d+$/, '').trim())).toEqual(['Deposit', 'Withdraw', 'Bundle', 'Merged mining']);
   });
 
   it('Peg → Withdraw: to an address of the mainchain, confirmed; the withdrawals, the ones of the wallet taken back', async () => {
