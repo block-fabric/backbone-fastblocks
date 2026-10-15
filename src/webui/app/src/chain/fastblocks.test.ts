@@ -390,14 +390,15 @@ describe('the staking income in the history', () => {
 });
 
 describe('the explorer of FastBlocks', () => {
-  it('its columns after the height: kind, slot, producer, finality; no difficulty', async () => {
-    expect(EXPLORER.columns.map((c) => c.label)).toEqual(['Kind', 'Slot', 'Producer', 'Finality']);
-    expect(EXPLORER.hide).toEqual(['difficulty']);
+  it('its columns after the height: kind, slot, producer, mainchain block, finality; no difficulty', async () => {
+    expect(EXPLORER.columns.map((c) => c.label)).toEqual(['Kind', 'Slot', 'Producer', 'Mainchain', 'Finality']);
+    expect([16, 17, 18].map((h) => EXPLORER.columns[3].value(block(h)))).toEqual([undefined, 400, 401]);
+    expect(EXPLORER.hide).toEqual(['difficulty', 'weight']);
     const kind = EXPLORER.columns[0];
     expect([16, 17, 18].map((h) => kind.value(block(h)))).toEqual(['PoS', 'PoW', 'BMM']);
     expect(kind.badge!(block(18))!.tone).toBe('fb-kind-bmm');
     await EXPLORER.refresh!();
-    const finality = EXPLORER.columns[3];
+    const finality = EXPLORER.columns[4];
     expect([15, 17, 19].map((h) => finality.value(block(h)))).toEqual(['final', 'BMM-confirmed', 'soft']);
     // This node's key is "this node".
     expect(EXPLORER.columns[2].value(block(19))).toBe('this node');
@@ -417,7 +418,7 @@ describe('the explorer of FastBlocks', () => {
     render(Explorer);
     await waitFor(() => expect(screen.getAllByText('BMM').length).toBeGreaterThan(0));
     const heads = [...document.querySelectorAll('[role="columnheader"]')].map((h) => h.textContent?.replace(/[▲▼]/g, '').trim());
-    expect(heads.slice(0, 5)).toEqual(['Height', 'Kind', 'Slot', 'Producer', 'Finality']);
+    expect(heads.slice(0, 6)).toEqual(['Height', 'Kind', 'Slot', 'Producer', 'Mainchain', 'Finality']);
     expect(heads).not.toContain('Difficulty');
     expect(screen.getAllByText('PoW').length).toBeGreaterThan(0);
   });

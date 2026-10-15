@@ -61,7 +61,7 @@ export const EXPLORER: ChainExplorer = {
     {
       key: 'kind',
       label: 'Kind',
-      width: '5.5rem',
+      width: '5.2rem',
       value: (b) => kindText(blockKind(b)) || undefined,
       badge: (b) => {
         const kind = blockKind(b);
@@ -71,12 +71,25 @@ export const EXPLORER: ChainExplorer = {
         return undefined;
       },
     },
-    { key: 'slot', label: 'Slot', width: '6.5rem', align: 'end', value: (b) => (typeof b.slot === 'number' ? b.slot : undefined) },
-    { key: 'producer', label: 'Producer', width: '8.5rem', mono: true, value: (b) => producer(b), tip: (b) => (typeof b.proposer === 'string' ? b.proposer : undefined) },
+    { key: 'slot', label: 'Slot', width: '8.5rem', align: 'end', value: (b) => (typeof b.slot === 'number' ? b.slot : undefined) },
+    { key: 'producer', label: 'Producer', width: '7.5rem', mono: true, value: (b) => producer(b), tip: (b) => (typeof b.proposer === 'string' ? b.proposer : undefined) },
+    {
+      key: 'main',
+      label: 'Mainchain',
+      width: '6.2rem',
+      align: 'end',
+      value: (b) => {
+        const kind = blockKind(b);
+        if (kind === 'bmm') return (b.ack as { mainheight?: number } | undefined)?.mainheight;
+        if (kind === 'pow' && typeof b.mainheight === 'number') return b.mainheight;
+        return undefined;
+      },
+      tip: (b) => (blockKind(b) === 'bmm' ? t('The mainchain block whose BMM commitment this BMM block records') : blockKind(b) === 'pow' ? t('The mainchain block that committed to this merged mined block') : undefined),
+    },
     {
       key: 'finality',
       label: 'Finality',
-      width: '8.5rem',
+      width: '8rem',
       value: (b) => {
         const f = finalityOf(b, known);
         return f ? t(f === 'final' ? 'final' : f === 'anchored' ? 'BMM-confirmed' : 'soft') : undefined;
@@ -91,8 +104,9 @@ export const EXPLORER: ChainExplorer = {
       },
     },
   ],
-  // A merged mined sidechain's difficulty is the lowest there is: nothing to read in it.
-  hide: ['difficulty'],
+  // A merged mined sidechain's difficulty is the lowest there is: nothing to read in it; the weight is on the
+  // boxes of the ribbon (the list keeps the size).
+  hide: ['difficulty', 'weight'],
   facts: (b) => {
     const kind = blockKind(b);
     if (!kind) return [];

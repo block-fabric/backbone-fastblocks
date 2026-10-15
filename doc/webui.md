@@ -395,7 +395,9 @@ these too never conflict:
 | `chain/local.ts` `shortcut: 'Alt+6'` | Alt+6 and on open its pages (lib/keyboard.ts), never over the kit's Alt+1 to Alt+5 |
 | `chain.json` `blockWeight` | Not needed: the explorer draws blocks against the weight the node says (`app.info.blockWeight`, `consensus.max_block_weight` of the network); `blockWeight` is only the fallback before it has |
 | `src/webui/test/local_tests.cpp` | The unit tests of local.cpp, built into `test_<stem>-app` when the file is there |
-| `src/webui/test/e2e/local.cmake` | `webui_local_e2e(<name> <port> [options])` for each page script `e2e/<name>.js` of its pages: run by run_sidechain.py (`--script`, `--app-arg`, `--js-var NAME=VALUE`; `window.__E2E_DIR` is the folder of the run) against a live mainchain, as `webui_e2e_<name>` |
+| `src/webui/test/e2e/local.cmake` | `webui_local_e2e(<name> <port> [options])` for each page script `e2e/<name>.js` of its pages: run by run_sidechain.py (`--script`, `--app-arg`, `--js-var NAME=VALUE`; `window.__E2E_DIR` is the folder of the run; `--file NAME=TEXT` a file written there before the app starts, `\n` a new line, `{tmp}` in an `--app-arg` that folder; `--width 700` a narrow window) against a live mainchain, as `webui_e2e_<name>` |
+| `src/chain/explorer.ts` | `EXPLORER`: the explorer's columns of the chain after the height (a value, a badge, a tooltip, from what getblock said of the block), the kit's columns it leaves out (`hide`), facts at the top of a block's details, the tag of a box of the ribbon, and `refresh`, called with each block, for what the columns read besides the blocks. FastBlocks: Kind, Slot, Producer, Mainchain, Finality |
+| `src/chain/roles.ts`, `local::CoinbaseRoles` | What an output of a coinbase of the wallet pays, by the chain's words: the host gives a role per output of a block's coinbase (local.cpp; the history's records carry it), roles.ts its label instead of "Mined", the source of its details and an entry of the type filter. FastBlocks: Staked, BMM reward, Slashing reward |
 
 ```ts
 // chain/local.ts
@@ -403,6 +405,20 @@ export const LOCAL_PAGES = [
   { id: 'names', title: 'Names', icon: 'book', section: 'chain', summary: 'Register names and their records', wallet: true, quick: { label: 'Register a name' } },
 ] as const satisfies readonly LocalPage[];
 ```
+
+#### FastBlocks
+
+FastBlocks' pages (doc/webui-parity.md, section FB) are Staking (Alt+6: This node, Bonds, Validators, Schedule),
+Finality & BMM (Alt+7) and Slashing & jail (Alt+8), with three cards on the home and the explorer's and the
+history's hooks above. `chain/fb/store.svelte.ts` reads the node every 3 s and with each block while one of them is
+shown; `chain/fb/model.ts` works out the rest (tested in `chain/fastblocks.test.ts`). The pages call only read-only
+RPCs (and submitevidence); bonding, unbonding, turning staking off and signing a proof of possession are host
+methods of local.cpp (`fastblocks.bond`, `.unbond`, `.staking`, `.pop`) that ask the desktop first, with the key in
+full, after the passphrase of a locked wallet; `fastblocks.anchoring` says the validator's own BMM bid
+(-validatoranchorbid), which no RPC gives. The UI says "BMM block" (a block of stake that records a BMM
+commitment), "BMM-confirmed" and "BMM reward" where the RPCs and doc/fastblocks.md say anchor and acknowledgement.
+`e2e/fastblocks.js` runs the node as a genesis validator of regtest (`-posvalidators`, a key file with a second key
+to bond to, `-validatoranchorbid`): see `e2e/local.cmake`.
 
 Its own words follow the rules of the kit (`t()` for the app's words; `SafeText` for a name read from
 the chain); its tests go in `src/chain/` too (`*.test.ts` are found anywhere under src). Nothing in

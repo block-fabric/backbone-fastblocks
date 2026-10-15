@@ -102,7 +102,7 @@
 <div class="page fb-page finality">
   <header class="page-head">
     <h1>Finality &amp; BMM</h1>
-    {#if anchors}<span class="muted">{tn('a block is final once %n BMM commitment(s) cover it', anchors.finalanchors)}</span>{/if}
+    {#if anchors}<span class="muted">{tn('a block is final after %n BMM commitment(s)', anchors.finalanchors)}</span>{/if}
   </header>
 
   {#if fb.error}
@@ -120,7 +120,7 @@
     <div class="panel side-stat">
       <span class="muted">Final up to</span>
       <strong class="num">{anchors && anchors.finalheight >= 0 ? t('block %1', formatCount(anchors.finalheight)) : '–'}</strong>
-      <span class="faint">{anchors ? tn('%n BMM commitment(s) make a block final', anchors.finalanchors) : '–'}</span>
+      <span class="faint">{anchors ? tn('final after %n BMM commitment(s)', anchors.finalanchors) : '–'}</span>
     </div>
     <div class="panel side-stat">
       <span class="muted">Waiting for BMM</span>
@@ -134,8 +134,7 @@
     </div>
   </section>
 
-  <div class="side-cols">
-    <section class="panel" aria-labelledby="fb-waiting-title">
+    <section class="panel gap" aria-labelledby="fb-waiting-title">
       <div class="panel-head fb-listbar">
         <h2 id="fb-waiting-title">Blocks waiting for BMM confirmation</h2>
         <label><span class="muted">Latest</span>
@@ -167,38 +166,8 @@
       {/if}
     </section>
 
-    <section class="panel" aria-labelledby="fb-bid-title">
-      <div class="panel-head"><h2 id="fb-bid-title">BMM bids of this node</h2></div>
-      <div class="panel-body side-form">
-        <div class="fb-facts">
-          <div>
-            <span>As a validator (-validatoranchorbid)</span>
-            <strong>{#if anchoring?.on}{t('%1 %2 a mainchain block', anchoring.bid ?? '', CHAIN.mainchain?.ticker ?? '')}{:else if anchoring?.validator}{t('off')}{:else}{t('not a validator')}{/if}</strong>
-          </div>
-          <div>
-            <span>Merged mining (setbmm)</span>
-            <strong>{side.bmm ? (side.bmm.mining ? t('on') : t('off')) : '–'}</strong>
-          </div>
-          <div>
-            <span>The fee pot now</span>
-            <strong>{#if anchors}<Amount sats={coinsToSats(anchors.pot.due)} />{:else}–{/if}</strong>
-          </div>
-        </div>
-        <p class="side-note fb-small">
-          {#if anchoring?.on}
-            {t('This node bids %1 %2 at least for a BMM commitment to its ticket in every mainchain block, whatever the fees; the pot it wins goes to %3. The merged miner, if on, bids instead.', anchoring.bid ?? '', CHAIN.mainchain?.ticker ?? '', anchoring.payee ?? '')}
-          {:else if anchoring?.validator}
-            {t('The validator’s own bidder is off (-validatoranchorbid=0, or on regtest by default; %1 elsewhere). Blocks of stake stop without BMM commitments: someone must bid for them.', anchoring.defaultbid)}
-          {:else}
-            {t('A validator bids for a BMM commitment in every mainchain block (-validatoranchorbid, %1 by default), so that blocks of stake never wait for fees. This node bids only if merged mining is on.', anchoring?.defaultbid ?? '0.00001')}
-          {/if}
-        </p>
-        <div class="row"><button type="button" class="btn small" onclick={() => go('bmm')}><Icon name="merged" size={14} /> Merged mining</button></div>
-      </div>
-    </section>
-  </div>
 
-  <section class="panel" aria-labelledby="fb-bmm-title">
+  <section class="panel gap" aria-labelledby="fb-bmm-title">
     <div class="panel-head fb-listbar">
       <h2 id="fb-bmm-title">Newest BMM blocks</h2>
       <label><span class="muted">Latest</span>
@@ -230,8 +199,7 @@
     {/if}
   </section>
 
-  <div class="side-cols lower">
-    <section class="panel" aria-labelledby="fb-tickets-title">
+    <section class="panel gap" aria-labelledby="fb-tickets-title">
       <div class="panel-head fb-listbar">
         <h2 id="fb-tickets-title">Tickets this node knows</h2>
         <Pager total={tickets.length} bind:page={ticketsPage} bind:size={ticketsSize} sizes={SIZES} label="tickets" />
@@ -257,6 +225,32 @@
       {/if}
     </section>
 
+  <div class="side-cols lower">
+    <section class="panel" aria-labelledby="fb-bid-title">
+      <div class="panel-head"><h2 id="fb-bid-title">BMM bids of this node</h2></div>
+      <div class="panel-body side-form">
+        <div class="fb-facts">
+          <div>
+            <span>As a validator (-validatoranchorbid)</span>
+            <strong>{#if anchoring?.on}{t('%1 %2 a mainchain block', anchoring.bid ?? '', CHAIN.mainchain?.ticker ?? '')}{:else if anchoring?.validator}{t('off')}{:else}{t('not a validator')}{/if}</strong>
+          </div>
+          <div>
+            <span>Merged mining (setbmm)</span>
+            <strong>{side.bmm ? (side.bmm.mining ? t('on') : t('off')) : '–'}</strong>
+          </div>
+        </div>
+        <p class="side-note fb-small">
+          {#if anchoring?.on}
+            {t('This node bids %1 %2 at least for a BMM commitment to its ticket in every mainchain block, whatever the fees; the pot it wins goes to %3. The merged miner, if on, bids instead.', anchoring.bid ?? '', CHAIN.mainchain?.ticker ?? '', anchoring.payee ?? '')}
+          {:else if anchoring?.validator}
+            {t('The validator’s own bidder is off (-validatoranchorbid=0, or on regtest by default; %1 elsewhere). Blocks of stake stop without BMM commitments: someone must bid for them.', anchoring.defaultbid)}
+          {:else}
+            {t('A validator bids for a BMM commitment in every mainchain block (-validatoranchorbid, %1 by default), so that blocks of stake never wait for fees. This node bids only if merged mining is on.', anchoring?.defaultbid ?? '0.00001')}
+          {/if}
+        </p>
+        <div class="row"><button type="button" class="btn small" onclick={() => go('bmm')}><Icon name="merged" size={14} /> Merged mining</button></div>
+      </div>
+    </section>
     <section class="panel" aria-labelledby="fb-pot-title">
       <div class="panel-head"><h2 id="fb-pot-title">The fee pot</h2></div>
       <div class="panel-body side-form">
@@ -287,7 +281,10 @@
     padding: 0 1.1rem 0.6rem;
   }
   .lower {
-    margin-top: 1rem;
+    margin-top: 0;
+  }
+  .gap {
+    margin-bottom: 1rem;
   }
   .plain {
     margin: 0;

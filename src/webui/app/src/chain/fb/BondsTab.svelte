@@ -44,6 +44,8 @@
   let owner = $state('');
   let busy = $state(false);
   let selected = $state<string | null>(null);
+  /** The user typed in the form: what is wrong is said from then on. */
+  let touched = $state(false);
 
   // The key by default: this node's first, so that a validator bonds to itself in one step.
   $effect(() => {
@@ -120,7 +122,7 @@
   <div class="side-cols bonds">
     <section class="panel" aria-labelledby="fb-form-title">
       <div class="panel-head"><h2 id="fb-form-title">Bond and unbond</h2></div>
-      <form class="panel-body side-form" onsubmit={(e) => { e.preventDefault(); submit(); }}>
+      <form class="panel-body side-form" oninput={() => (touched = true)} onsubmit={(e) => { e.preventDefault(); submit(); }}>
         <div class="fb-segments" role="group" aria-label="What to do">
           {#each ACTIONS as a (a.id)}
             <button type="button" aria-pressed={action === a.id} title={t(a.tip)} onclick={() => (action = a.id)}>{t(a.label)}</button>
@@ -166,7 +168,7 @@
             {t('A key takes part with at least %1 bonded. The coins leave this wallet now; unbonding them takes %2 BMM commitments.', String(pos?.staking.minstake ?? '–'), unbondingAnchors)}
           {/if}
         </p>
-        {#if problem && (key || amount !== null)}<p class="fb-error fb-small" role="alert">{problem}</p>{/if}
+        {#if problem && touched}<p class="fb-error fb-small" role="alert">{problem}</p>{/if}
         <div class="row">
           <button type="submit" class="btn primary" id="fb-bond-submit" disabled={!!problem || busy}>
             <Icon name={action === 'unbond' || action === 'unbondAll' ? 'up' : 'lock'} size={15} /> {t(ACTIONS.find((a) => a.id === action)?.label ?? 'Bond')}
@@ -183,7 +185,7 @@
       {:else}
         <div class="side-table-wrap">
           <table class="side-table" use:stacked aria-label="Bonds of this wallet">
-            <thead><tr><th>Key</th><th class="end">Bonded</th><th class="end">Unbonding</th><th>State</th></tr></thead>
+            <thead><tr><th>Key</th><th class="end">Bonded</th><th class="end">Unbonding</th><th>State</th><th>Owner</th></tr></thead>
             <tbody>
               {#each bonds as b (b.validator)}
                 {@const st = validatorState(b, b.inset, pos?.epoch ?? 0)}
@@ -195,15 +197,13 @@
                     {#if b.unbonds.length && pos}<span class="faint fb-small"><br />{t('paid at commitment %1 (now %2)', formatCount(Math.min(...b.unbonds.map((u) => u.releaseanchor))), formatCount(pos.anchors))}</span>{/if}
                   </td>
                   <td><span class="status {stateTone(st)}" title={stateTip(st)}>{stateText(st, b)}</span></td>
+                  <td class="cut mono fb-small" title={b.owner}><span translate="no">{b.owner}</span></td>
                 </tr>
               {/each}
             </tbody>
           </table>
         </div>
-        <p class="side-note fb-small pad">Owner of each bond: the address of this wallet that alone may add to it or unbond it, and is paid what is unbonded.</p>
-        <ul class="owners">
-          {#each bonds as b (b.validator)}<li><span class="faint fb-small">{t('owner')}</span> <span class="mono fb-small" translate="no">{b.owner}</span> <CopyButton text={b.owner} label="Copy the address" /></li>{/each}
-        </ul>
+        <p class="side-note fb-small pad">The owner of a bond is the address of this wallet that alone may add to it or unbond it, and is paid what is unbonded.</p>
       {/if}
     </section>
   </div>
@@ -243,25 +243,10 @@
 
 <style>
   .pad {
-    padding: 0.6rem 0.8rem 0.2rem;
+    padding: 0.6rem 0.8rem 0.9rem;
   }
   tbody tr {
     cursor: pointer;
-  }
-  .owners {
-    margin: 0;
-    padding: 0.2rem 0.8rem 0.9rem;
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-  .owners li {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    min-width: 0;
-    overflow-wrap: anywhere;
   }
   .pop-row {
     display: flex;

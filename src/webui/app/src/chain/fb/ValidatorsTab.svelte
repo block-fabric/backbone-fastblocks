@@ -165,8 +165,15 @@
 
 <style>
   .stepper input {
-    width: 7rem;
+    width: 13ch;
+    font-variant-numeric: tabular-nums;
+    appearance: textfield;
     text-align: center;
+  }
+  .stepper input::-webkit-inner-spin-button,
+  .stepper input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
   }
   .flip {
     display: inline-flex;

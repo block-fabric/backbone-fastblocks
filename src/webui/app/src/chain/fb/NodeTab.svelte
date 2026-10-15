@@ -76,9 +76,13 @@
             </li>
           {/each}
         </ul>
+        {#if staking.payout}
+          <div class="field">
+            <span class="label" title={t("Where the producer's share of the fees of this node's blocks of stake goes: -validatorpayout, else an address of the node's wallet, else the first validator key's own address")}>Fees paid to</span>
+            <div class="side-code"><span class="mono" translate="no">{staking.payout}</span><CopyButton text={staking.payout} label="Copy the address" /></div>
+          </div>
+        {/if}
         <dl class="fb-pairs">
-          <dt>Fees paid to</dt>
-          <dd>{#if staking.payout}<span class="mono" translate="no">{staking.payout}</span> <CopyButton text={staking.payout} label="Copy the address" />{:else}–{/if}</dd>
           <dt>Blocks made today</dt><dd class="num">{formatCount(staking.blocksmadesince ?? 0)}</dd>
           <dt>Blocks made on the active chain</dt><dd class="num">{formatCount(staking.blocksmade)}</dd>
           <dt>Since the node started</dt><dd class="num">{tn('%n block(s), %1 of them BMM blocks', staking.produced, formatCount(staking.acknowledgements))}</dd>

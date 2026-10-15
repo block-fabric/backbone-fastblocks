@@ -17,6 +17,8 @@
   import { fb } from './store.svelte';
 
   const SIZES = [25, 50, 100];
+  /** When a slot starts, to the second (slots are seconds apart on regtest, 30 s on the networks). */
+  const clockTime = (secs: number) => `${formatTime(secs, true)}:${String(new Date(secs * 1000).getSeconds()).padStart(2, '0')}`;
   /** How many epochs the overview reads, back from the next one (each is a call of the node). */
   const EPOCH_POINTS = [5, 10, 25, 50, 100];
 
@@ -115,7 +117,8 @@
   {:else}
     <div class="panel-body">
       <div class="fb-facts">
-        <div><span>Slots</span><strong class="num">{formatCount(read.slots[0]?.slot ?? 0)}–{formatCount(read.slots[read.slots.length - 1]?.slot ?? 0)}</strong></div>
+        <div><span>First slot</span><strong class="num">{formatCount(read.slots[0]?.slot ?? 0)}</strong></div>
+        <div><span>Slots</span><strong class="num">{formatCount(read.slots.length)}</strong></div>
         <div><span>Starts</span><strong>{read.slots[0] ? formatTime(read.slots[0].time) : '–'}</strong></div>
         <div><span>This node leads</span><strong class="num">{formatCount(led)}</strong></div>
         <div><span>Led by nobody</span><strong class="num">{formatCount(nobody)}</strong></div>
@@ -137,7 +140,7 @@
             {#each shown as s (s.slot)}
               <tr class:chosen={s.slot === pos?.slot}>
                 <td class="end num">{formatCount(s.slot)}</td>
-                <td>{formatTime(s.time)}</td>
+                <td class="num">{clockTime(s.time)}</td>
                 <td>
                   {#if s.leader}<Key key={s.leader} mine={localKeys.has(s.leader)} />
                   {:else if s.banned}<span class="faint">{t('nobody: its leader is banned')}</span> <span class="mono fb-small" title={s.banned} translate="no">{s.banned.slice(0, 10)}…</span>
@@ -194,8 +197,15 @@
 
 <style>
   .stepper input {
-    width: 7rem;
+    width: 13ch;
+    font-variant-numeric: tabular-nums;
+    appearance: textfield;
     text-align: center;
+  }
+  .stepper input::-webkit-inner-spin-button,
+  .stepper input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
   }
   .flip {
     display: inline-flex;

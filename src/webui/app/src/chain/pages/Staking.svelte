@@ -79,7 +79,7 @@
     <p class="side-note side-warn" role="status">No blocks of stake lately: merged mined blocks carry the transactions.</p>
   {/if}
 
-  <section class="side-stats" aria-label="This node as a validator">
+  <section class="side-stats five" aria-label="This node as a validator">
     <div class="panel side-stat">
       <span class="muted">This node</span>
       <strong><span class="status {tone}" id="fb-node-state">{nodeStateText(state)}</span></strong>
