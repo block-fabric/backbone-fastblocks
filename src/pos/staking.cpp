@@ -156,6 +156,20 @@ StakeState GetStakeState(const sidechain::StoreView& view) { return STAKE_STATE.
 
 std::optional<ValidatorRecord> GetValidator(const sidechain::StoreView& view, const uint256& pubkey) { return VALIDATORS.Get(view, pubkey); }
 
+std::vector<sidechain::StoreBytes> ValidatorRuleKeys(const CTransaction& tx)
+{
+    // (ApplyTx reads the stake totals too, but refuses nothing for them; nor for the height.)
+    std::vector<sidechain::StoreBytes> keys;
+    for (const CTxOut& txout : tx.vout) {
+        if (const auto bond{IsBondScript(txout.scriptPubKey) ? ParseBond(txout) : std::nullopt}) {
+            keys.push_back(sidechain::TableKey(VALIDATORS.Id(), bond->pubkey));
+        } else if (const auto unbond{IsUnbondScript(txout.scriptPubKey) ? ParseUnbond(txout) : std::nullopt}) {
+            keys.push_back(sidechain::TableKey(VALIDATORS.Id(), unbond->pubkey));
+        }
+    }
+    return keys;
+}
+
 void ForEachValidator(const sidechain::StoreView& view, const std::function<bool(const uint256&, const ValidatorRecord&)>& fn) { VALIDATORS.ForEach(view, fn); }
 
 std::optional<AnchorSet> GetAnchorSet(const sidechain::StoreView& view, const uint256& anchor) { return ANCHOR_SETS.Get(view, anchor); }

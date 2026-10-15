@@ -579,6 +579,16 @@ unbonding.
 A smaller bond than `min_stake` is taken, but the key takes part only with
 `min_stake` bonded (a genesis validator whatever it bonds).
 
+**In the mempool.** A bond or an unbond is checked against the tip when it
+enters the mempool, and again when a block changed the record of a validator it
+names (template hooks `HasTxRules`, `TxRuleKeys`: those records alone decide):
+one no block would take any more leaves the mempool. At most 500 a change of
+the tip, the rest at the next ones. Rechecking them all at every block, under
+`cs_main`, cost an ECDSA recovery and a BIP340 check per bond in the mempool,
+and bonds of a satoshi are valid: 104 ms for 2000, about 11 s a block for a
+mempool of 300 MB of them (review 5 of audit 6, attack 2,
+`attack5_mempool_staking_recheck_per_block`).
+
 **Validator sets.** Each anchor (the block that takes the peg actions: an
 acknowledgement or a BMM block) makes a set from the state as it is then: the
 eligible validators (not banned, enough stake, not jailed), the

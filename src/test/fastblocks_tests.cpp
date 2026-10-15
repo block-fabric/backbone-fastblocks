@@ -3998,6 +3998,68 @@ BOOST_FIXTURE_TEST_CASE(mempool_drops_stale_staking_txs, FastBlocksSetup)
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(mempool_staking_rechecks_bounded_per_tip, FastBlocksSetup)
+{
+    // The mempool checks a bond or an unbond again only when a block changed the record of the
+    // validator it names (TxRuleKeys), and MAX_RULE_CHECKS_PER_TIP at most at each change of the tip,
+    // the rest at the next ones: a block costs the work of what it changed, bounded, however many
+    // such transactions anyone put in the mempool. Here unbonds of one validator, all signed with
+    // the same sequence: a block takes one, and the others, void then, leave over two blocks.
+    StartPos();
+    const size_t N{MAX_RULE_CHECKS_PER_TIP + 100};
+    constexpr CAmount EACH{30000};
+    COutPoint coin, bonded;
+    CTxOut spent{Fund(COIN, coin)};
+    CTxOut spent_bond{Fund(COIN, bonded)};
+    CKey validator, bystander;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    bystander.MakeNewKey(/*fCompressed=*/true);
+    const CAmount min{Pos().min_stake};
+    std::vector<CTxOut> outs(N + 1, CTxOut{EACH, script});
+    outs.emplace_back(spent.nValue - (N + 1) * EACH - 200000, script);
+    const CMutableTransaction split{Spend(coin, spent, outs)};
+    Accept(split);
+    Accept(Pay(bonded, spent_bond, {BondOut(validator, 3 * min, Owner(key), &key, bonded)}));
+    // (After the blocks of the deposits.)
+    Take(PosBlock(10));
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), 0U);
+    // A bond of another key, whose record no block changes while it waits: not checked again.
+    const COutPoint last{split.GetHash(), static_cast<uint32_t>(N)};
+    const CMutableTransaction other_bond{Spend(last, outs[N], {BondOut(bystander, 1, Owner(key), &key, last), CTxOut{EACH - 1 - TX_FEE, script}})};
+    Accept(other_bond);
+    const uint32_t sequence{Validator(XOnly(validator))->unbond_seq};
+    for (size_t i{0}; i < N; ++i) {
+        const COutPoint in{split.GetHash(), static_cast<uint32_t>(i)};
+        Accept(Spend(in, outs[i], {UnbondOut(validator, min, sequence, key), CTxOut{EACH - TX_FEE, script}}));
+    }
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), N + 1);
+    {
+        LOCK(m_node.mempool->cs);
+        BOOST_CHECK_EQUAL(m_node.mempool->m_rule_keys_of.size(), N + 1);
+        BOOST_CHECK_EQUAL(m_node.mempool->m_rule_txs.size(), 2U);
+        BOOST_CHECK(m_node.mempool->m_rule_txs_any.empty());
+    }
+    // Nothing changed: nothing checked again.
+    {
+        LOCK2(::cs_main, m_node.mempool->cs);
+        Chain().RemoveStaleDrivechainTxs();
+        BOOST_CHECK(m_node.mempool->m_rule_checks.empty());
+    }
+    // A block takes one unbond (and the other bond, if it likes): the other unbonds are void,
+    // MAX_RULE_CHECKS_PER_TIP of them leave now ...
+    const CBlock block{PosBlock(11)};
+    Take(block);
+    BOOST_CHECK_EQUAL(Validator(XOnly(validator))->unbond_seq, sequence + 1);
+    const bool other_mined{std::any_of(block.vtx.begin(), block.vtx.end(), [&](const CTransactionRef& tx) { return tx->GetHash() == other_bond.GetHash(); })};
+    const size_t left{N - 1 - MAX_RULE_CHECKS_PER_TIP};
+    BOOST_CHECK_EQUAL(m_node.mempool->size(), left + (other_mined ? 0 : 1));
+    BOOST_CHECK_EQUAL(WITH_LOCK(m_node.mempool->cs, return m_node.mempool->m_rule_checks.size()), left);
+    // ... the rest at the next block.
+    Take(PosBlock(12));
+    BOOST_CHECK_EQUAL(m_node.mempool->size(), 0U);
+    BOOST_CHECK(WITH_LOCK(m_node.mempool->cs, return m_node.mempool->m_rule_checks.empty()));
+}
+
 #ifdef ENABLE_WALLET
 BOOST_FIXTURE_TEST_CASE(wallet_finality_on_its_own_chain, FastBlocksSetup)
 {

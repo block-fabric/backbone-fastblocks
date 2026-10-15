@@ -114,6 +114,11 @@ struct Liveness {
 
 StakeState GetStakeState(const sidechain::StoreView& view);
 std::optional<ValidatorRecord> GetValidator(const sidechain::StoreView& view, const uint256& pubkey);
+/**
+ * The keys of the state whose values alone decide whether the staking rules take a transaction
+ * (Staking::ApplyTx): the records of the validators its bonds and unbonds name.
+ */
+std::vector<sidechain::StoreBytes> ValidatorRuleKeys(const CTransaction& tx);
 /** Every validator in the state, by key, until `fn` returns false. */
 void ForEachValidator(const sidechain::StoreView& view, const std::function<bool(const uint256&, const ValidatorRecord&)>& fn);
 /** The validator set an anchor (the block that took the peg actions) made, if the state has it. */

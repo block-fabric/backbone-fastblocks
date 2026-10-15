@@ -651,6 +651,8 @@ bool FastBlocksHooks::ApplyTx(sidechain::State& state, const CTransaction& tx, i
     return m_staking.ApplyTx(state.Writable(), tx, height, FAST_STATE.Get(state.View()).anchors, reject_reason);
 }
 
+std::optional<std::vector<std::vector<unsigned char>>> FastBlocksHooks::TxRuleKeys(const CTransaction& tx) const { return ValidatorRuleKeys(tx); }
+
 bool FastBlocksHooks::HasTxRules(const CTransaction& tx) const
 {
     return std::any_of(tx.vout.begin(), tx.vout.end(), [](const CTxOut& out) { return IsBondScript(out.scriptPubKey) || IsUnbondScript(out.scriptPubKey); });

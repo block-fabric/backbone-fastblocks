@@ -238,6 +238,8 @@ public:
     bool ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const override;
     //! Bonds and unbonds.
     bool HasTxRules(const CTransaction& tx) const override;
+    //! The records of the validators they name (ValidatorRuleKeys).
+    std::optional<std::vector<std::vector<unsigned char>>> TxRuleKeys(const CTransaction& tx) const override;
     bool AfterBlock(sidechain::State& state, const CBlock& block, int height, const std::optional<sidechain::PegStep>& step, CAmount minted,
                     const Consensus::SidechainParams& params, std::string& reject_reason) const override EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex, !m_acks_mutex);
 
