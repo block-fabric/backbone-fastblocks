@@ -6,6 +6,20 @@ needs: blind merged mining, deposits from the mainchain and withdrawals to it.
 Copy it to make a sidechain. See [doc/sidechain.md](doc/sidechain.md) for how it
 works, how to try it, and how to make your own.
 
+Its GUI is `sidechain-app`: the node and its wallet with an HTML interface in a
+native web view (WebKitGTK on Linux, WebView2 on Windows), taken over from
+`chains-app`, the GUI of the mainchain. There is no Qt GUI. The app has the
+pages every sidechain needs (wallet, peg, merged mining, explorer, node window,
+settings); a sidechain adds its own, see [doc/webui.md](doc/webui.md).
+
+```sh
+sudo apt install build-essential cmake pkgconf python3 libevent-dev libboost-dev \
+    libsqlite3-dev libzmq3-dev libgtk-3-dev libwebkit2gtk-4.1-dev nodejs npm
+cmake -B build              # -DBUILD_WEBUI=OFF for a node without a window
+cmake --build build -j$(nproc)
+build/bin/sidechain-app -regtest
+```
+
 It is derived from the Chains mainchain, which is derived from Bitcoin Core;
 the rest of this file is from there.
 

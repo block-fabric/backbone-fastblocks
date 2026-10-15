@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Chains
+GenericName=Chains node and wallet
+Comment=The node of Chains, with its wallet and its sidechains, in one program
+Exec=chains-app %u
+Icon=chains
+Terminal=false
+Categories=Office;Finance;Network;
+MimeType=x-scheme-handler/chains;
+StartupWMClass=chains-app
