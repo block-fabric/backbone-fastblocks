@@ -5599,4 +5599,96 @@ BOOST_FIXTURE_TEST_CASE(attack7_seed_moved_beyond_the_kept_epochs, SeedSetup)
     BOOST_CHECK_MESSAGE(running == fresh, "attack works: a mainchain reorg moving the seed of an epoch older than the three kept splits a running node from a fresh one");
 }
 
+BOOST_FIXTURE_TEST_CASE(seed_moved_then_a_block_before_the_check, SeedSetup)
+{
+    // As attack7_seed_moved_beyond_the_kept_epochs, but a block of stake comes after the mainchain
+    // reorg and before the follower's check (CheckSeeds). Taken, it would note the new seed of its
+    // epoch over the old one, and the check, which stops at the first epoch whose seed has not moved,
+    // would not see the older one that did: so it waits (pos-seed-moved, a failure against the record,
+    // not the peer's fault) until the check has connected the blocks from the moved epoch again, and is
+    // connected then. The state is that of a node that takes the chain in afresh.
+    StartPos();
+    const int64_t spe{Pos().slots_per_epoch};
+    const int64_t e1{pos::EpochOf(base_slot, Pos()) + 1};
+    const int64_t e2{e1 + 1};
+    const int64_t e5{e2 + 3};
+    const auto at{[&](int64_t slot) { return static_cast<int>(slot - base_slot); }};
+    Slot(at(e1 * spe) + 1);
+    Main();
+    Take(PosBlock(at(e1 * spe) + 2));
+    Slot(at(e2 * spe) + 1);
+    Main();
+    Take(PosBlock(at(e2 * spe) + 7));
+    CBlockIndex* first{WITH_LOCK(::cs_main, return Chain().m_chain.Tip())};
+    for (int64_t e{e2 + 1}; e <= e5; ++e) {
+        Slot(at(e * spe) + 1);
+        Main();
+    }
+    Take(PosBlock(at(e5 * spe) + 2));
+    Hooks().CheckSeeds();
+    const CBlock late{PosBlock(at(e5 * spe) + 4)};
+    const int64_t late_slot{pos::SlotOf(late.nTime, Pos())};
+    using Snapshot = std::map<uint256, pos::Liveness>;
+    const auto liveness{[&]() {
+        Snapshot snapshot;
+        LOCK(::cs_main);
+        for (const CKey& k : keys) {
+            if (const auto l{pos::GetLiveness(Chain().SideState().View(), e2, XOnly(k))}) snapshot[XOnly(k)] = *l;
+        }
+        return snapshot;
+    }};
+    const Snapshot original{liveness()};
+    const auto leaders{[&]() {
+        std::vector<uint256> keys_of;
+        LOCK(::cs_main);
+        for (int64_t slot{e2 * spe}; slot <= e2 * spe + 7; ++slot) keys_of.push_back(Hooks().LeaderOf(*first->pprev, slot).pubkey);
+        const CBlockIndex* tip{Chain().m_chain.Tip()};
+        keys_of.push_back(Hooks().LeaderOf(*tip->pprev, pos::SlotOf(tip->nTime, Pos())).pubkey);
+        keys_of.push_back(Hooks().LeaderOf(*tip, late_slot).pubkey);
+        return keys_of;
+    }};
+    const std::vector<uint256> before{leaders()};
+    const auto seed_height{pos::SeedHeight(e2, Pos(), Record())};
+    BOOST_REQUIRE(seed_height && *seed_height > 0);
+    // The mainchain reorg (the same commitments): the block of e2 and the late block keep their
+    // leaders (so does the block of e5 before it), a slot of e2 the block skipped has another.
+    std::vector<sidechain::MainBlock> replaced;
+    bool found{false};
+    for (int salt{1}; salt < 1000 && !found; ++salt) {
+        replaced = Record().Truncate(*seed_height - 1);
+        for (sidechain::MainBlock main : replaced) {
+            main.prev_hash = Record().TipHash();
+            main.hash = ArithToUint256(UintToArith256(main.hash) + salt);
+            BOOST_REQUIRE(Record().Append(main));
+        }
+        const std::vector<uint256> after{leaders()};
+        found = after[7] == before[7] && after[8] == before[8] && after[9] == before[9] && !std::equal(after.begin(), after.begin() + 7, before.begin());
+        if (!found) {
+            Record().Truncate(*seed_height - 1);
+            for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+        }
+    }
+    BOOST_REQUIRE(found);
+    const CBlockIndex* last{Tip()};
+    // Before the check: the late block waits, through no fault of its peer's.
+    Submit(late);
+    BOOST_CHECK(Tip() == last);
+    BOOST_CHECK_EQUAL(Reason(late), "pos-seed-moved");
+    BOOST_CHECK(Chainman().m_mainchain->GetFailure(late.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+    // The check: the blocks from e2 on connected again, the late block with them.
+    Hooks().CheckSeeds();
+    BOOST_CHECK_MESSAGE(Tip()->GetBlockHash() == late.GetHash(), "the late block is not connected after the check: " << Reason(late));
+    const Snapshot running{liveness()};
+    BOOST_CHECK(running != original);
+    // As a node that takes the chain in afresh connects it.
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, first, /*by_record=*/true));
+        WITH_LOCK(::cs_main, Chain().ReconsiderRecordFailure(first));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    BOOST_CHECK(Tip()->GetBlockHash() == late.GetHash());
+    BOOST_CHECK(liveness() == running);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

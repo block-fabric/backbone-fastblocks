@@ -238,6 +238,7 @@ Every block (state):
 | Rule | Reason |
 |---|---|
 | A PoS block is signed by the leader of its slot, as the chain below it and the record say when it is connected (its header may have come before the node knew the epoch's set; the record may have moved the seed since) | `bad-pos-sig`, `bad-pos-inactive`, `pos-seed-unknown`, `bad-pos-set-unknown` (a set the state no longer has) |
+| The seeds the chain below a PoS block read (of the last block of stake's epoch, so of all: see Seed) are the record's: else a mainchain reorg moved them, and the blocks from the moved epoch are connected again first (a failure against the record, given back then; not the peer's fault) | `pos-seed-moved` |
 | A PoS block's leader is not banned in the state of the chain below it: from the block after the one that banned it, a banned validator leads no more, and its slots stay empty | `bad-pos-leader-banned` |
 | A PoS block's producer keeps at most 50 % of its fees: all the coinbase but the payouts and the pot ≤ 50 % of that and the pot | `bad-pos-producer-share` |
 | A PoS block comes less than `max_unanchored_slots` after the first PoS block no anchor covers | `bad-pos-unanchored` |
@@ -667,8 +668,21 @@ stake of an epoch whose seed moved are connected again from its start, those
 whose leader did not change too: the leaders they charged for empty slots (and
 so the jailing, and the sets made after) are the new seed's. Which seeds moved
 is told by the chain's state: each block of stake notes the seeds it read (of
-its epoch, and of the slots it charged; table `0x5e`, the last three epochs),
-and the check compares them with the record's. So a node that restarts, or
+its epoch, and of the slots it charged; table `0x5e`, every epoch: one entry an
+epoch with blocks of stake), and the check compares them with the record's,
+newest first, down to the first that has not moved: the seeds before it have
+not either (its seed block is the same block, so the record is the same up to
+it, and an earlier epoch's seed block is at or below it, told by that same
+part of the record). So the check reaches as deep as the reorg, and costs one
+look a mainchain tip when nothing moved. For that, the seeds of a state are
+those of one record: a block of stake that comes after a reorg moved the seeds
+the chain below it read, before the check, waits (`pos-seed-moved`, a failure
+against the record) and is connected with the blocks the check connects again
+(`seed_moved_then_a_block_before_the_check`). (Until review 7, only the last
+three epochs were kept: a reorg reaching an older seed, about 40 minutes back on
+testnet, went unseen by running nodes, while a node that takes the chain in
+afresh read the new seed: two states of the epoch, its jailing and later sets;
+`attack7_seed_moved_beyond_the_kept_epochs`.) So a node that restarts, or
 whose record moved while it was down, finds the same as one that saw the reorg
 come (a copy in memory of an earlier check, as before, saw no change after a
 restart, and kept the old seed's state: review of audit 6, the check of seed
@@ -1539,6 +1553,24 @@ design: "Headers and blocks the node cannot check yet".)
   `slot_spare_header_taken_on_a_branch`, and the template's
   `spare_headers_only_on_a_branch` (taken with a header on top, gone with its
   peer, kept for good once connected).
+
+### Review 7 (2026-10-15)
+
+Three attacks worked; each fixed at its root (tests in `fastblocks_tests.cpp`):
+
+- **A spare header sent again** cost three signature checks a copy, unblamed
+  (audit 6 review, item 15). A header found spare has no signature checked: it
+  can change nothing (see "Headers of a slot").
+  `attack7_spare_header_replayed_costs_signatures`.
+- **A header of an early slot** made the node walk the whole chain under
+  `cs_main` before `time-too-old` turned it away (`HeaderCheckable` read its
+  leader first): the time is looked at first.
+  `attack7_early_slot_header_walks_the_chain`.
+- **A mainchain reorg reaching a seed more than three epochs back** split
+  running nodes from fresh ones (item 16): the seeds of every epoch are kept,
+  checked newest first down to the first unmoved, and a block that comes between
+  a reorg and the check waits (`pos-seed-moved`; see Seed).
+  `attack7_seed_moved_beyond_the_kept_epochs`, `seed_moved_then_a_block_before_the_check`.
 
 ## Deviations from the design (phase 5)
 

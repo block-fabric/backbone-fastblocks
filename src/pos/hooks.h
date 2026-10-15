@@ -374,8 +374,10 @@ public:
     /**
      * Blocks of stake on the active chain whose leader the record no longer agrees with (a mainchain
      * reorg moved the seed of their epoch): taken back, as blocks that lost their commitment are; and
-     * those taken back so whose leader it agrees with again, given back. Once per mainchain tip, in the
-     * follower's round.
+     * those taken back so whose leader it agrees with again, given back; and the blocks of stake from the
+     * start of the oldest epoch whose seed, as the chain's state says its blocks read it, the record
+     * moved, connected again. Newest first, down to the first epoch whose seed has not moved (doc/fastblocks.md,
+     * "Seed"). Once per mainchain tip, in the follower's round.
      */
     void CheckSeeds() const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
     /** Block index entries the walks for validator sets (SetFor) passed, since the hooks were made (the work done: tests). */
