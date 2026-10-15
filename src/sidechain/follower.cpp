@@ -255,10 +255,11 @@ bool Follower::UpdateRecord(bool may_drop)
                 const std::vector<MainBlock> removed{record.Truncate(common)};
                 LogInfo("The mainchain dropped %d blocks above height %d", removed.size(), common);
                 LOCK(m_mutex);
-                for (const MainBlock& block : removed) {
+                for (size_t i{0}; i < removed.size(); ++i) {
+                    const MainBlock& block{removed[i]};
                     // A block the mainchain committed to twice keeps its first commitment, below the
                     // blocks dropped: dropping the second one changes nothing for it.
-                    if (block.bmm && !record.CommittedHeight(*block.bmm)) m_uncommitted.push_back(*block.bmm);
+                    if (block.bmm && !record.CommittedHeight(*block.bmm)) m_uncommitted.emplace_back(*block.bmm, common + 1 + static_cast<int>(i));
                 }
                 changed = true;
                 continue;
@@ -405,7 +406,8 @@ void Follower::CheckSlot(bool record_changed)
 void Follower::Act()
 {
     ChainstateManager& chainman{*m_node.chainman};
-    std::vector<uint256> uncommitted, committed;
+    std::vector<std::pair<uint256, int>> uncommitted;
+    std::vector<uint256> committed;
     std::vector<std::shared_ptr<const CBlock>> to_submit;
     {
         LOCK(m_mutex);
@@ -433,9 +435,10 @@ void Follower::Act()
     // That includes a block whose commitment moved to another mainchain block in the same update:
     // what the mainchain did before its commitment may differ now, so it is checked again, from the
     // list of committed blocks below.
-    // (The blocks that rest on a commitment: the block of that hash, in the template.)
-    for (const uint256& commitment : uncommitted) {
-        for (const uint256& hash : Hooks().BlocksCommittedBy(commitment)) {
+    // (The blocks that rest on a commitment: the block of that hash, in the template. Found from the
+    // height the commitment had, whatever the hooks keep in memory.)
+    for (const auto& [commitment, main_height] : uncommitted) {
+        for (const uint256& hash : Hooks().BlocksCommittedBy(commitment, main_height)) {
             if (!WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(hash))) continue;
             LogInfo("Block %s lost its commitment on the mainchain", hash.ToString());
             // (By hash: an unchecked header may leave the block index as soon as cs_main is released,
@@ -447,7 +450,7 @@ void Follower::Act()
     {
         LOCK(::cs_main);
         for (const uint256& commitment : committed) {
-            for (const uint256& hash : Hooks().BlocksCommittedBy(commitment)) {
+            for (const uint256& hash : Hooks().BlocksCommittedBy(commitment, chainman.m_mainchain->CommittedHeight(commitment))) {
                 CBlockIndex* pindex{chainman.m_blockman.LookupBlockIndex(hash)};
                 // Only a failure that depended on the record: not that of a block that broke a rule
                 // whatever the mainchain did, nor one the operator marked invalid.
@@ -590,7 +593,8 @@ bool Follower::CatchingUp() const
         const auto bmm{record.BmmAt(height)};
         if (!bmm) continue;
         const CBlockIndex* pindex{nullptr};
-        for (const uint256& hash : Hooks().BlocksCommittedBy(*bmm)) {
+        // (What the hooks noted is enough here: a block not found is one not caught up with.)
+        for (const uint256& hash : Hooks().BlocksCommittedBy(*bmm, std::nullopt)) {
             if ((pindex = chainman.m_blockman.LookupBlockIndex(hash))) break;
         }
         if (!pindex) {

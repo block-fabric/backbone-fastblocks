@@ -254,8 +254,14 @@ public:
      * default the block's own. A block that needs none is valid whatever commitments come and go.
      */
     virtual std::optional<uint256> CommitmentOf(const CBlockIndex& index) const;
-    /** The blocks whose validity rests on a commitment to `commitment`; by default the block of that hash. */
-    virtual std::vector<uint256> BlocksCommittedBy(const uint256& commitment) const;
+    /**
+     * The blocks whose validity rests on a commitment to `commitment`; by default the block of that hash.
+     * `main_height`: the height of the mainchain block that has, or had (dropped), the commitment, if
+     * known. The blocks that matter -- those of the active chain, and those that failed against the
+     * record -- are found whatever a sidechain keeps in memory: an attacker who pushes noted entries
+     * out must not keep a block on a commitment the mainchain dropped while other nodes take it back.
+     */
+    virtual std::vector<uint256> BlocksCommittedBy(const uint256& commitment, std::optional<int> main_height) const;
 
     //
     // Peg actions (sidechain/state.cpp)

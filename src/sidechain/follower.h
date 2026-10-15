@@ -194,7 +194,8 @@ private:
     bool m_woken GUARDED_BY(m_mutex){false};
     Status m_status GUARDED_BY(m_mutex);
     //! Sidechain blocks that lost, respectively gained, their commitment, and are still to be acted on.
-    std::vector<uint256> m_uncommitted GUARDED_BY(m_mutex);
+    //! (Those that lost it, with the height of the mainchain block that had it.)
+    std::vector<std::pair<uint256, int>> m_uncommitted GUARDED_BY(m_mutex);
     std::vector<uint256> m_committed GUARDED_BY(m_mutex);
     std::map<uint256, Candidate> m_candidates GUARDED_BY(m_mutex);
     //! The candidate of the last round of mining that asked for none (Mine): dropped at the next such round.

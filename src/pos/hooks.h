@@ -264,7 +264,7 @@ public:
     arith_uint256 ChainWork(const CBlockIndex* prev, const CBlockHeader& header) const override;
 
     std::optional<uint256> CommitmentOf(const CBlockIndex& index) const override EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
-    std::vector<uint256> BlocksCommittedBy(const uint256& commitment) const override EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
+    std::vector<uint256> BlocksCommittedBy(const uint256& commitment, std::optional<int> main_height) const override EXCLUSIVE_LOCKS_REQUIRED(!m_acks_mutex);
 
     bool GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& step, std::string& reject_reason) const override;
     bool RefundsOnlyInPegSteps() const override { return true; }

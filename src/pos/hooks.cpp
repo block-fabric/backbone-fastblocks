@@ -529,8 +529,9 @@ void FastBlocksHooks::NoteAck(const uint256& block_hash, const AnchorAck& ack) c
     m_anchored_by.emplace(block_hash, ack.ticket.anchored);
     m_acks_by_commitment[commitment].insert(block_hash);
     m_ack_order.emplace_back(block_hash, commitment);
-    // Bounded: the oldest go first (a commitment so old is not dropped by the mainchain any more; and
-    // CommitmentOf reads a block from disk when it has to).
+    // Bounded: the oldest go first. A cache only: CommitmentOf reads a block from disk when it has to,
+    // and BlocksCommittedBy finds the blocks that matter from the chain, so a flood that pushes the
+    // entries that count out changes nothing but speed.
     while (m_ack_order.size() > MAX_NOTED_ACKS) {
         const auto& [old_block, old_commitment] = m_ack_order.front();
         m_ack_of.erase(old_block);
@@ -599,12 +600,47 @@ std::optional<uint256> FastBlocksHooks::CommitmentOf(const CBlockIndex& index) c
     return index.GetBlockHash();
 }
 
-std::vector<uint256> FastBlocksHooks::BlocksCommittedBy(const uint256& commitment) const
+std::vector<uint256> FastBlocksHooks::BlocksCommittedBy(const uint256& commitment, std::optional<int> main_height) const
 {
     std::vector<uint256> blocks{commitment};
+    std::set<uint256> seen{commitment};
+    const auto add{[&](const uint256& hash) {
+        if (seen.insert(hash).second) blocks.push_back(hash);
+    }};
+    ChainstateManager* chainman{Chainman()};
+    // The blocks that matter, from the chain (the acknowledgements noted in memory are bounded, and a
+    // leader can sign blocks enough to push them all out: attack8_acks_pushed_out_still_taken_back).
+    // Those of the active chain, which the node would keep on an anchor the mainchain dropped; and those
+    // that failed against the record, which it would not take back when the commitment returns. Any
+    // other block is checked against the record when it is connected.
+    if (chainman && main_height && *main_height > 0) {
+        LOCK(::cs_main);
+        // On the active chain, the acknowledgements and BMM blocks are in the order of the mainchain
+        // (bad-pos-ack-order, bmm-order), and a block acknowledges the commitment at the height of its
+        // nNonce: from the tip down, to the first block committed below that height.
+        for (const CBlockIndex* index{chainman->ActiveChain().Tip()}; index && index->nHeight > 0; index = index->pprev) {
+            if (!index->m_ext) {
+                const auto bmm_height{chainman->m_mainchain ? chainman->m_mainchain->CommittedHeight(index->GetBlockHash()) : std::nullopt};
+                if (bmm_height && *bmm_height < *main_height) break;
+                continue;
+            }
+            if (index->nNonce == 0) continue;
+            if (static_cast<int64_t>(index->nNonce) < *main_height) break;
+            if (CommitmentOf(*index) == commitment) add(index->GetBlockHash());
+        }
+        // Those that failed against the record (each cost a commitment: few), whatever height the
+        // commitment has now.
+        if (chainman->m_mainchain) {
+            for (const uint256& hash : chainman->m_mainchain->RecordFailures()) {
+                const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(hash)};
+                if (index && index->m_ext && index->nNonce != 0 && CommitmentOf(*index) == commitment) add(hash);
+            }
+        }
+    }
+    // And the others noted: blocks that read and that the leader of their slot signed.
     LOCK(m_acks_mutex);
     if (const auto found{m_acks_by_commitment.find(commitment)}; found != m_acks_by_commitment.end()) {
-        blocks.insert(blocks.end(), found->second.begin(), found->second.end());
+        for (const uint256& hash : found->second) add(hash);
     }
     return blocks;
 }
@@ -1272,7 +1308,7 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
         // A block that acknowledged it failed when the record lost the commitment, and the follower is
         // about to give it back now that the record has it again: acknowledging it here too would only
         // fork the chain (both branches with the same anchor; the longer wins).
-        const auto acked{BlocksCommittedBy(ticket.Hash())};
+        const auto acked{BlocksCommittedBy(ticket.Hash(), *committed)};
         if (std::any_of(acked.begin() + 1, acked.end(), [&](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
                 const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(hash)};
                 return index && (index->nStatus & BLOCK_FAILED_VALID) && record.GetFailure(hash) == sidechain::Mainchain::Failure::RECORD;

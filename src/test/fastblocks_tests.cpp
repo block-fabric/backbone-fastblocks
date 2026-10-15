@@ -998,7 +998,7 @@ BOOST_FIXTURE_TEST_CASE(acknowledgements, FastBlocksSetup)
     BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Chain().SideState().MainHeight()), ack.main_height - 1);
     // The block rests on the commitment to the ticket.
     BOOST_CHECK(Hooks().CommitmentOf(*Tip()) == ack.ticket.Hash());
-    const auto resting{Hooks().BlocksCommittedBy(ack.ticket.Hash())};
+    const auto resting{Hooks().BlocksCommittedBy(ack.ticket.Hash(), ack.main_height)};
     BOOST_CHECK(std::find(resting.begin(), resting.end(), acked.GetHash()) != resting.end());
 
     // In the order of the mainchain: not the same commitment again, nor an older one.
@@ -1623,13 +1623,13 @@ BOOST_FIXTURE_TEST_CASE(acks_noted_only_when_signed, FastBlocksSetup)
     forged.ext.sig[5] ^= 1;
     BlockValidationState state;
     BOOST_CHECK(Hooks().CheckBlock(forged, state));
-    auto resting{Hooks().BlocksCommittedBy(ack.ticket.Hash())};
+    auto resting{Hooks().BlocksCommittedBy(ack.ticket.Hash(), ack.main_height)};
     BOOST_CHECK(std::find(resting.begin(), resting.end(), forged.GetHash()) == resting.end());
     // The header rules turn it away.
     BOOST_CHECK_EQUAL(Check(forged), "bad-pos-sig");
     const CBlock signed_block{PosBlock(2, ack)};
     BOOST_CHECK(Hooks().CheckBlock(signed_block, state));
-    resting = Hooks().BlocksCommittedBy(ack.ticket.Hash());
+    resting = Hooks().BlocksCommittedBy(ack.ticket.Hash(), ack.main_height);
     BOOST_CHECK(std::find(resting.begin(), resting.end(), signed_block.GetHash()) != resting.end());
 }
 
@@ -5689,6 +5689,71 @@ BOOST_FIXTURE_TEST_CASE(seed_moved_then_a_block_before_the_check, SeedSetup)
     }
     BOOST_CHECK(Tip()->GetBlockHash() == late.GetHash());
     BOOST_CHECK(liveness() == running);
+}
+
+
+BOOST_FIXTURE_TEST_CASE(attack8_acks_pushed_out_still_taken_back, FastBlocksSetup)
+{
+    // ATTACK (one validator key, a current or a former one). The blocks that rest on a commitment were
+    // found only in the acknowledgements noted in memory, MAX_NOTED_ACKS of them, the oldest dropped
+    // first; and a block is noted when it reads and its slot's leader signed it, before its header is
+    // checked. A leader signs as many blocks of its slot as it likes, each acknowledging a commitment
+    // nobody made: the acknowledgements that count are pushed out. When the mainchain then drops the
+    // commitment to a ticket, the node finds no block resting on it and keeps the block that
+    // acknowledged it (an anchor that no longer exists), while the nodes that were not flooded take it
+    // back: a split. The blocks resting on a commitment come from the chain itself, whatever is noted.
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck ack{AckTip(2)};
+    const uint256 commitment{ack.ticket.Hash()};
+    const uint256 acked{Tip()->GetBlockHash()};
+    Take(PosBlock(3));
+    const auto resting{[&] { return Hooks().BlocksCommittedBy(commitment, ack.main_height); }};
+    {
+        const auto blocks{resting()};
+        BOOST_REQUIRE(std::find(blocks.begin(), blocks.end(), acked) != blocks.end());
+    }
+
+    // The flood: blocks of slot 4 on the tip, signed by its leader, each acknowledging nothing on record.
+    const CBlock base{PosBlock(4)};
+    const CKey& leader{Leader(pos::SlotOf(base.nTime, Pos()))};
+    uint64_t salt{0};
+    const auto flood{[&] {
+        CBlock block{base};
+        for (size_t n{0}; n <= pos::MAX_NOTED_ACKS; ++n) {
+            pos::PosSections sections;
+            sections.ack = pos::AnchorAck{.ticket = Ticket(ArithToUint256(arith_uint256{++salt} << 64), script), .main_height = 1000000 + static_cast<int>(n)};
+            block.vSections = sections.Encode();
+            block.nNonce = static_cast<uint32_t>(sections.ack->main_height);
+            block.ext.hashSections = pos::SectionsHash(block.vSections);
+            BOOST_REQUIRE(pos::Producer::Sign(block, leader, Genesis()));
+            BlockValidationState state;
+            BOOST_REQUIRE(Hooks().CheckBlock(block, state));
+        }
+    }};
+    flood();
+
+    // The mainchain drops the commitment; the follower takes back what rests on it.
+    Record().Truncate(ack.main_height - 1);
+    for (const uint256& hash : resting()) {
+        if (!Index(hash)) continue;
+        BlockValidationState state;
+        Chain().InvalidateBlock(state, hash, /*by_record=*/true);
+    }
+    BOOST_CHECK_MESSAGE(!WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*Index(acked))),
+                        "attack works: the block that acknowledged a dropped commitment stays on the chain");
+    // And it comes back with its commitment, though pushed out again meanwhile.
+    flood();
+    Commit(commitment);
+    {
+        LOCK(::cs_main);
+        for (const uint256& hash : resting()) {
+            if (CBlockIndex* index{Chainman().m_blockman.LookupBlockIndex(hash)}) Chain().ReconsiderRecordFailure(index);
+        }
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*Index(acked))));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

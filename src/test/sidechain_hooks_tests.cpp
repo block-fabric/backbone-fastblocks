@@ -350,7 +350,7 @@ BOOST_AUTO_TEST_CASE(template_defaults)
     CBlockIndex index{plain};
     index.phashBlock = &hash;
     BOOST_CHECK(hooks.CommitmentOf(index) == hash);
-    BOOST_CHECK(hooks.BlocksCommittedBy(uint256{9}) == std::vector<uint256>{uint256{9}});
+    BOOST_CHECK(hooks.BlocksCommittedBy(uint256{9}, 5) == std::vector<uint256>{uint256{9}});
 
     // No kinds of blocks of its own, no rules of its own, no messages of its own.
     BlockValidationState state;

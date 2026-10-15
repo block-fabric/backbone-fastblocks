@@ -1010,7 +1010,12 @@ Every FastBlocks functional test checks this on every node after every step
   header of more work alone does not stop it (a leader can sign a header that
   claims an acknowledgement and keep its block).
 - Acknowledgements are noted (to find the blocks that rest on a commitment the
-  mainchain drops) only from blocks signed by the leader of their slot.
+  mainchain drops) only from blocks signed by the leader of their slot. What is
+  noted is a bounded cache (`MAX_NOTED_ACKS`, oldest out first): the blocks that
+  matter are found from the chain (`BlocksCommittedBy`, given the mainchain
+  height the commitment had): on the active chain, the block whose nNonce is
+  that height, from the tip down; and the blocks that failed against the record.
+  Any other block is checked against the record when it is connected.
 - The slots signed are kept in `<key file>.protection`, next to the key file
   (as is the lock, `<key file>.lock`): wiping the data directory to sync again
   keeps the key, and so must keep what it signed. The `validator_protection.dat`
@@ -1571,6 +1576,19 @@ Three attacks worked; each fixed at its root (tests in `fastblocks_tests.cpp`):
   checked newest first down to the first unmoved, and a block that comes between
   a reorg and the check waits (`pos-seed-moved`; see Seed).
   `attack7_seed_moved_beyond_the_kept_epochs`, `seed_moved_then_a_block_before_the_check`.
+- **Noted acknowledgements pushed out** (the security review's open lead). The
+  blocks resting on a commitment were found only among the acknowledgements
+  noted in memory (20000, oldest out first), noted from any block that reads and
+  that its slot's leader signed, before its header is checked. One validator
+  key (a current or a former one) signs 20001 blocks of one of its slots, each
+  acknowledging nothing on record: when the mainchain then drops a ticket's
+  commitment, the flooded node keeps the block that acknowledged it (an anchor
+  that no longer exists) while the others take it back, and does not take back
+  a block that failed when the commitment returns. Now `BlocksCommittedBy` is
+  given the mainchain height the commitment had (the follower knows the height
+  of each block it drops) and finds the blocks of the active chain and those
+  that failed against the record from the chain; the noted ones are a cache.
+  `attack8_acks_pushed_out_still_taken_back`.
 
 ## Deviations from the design (phase 5)
 
