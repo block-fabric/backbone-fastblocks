@@ -1632,6 +1632,19 @@ The security review of the attack8 fix found two issues in `BlocksCommittedBy`
   commitment within `MOVED_CHECK_DEPTH` of the record's tip goes, with all
   above it. `feature_sidechain_record.py` ("the block on it committed to again
   below it").
+- **A lead, confirmed: the peg step was read before the signature.**
+  `State::ConnectBlock` reads the record (`GetPegStep`, then the peg actions)
+  before `AfterBlock` checks the leader's signature. A header taken unchecked
+  (the node catching up) with a forged signature -- anyone's to make, the hash
+  does not cover it -- whose block acknowledges, at the height of a commitment
+  on record, a ticket nobody committed failed `bmm-unknown`: a failure against
+  the record, written to disk for the block, instead of the copy's extension
+  failure (in memory, the header asked for again). Now the signature is checked
+  first (`ChainHooks::CheckExtension`, against the state before the block),
+  where that state knows the leader; `AfterBlock` still checks it against the
+  state after, which knows no other leader, so no block it took fails.
+  `review8_forged_signature_failing_against_the_record`. Plain sidechains have
+  no signature in their blocks: nothing to check first.
 
 ## Deviations from the design (phase 5)
 

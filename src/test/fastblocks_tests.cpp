@@ -5861,4 +5861,54 @@ BOOST_FIXTURE_TEST_CASE(review8_blocks_committed_by_reads_only_the_candidates, F
     BOOST_CHECK_LE(FloodPushedOut(flood), 1U);
 }
 
+BOOST_FIXTURE_TEST_CASE(review8_forged_signature_failing_against_the_record, FastBlocksSetup)
+{
+    // REVIEW 8 (a lead, confirmed): the peg step (GetPegStep) was read before the signature was
+    // checked (AfterBlock). A header taken unchecked, with a forged signature (anyone's to make: the
+    // block hash does not cover it), whose block acknowledges a ticket the record does not commit to,
+    // failed bmm-unknown: against the record, noted on disk for the block. It is the copy's failure,
+    // that of its signature (an extension failure, in memory): checked first (CheckExtension).
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    const CBlock anchor{PosBlock(2, ack)};
+    Take(anchor);
+    const int64_t epoch{pos::EpochOf(pos::SlotOf(anchor.nTime, Pos()), Pos())};
+    const int last{static_cast<int>((epoch + 2) * Pos().slots_per_epoch - base_slot)};
+    // A commitment on record, to something else, at the height the block acknowledges.
+    Commit(uint256{0xc0});
+    const int other{Record().Height()};
+    const CBlock honest{WithAck(PosBlock(last), pos::AnchorAck{.ticket = Ticket(anchor.GetHash(), script), .main_height = other})};
+    CBlock forged{honest};
+    forged.ext.sig.fill(0);
+    // The node as it was before it connected the anchor: the anchor taken back, its set forgotten.
+    CBlockIndex* anchor_index{Index(anchor.GetHash())};
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, anchor_index));
+        LOCK(::cs_main);
+        Chain().ResetBlockFailureFlags(anchor_index);
+        Chainman().RecalculateBestHeader();
+    }
+    Hooks().ForgetKnownSets();
+    BOOST_REQUIRE(Tip() == anchor_index->pprev);
+    BOOST_REQUIRE_EQUAL(HeaderReason({forged}), "");
+    const CBlockIndex* index{Index(honest.GetHash())};
+    BOOST_REQUIRE(index);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return index->m_unchecked));
+    // The forged block, once the anchor is connected: it fails for its signature.
+    Submit(forged);
+    BOOST_CHECK(Tip() == anchor_index);
+    BOOST_CHECK_EQUAL(Reason(forged), "bad-pos-sig");
+    BOOST_CHECK(WITH_LOCK(::cs_main, return Chainman().UncheckedExtensionFailed(*index)));
+    BOOST_CHECK(Record().GetFailure(honest.GetHash()) != sidechain::Mainchain::Failure::RECORD);
+    // The honest header replaces it; with it, the block fails against the record.
+    BOOST_CHECK_EQUAL(HeaderReason({honest}), "");
+    BlockValidationState state;
+    Chain().ActivateBestChain(state);
+    BOOST_CHECK(Tip() == anchor_index);
+    BOOST_CHECK_EQUAL(Reason(honest), "bmm-unknown");
+    BOOST_CHECK(Record().GetFailure(honest.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -658,6 +658,24 @@ std::vector<uint256> FastBlocksHooks::BlocksCommittedBy(const uint256& commitmen
     return blocks;
 }
 
+bool FastBlocksHooks::CheckExtension(const sidechain::State& state, const CBlock& block, std::string& reject_reason) const
+{
+    if (!IsPosHeader(block)) return true;
+    ChainstateManager* chainman{Chainman()};
+    if (!chainman) return true;
+    LOCK(::cs_main);
+    const CBlockIndex* prev{chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+    if (!prev) return true;
+    // Signed by the leader of its slot, before the record is read (GetPegStep): a forged signature is
+    // the copy's failure (ExtensionFailure), not the block's against the record. Only where the state
+    // before the block knows the leader; AfterBlock checks again with the state after it, which knows
+    // no other leader (a block adds the set of its own anchor, which leads no slot of its own epoch,
+    // and prunes only sets no later slot needs): this fails no block AfterBlock would take.
+    const SlotLeader leader{LeaderOf(*prev, SlotOf(block.nTime, m_params), &state.View())};
+    if (leader.status == LeaderStatus::OK && !CheckBlockSig(block, leader.pubkey, Genesis())) return Fail(reject_reason, "bad-pos-sig");
+    return true;
+}
+
 bool FastBlocksHooks::GetPegStep(const CBlock& block, const sidechain::Mainchain& mainchain, std::optional<sidechain::PegStep>& step, std::string& reject_reason) const
 {
     if (!IsPosHeader(block)) return ChainHooks::GetPegStep(block, mainchain, step, reject_reason);
