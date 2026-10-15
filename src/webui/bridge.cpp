@@ -4,6 +4,8 @@
 
 #include <webui/bridge.h>
 
+#include <algorithm>
+
 #include <logging.h>
 #include <support/cleanse.h>
 #include <tinyformat.h>
@@ -154,6 +156,18 @@ void Bridge::SetRpcPolicy(RpcPolicy policy)
     m_rpc_policy = std::move(policy);
 }
 
+void Bridge::OpenTestRpc()
+{
+    LOCK(m_mutex);
+    m_test_rpc = true;
+}
+
+std::vector<std::string> Bridge::Refused() const
+{
+    LOCK(m_mutex);
+    return m_refused;
+}
+
 void Bridge::RegisterHost(const std::string& name, HostFn fn, Thread thread)
 {
     LOCK(m_mutex);
@@ -234,7 +248,11 @@ void Bridge::Handle(const std::string& call_id, const std::string& args_json)
         return;
     }
 
-    if (kind.get_str() != "rpc" && kind.get_str() != "host") {
+    if (kind.get_str() == "testrpc" && !WITH_LOCK(m_mutex, return m_test_rpc)) {
+        ReplyError(*request, BRIDGE_INVALID_REQUEST, "Unknown kind of request: testrpc");
+        return;
+    }
+    if (kind.get_str() != "rpc" && kind.get_str() != "host" && kind.get_str() != "testrpc") {
         ReplyError(*request, BRIDGE_INVALID_REQUEST, strprintf("Unknown kind of request: %s", kind.get_str()));
         return;
     }
@@ -282,7 +300,8 @@ void Bridge::Handle(const std::string& call_id, const std::string& args_json)
 
 void Bridge::Run(const std::shared_ptr<Request>& request, const UniValue& body)
 {
-    const bool rpc{body.find_value("kind").get_str() == "rpc"};
+    const bool test_rpc{body.find_value("kind").get_str() == "testrpc"};
+    const bool rpc{test_rpc || body.find_value("kind").get_str() == "rpc"};
     const std::string method{body.find_value("method").get_str()};
     auto params{std::make_shared<UniValue>(body.find_value("params").isNull() ? UniValue{UniValue::VARR} : body.find_value("params"))};
     const std::string uri{body.find_value("wallet").isStr() ? WalletUri(body.find_value("wallet").get_str()) : "/"};
@@ -296,9 +315,15 @@ void Bridge::Run(const std::shared_ptr<Request>& request, const UniValue& body)
             LOCK(m_mutex);
             policy = m_rpc_policy;
         }
-        if (policy) {
+        if (test_rpc) {
+            thread = Thread::LONG;
+        } else if (policy) {
             const std::optional<Thread> lane{policy(method)};
             if (!lane) {
+                {
+                    LOCK(m_mutex);
+                    if (std::ranges::find(m_refused, method) == m_refused.end() && m_refused.size() < 100) m_refused.push_back(method);
+                }
                 ReplyError(*request, BRIDGE_METHOD_NOT_FOUND, strprintf("The interface does not call %s (use the console)", method));
                 Finish(request);
                 return;

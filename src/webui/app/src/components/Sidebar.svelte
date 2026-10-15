@@ -447,8 +447,11 @@
     align-items: center;
   }
   .look {
-    flex: 1;
-    min-width: 6.5rem;
+    /* As wide as its longest theme ("Matrix Green", "Classic Dark"), on the next line when the row has no room
+       for it beside the menus (audit port-1 #11: it was cut to "Matrix Gr"). */
+    flex: 1 0 auto;
+    min-width: 0;
+    max-width: 100%;
     width: auto;
     min-height: 1.9rem;
     padding-block: 0.15rem;

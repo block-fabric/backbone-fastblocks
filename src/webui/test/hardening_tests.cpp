@@ -180,6 +180,28 @@ BOOST_AUTO_TEST_CASE(page_rpc_policy)
     BOOST_CHECK_EQUAL(error["code"].getInt<int>(), webui::BRIDGE_METHOD_NOT_FOUND);
     BOOST_CHECK_EQUAL(ran.load(), 1);
     BOOST_CHECK_EQUAL(bridge.Pending(), 0U);
+    // What the policy refused is kept, once each (test.refused: the e2e runs fail on it).
+    bridge.Handle("no2", Call("rpc", "backupwallet"));
+    answers.Wait("no2");
+    BOOST_CHECK(bridge.Refused() == std::vector<std::string>{"backupwallet"});
+
+    // Audit port-1 #5: a test script sets the node up with "testrpc", past the policy, and only once opened
+    // (a test build with a test script); the pages' "rpc" keeps to the policy all the same.
+    bridge.Handle("t1", Call("testrpc", "backupwallet"));
+    const auto closed{answers.Wait("t1")};
+    BOOST_CHECK_EQUAL(closed.first, 1);
+    BOOST_REQUIRE(error.read(closed.second));
+    BOOST_CHECK_EQUAL(error["code"].getInt<int>(), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(ran.load(), 1);
+    bridge.OpenTestRpc();
+    bridge.Handle("t2", Call("testrpc", "backupwallet"));
+    BOOST_CHECK_EQUAL(answers.Wait("t2").first, 0);
+    BOOST_CHECK_EQUAL(ran.load(), 2);
+    bridge.Handle("t3", Call("rpc", "dumpwallet"));
+    BOOST_CHECK_EQUAL(answers.Wait("t3").first, 1);
+    BOOST_CHECK_EQUAL(ran.load(), 2);
+    BOOST_CHECK(bridge.Refused() == (std::vector<std::string>{"backupwallet", "dumpwallet"}));
+
     // The list is sorted and has no duplicates (PageRpcMethods is what the frontend test reads).
     const auto methods{webui::PageRpcMethods()};
     BOOST_CHECK(std::is_sorted(methods.begin(), methods.end()));

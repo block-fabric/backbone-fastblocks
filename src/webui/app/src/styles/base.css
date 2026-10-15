@@ -11,6 +11,12 @@ html {
   -webkit-text-size-adjust: 100%;
 }
 
+/* Text from the chain, peers or the user (SafeText, translate="no") is isolated as to direction: a mark
+   that turns text around inside it stays inside it (audit port-1 #2). */
+[translate='no'] {
+  unicode-bidi: isolate;
+}
+
 html,
 body {
   margin: 0;

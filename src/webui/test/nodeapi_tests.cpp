@@ -19,6 +19,7 @@
 #include <webui/appconfig.h>
 #include <webui/bridge.h>
 #include <webui/console.h>
+#include <webui/guard.h>
 #include <webui/nodeapi.h>
 #include <webui/options.h>
 #include <webui/sidechainnodes.h>
@@ -184,12 +185,98 @@ BOOST_AUTO_TEST_CASE(console_on_a_node)
     BOOST_CHECK(!r["ok"].get_bool());
 }
 
+BOOST_AUTO_TEST_CASE(console_asks_the_desktop_first)
+{
+    // Audit port-1 #3: the page may call console.run with any line. A command that does more than read
+    // waits for a confirmation of the desktop, named in it; declined, it does not run.
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    auto node{interfaces::MakeNode(m_node)};
+    std::vector<webui::Window::ConfirmDialog> asked;
+    bool answer{false};
+    webui::NodeApi api{[&]() -> interfaces::Node& { return *node; }, [](const std::string&) { return false; }, [&](const webui::Window::ConfirmDialog& d) {
+        asked.push_back(d);
+        return answer;
+    }};
+    const auto run{[&](const std::string& line, const std::string& wallet = {}) {
+        UniValue params{UniValue::VOBJ};
+        params.pushKV("line", line);
+        if (!wallet.empty()) params.pushKV("wallet", wallet);
+        return api.Call("console.run", params);
+    }};
+
+    // Reading runs at once, nested too.
+    BOOST_CHECK_EQUAL(run("getblock(getbestblockhash())[height]")["result"].get_str(), "100");
+    BOOST_CHECK_EQUAL(run("help getblockcount")["ok"].get_bool(), true);
+    BOOST_CHECK(asked.empty());
+
+    // A command that changes the node: asked, declined, not run.
+    const int tip{WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height())};
+    UniValue r{run("generatetodescriptor 1 \"raw(51)\"")};
+    BOOST_CHECK(!r["ok"].get_bool());
+    BOOST_CHECK_EQUAL(r["error"].get_str(), "generatetodescriptor was not run: it was declined (code -1)");
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height()), tip);
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK_EQUAL(asked[0].title, "Run a command of the console");
+    BOOST_CHECK(asked[0].message.starts_with("Command: generatetodescriptor\n\n"));
+    BOOST_CHECK_EQUAL(asked[0].accept, "Run");
+
+    // Inside a reading one, it is asked too; accepted, it runs, and is asked once for the line.
+    asked.clear();
+    answer = true;
+    r = run("echo(setban(1.2.3.4, add), setban(1.2.3.5, add))");
+    BOOST_CHECK_MESSAGE(r["ok"].get_bool(), r.write());
+    BOOST_CHECK(run("listbanned")["result"].get_str().find("1.2.3.5/32") != std::string::npos);
+    BOOST_CHECK_EQUAL(asked.size(), 1U);
+
+    // The wallet is named in the dialog on one line; marks that turn text around are spaces there.
+    asked.clear();
+    answer = false;
+    run("stop", "evil\nCommand: getblockcount\xe2\x80\xae" "");
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK(asked[0].message.starts_with("Command: stop\n\n"));
+    BOOST_CHECK(asked[0].message.find("on the wallet \"evil Command: getblockcount\"") != std::string::npos);
+
+    // Commands that can show private keys are asked even though they read.
+    for (const std::string m : {"listdescriptors", "gethdkeys", "dumpwallet", "sendtoaddress", "walletpassphrase", "importdescriptors", "backupwallet", "addnode", "signrawtransactionwithwallet", "walletprocesspsbt", "signmessage", "setban"}) {
+        BOOST_CHECK_MESSAGE(!webui::guard::ConsoleRunsQuietly(m), m);
+    }
+    for (const std::string m : {"getbalance", "listtransactions", "decodepsbt", "estimatesmartfee", "verifymessage", "help", "getblockchaininfo", "createpsbt"}) {
+        BOOST_CHECK_MESSAGE(webui::guard::ConsoleRunsQuietly(m), m);
+    }
+    // A name that is no command is never put in a dialog.
+    BOOST_CHECK(!webui::guard::ConsoleConfirmation("get\nblock", ""));
+    BOOST_CHECK(!webui::guard::ConsoleRunsQuietly("GETBALANCE"));
+}
+
+BOOST_AUTO_TEST_CASE(open_url_asks_the_desktop_first)
+{
+    // Audit port-1 #3: a web address the page names is opened on the user's word, its host first.
+    const auto dialog{webui::guard::OpenUrlConfirmation("https://explorer.example/tx/00?x=1")};
+    BOOST_REQUIRE(dialog);
+    BOOST_CHECK_EQUAL(dialog->title, "Open a web address");
+    BOOST_CHECK(dialog->message.starts_with("Host: explorer.example\n\n"));
+    BOOST_CHECK(dialog->message.ends_with("https://explorer.example/tx/00?x=1"));
+    const auto http{webui::guard::OpenUrlConfirmation("http://Example.com:8080/a")};
+    BOOST_REQUIRE(http);
+    BOOST_CHECK(http->message.starts_with("Host: example.com\n\n"));
+    BOOST_CHECK(http->message.find("not encrypted") != std::string::npos);
+    // Refused outright: other schemes, a user name before the host, spaces, quotes.
+    for (const std::string url : {"file:///etc/passwd", "javascript:alert(1)", "https://good.example@evil.example/", "https://a b/", "https://a\"b/", "https://", "chains:x"}) {
+        BOOST_CHECK_THROW(webui::guard::OpenUrlConfirmation(url), std::invalid_argument);
+    }
+    // The app's own links open without asking (none for Chains).
+    for (const std::string& link : webui::guard::KnownLinks()) BOOST_CHECK(!webui::guard::OpenUrlConfirmation(link));
+    // Text in a dialog: one line, cut.
+    BOOST_CHECK_EQUAL(webui::guard::OneLine("a\n\xe2\x80\xae" "b\tc  d", 64), "a b c d");
+    BOOST_CHECK_EQUAL(webui::guard::OneLine("abcdef", 4), "abc…");
+}
+
 BOOST_AUTO_TEST_CASE(node_api)
 {
     if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
     auto node{interfaces::MakeNode(m_node)};
     std::set<std::string> readable;
-    webui::NodeApi api{[&]() -> interfaces::Node& { return *node; }, [&](const std::string& path) { return readable.contains(path); }};
+    webui::NodeApi api{[&]() -> interfaces::Node& { return *node; }, [&](const std::string& path) { return readable.contains(path); }, [](const webui::Window::ConfirmDialog&) { return false; }};
 
     // The hash calculator: text, and the bytes of hexadecimal (cryptotoolsdialog.cpp; the tests of chains-qt).
     UniValue h{api.Call("tools.hashes", Obj({{"text", "abc"}, {"hex", false}}))};

@@ -61,7 +61,7 @@
 
     // M1: calls that wait for long do not hold up the quick ones.
     const waits = [];
-    for (let i = 0; i < 8; i++) waits.push(window.__chains({ rid: `wait-${i}`, kind: 'rpc', method: 'waitfornewblock', params: [30000] }).catch((e) => e));
+    for (let i = 0; i < 8; i++) waits.push(window.__chains({ rid: `wait-${i}`, kind: 'testrpc', method: 'waitfornewblock', params: [30000] }).catch((e) => e));
     await sleep(500);
     const t0 = Date.now();
     await rpc('getblockcount');

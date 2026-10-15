@@ -125,6 +125,17 @@ public:
     /** Set the RPC methods the page may call (RpcPolicy). */
     void SetRpcPolicy(RpcPolicy policy) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /**
+     * Take requests of the kind "testrpc": any RPC method, past the policy, on the long lane. Only for a test
+     * script (-webuitestscript, in a build with WEBUI_TEST_HOOKS), which drives the node itself as the console
+     * would; the calls of the pages ("rpc") keep to the policy all the same, so that the tests run the policy
+     * that ships. Refused unless opened.
+     */
+    void OpenTestRpc() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** The RPC methods the policy refused to the page so far, in order, each once (the tests read them: test.refused). */
+    std::vector<std::string> Refused() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Make a host method available to the page. */
     void RegisterHost(const std::string& name, HostFn fn, Thread thread = Thread::WORKER) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
@@ -165,6 +176,8 @@ private:
     mutable Mutex m_mutex;
     RpcFn m_rpc GUARDED_BY(m_mutex);
     RpcPolicy m_rpc_policy GUARDED_BY(m_mutex);
+    bool m_test_rpc GUARDED_BY(m_mutex){false};
+    std::vector<std::string> m_refused GUARDED_BY(m_mutex);
     InternalErrorFn m_internal_error GUARDED_BY(m_mutex);
     struct Host {
         HostFn fn;

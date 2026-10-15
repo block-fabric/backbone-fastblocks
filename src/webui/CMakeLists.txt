@@ -103,6 +103,7 @@ add_library(chains_webui_core STATIC EXCLUDE_FROM_ALL
   bridge.cpp
   rpcpolicy.cpp
   console.cpp
+  guard.cpp
   events.cpp
   i18n.cpp
   icontint.cpp

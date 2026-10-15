@@ -80,6 +80,39 @@
     };
 
     await runCases('one wallet', 'demo');
+
+    // Audit port-1 #11: the theme picker of the sidebar shows "Matrix Green" whole, and the labels of the cards
+    // of Home ("Pending bundles") are never cut, at every zoom, sidebar width and text size.
+    T().savePrefs({ theme: 'matrix' });
+    await sleep(200);
+    const textFits = (el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return range.getBoundingClientRect().width <= el.getBoundingClientRect().width + 0.5;
+    };
+    for (const c of cases) {
+      document.documentElement.style.zoom = c.zoom;
+      side.style.width = c.width;
+      T().savePrefs({ fontAdjust: c.font });
+      await sleep(120);
+      const look = document.querySelector('.sidebar select.look');
+      const style = look && getComputedStyle(look);
+      const ctx = document.createElement('canvas').getContext('2d');
+      if (style) ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      // The room of the text: the box less its paddings (the arrow is in the padding on the right).
+      const room = look ? look.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) : 0;
+      const need = look ? ctx.measureText(look.options[look.selectedIndex].text).width : 1;
+      const cut = [...document.querySelectorAll('.pairs dt')].filter((dt) => !textFits(dt)).map((dt) => dt.textContent);
+      const name = `zoom ${c.zoom}, sidebar ${c.width}, text +${c.font}`;
+      await check(`${name}: "Matrix Green" whole in the theme picker`, !!look && need <= room + 0.5, JSON.stringify({ need: Math.round(need), room: Math.round(room) }));
+      await check(`${name}: no label of the cards of Home cut`, cut.length === 0 && document.querySelectorAll('.pairs dt').length > 0, JSON.stringify(cut));
+    }
+    document.documentElement.style.zoom = '1.25';
+    await snapshot('walletcard-matrix-125');
+    document.documentElement.style.zoom = '';
+    side.style.width = '';
+    T().savePrefs({ theme: 'midnight', fontAdjust: 0 });
+    await sleep(150);
     await snapshot('walletcard-demo-midnight');
     document.documentElement.style.zoom = '1.5';
     await snapshot('walletcard-demo-midnight-150');

@@ -14,6 +14,8 @@
 #include <hash.h>
 #include <interfaces/node.h>
 #include <net.h>
+#include <rpc/protocol.h>
+#include <rpc/request.h>
 #include <net_processing.h>
 #include <netbase.h>
 #include <tinyformat.h>
@@ -25,6 +27,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 
 namespace webui {
 using util::SplitString;
@@ -103,7 +106,8 @@ std::vector<std::vector<std::string>> MerkleLevels(const std::vector<std::string
     return levels;
 }
 
-NodeApi::NodeApi(NodeFn node, ReadableFn readable) : m_node(std::move(node)), m_readable(std::move(readable)) {}
+NodeApi::NodeApi(NodeFn node, ReadableFn readable, guard::ConfirmFn confirm)
+    : m_node(std::move(node)), m_readable(std::move(readable)), m_confirm(std::move(confirm)) {}
 
 std::vector<std::string> NodeApi::Methods() const { return METHODS; }
 
@@ -125,8 +129,20 @@ UniValue NodeApi::Call(const std::string& method, const UniValue& params)
     if (method == "console.run") {
         interfaces::Node& node{m_node()};
         const UniValue& wallet{Param(params, "wallet")};
-        const console::ExecuteFn execute{[&node](const std::string& m, const UniValue& p, const std::string& uri) { return node.executeRpc(m, p, uri); }};
-        return console::Run(execute, ParamStr(params, "line"), wallet.isStr() ? wallet.get_str() : std::string{});
+        const std::string wallet_name{wallet.isStr() ? wallet.get_str() : std::string{}};
+        // The page can call this with any line: a command that does more than read waits for the user's word,
+        // given to the desktop, once per command and line (the line is checked as it runs, nested commands too).
+        std::set<std::string> accepted;
+        const console::ExecuteFn execute{[&](const std::string& m, const UniValue& p, const std::string& uri) {
+            if (!guard::ConsoleRunsQuietly(m) && !accepted.contains(m)) {
+                const auto dialog{guard::ConsoleConfirmation(m, wallet_name)};
+                if (!dialog) throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");
+                if (!m_confirm(*dialog)) throw JSONRPCError(RPC_MISC_ERROR, strprintf("%s was not run: it was declined", m));
+                accepted.insert(m);
+            }
+            return node.executeRpc(m, p, uri);
+        }};
+        return console::Run(execute, ParamStr(params, "line"), wallet_name);
     }
     if (method == "peers.disconnect") {
         return UniValue{m_node().disconnectById(ParamInt(params, "id"))};

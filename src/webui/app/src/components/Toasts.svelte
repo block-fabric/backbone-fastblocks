@@ -9,9 +9,51 @@
   const MAX_SHOWN = 2;
   const shown = $derived(toasts.list.slice(-MAX_SHOWN));
   const hidden = $derived(toasts.list.length - shown.length);
+
+  // Notices sit in the bottom corner, where the buttons of a form often are: while the user works in a form
+  // they would cover (the focus in it), they go to the top corner instead (audit port-1 #11).
+  let stack: HTMLDivElement | undefined = $state();
+  let top = $state(false);
+  /** Where the stack is in the bottom corner, as its styles place it (whichever corner it is in now). */
+  function bottomBox(): { left: number; right: number; top: number; bottom: number } | null {
+    if (!stack || typeof window === 'undefined') return null;
+    const em = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const right = window.innerWidth - em;
+    const bottom = window.innerHeight - 3 * em;
+    return { left: right - stack.offsetWidth, right, top: bottom - stack.offsetHeight, bottom };
+  }
+  /** The part of the page the user works in: the form (or card, panel) around the focus. */
+  function workArea(): DOMRect | null {
+    const el = typeof document === 'undefined' ? null : document.activeElement;
+    if (!el || el === document.body || !(el instanceof HTMLElement) || stack?.contains(el)) return null;
+    if (!el.matches('input, select, textarea, button, [contenteditable="true"]')) return null;
+    return (el.closest('form, [data-form], .card, .panel') ?? el).getBoundingClientRect();
+  }
+  function placeToasts(): void {
+    const box = bottomBox();
+    const area = workArea();
+    top = !!box && !!area && shown.length > 0 && area.left < box.right && area.right > box.left && area.top < box.bottom && area.bottom > box.top;
+  }
+  $effect(() => {
+    void shown.length;
+    placeToasts();
+  });
+  $effect(() => {
+    const again = () => placeToasts();
+    // Once the focus has moved (on focusout it is on nothing for a moment).
+    const later = () => setTimeout(placeToasts, 0);
+    document.addEventListener('focusin', again);
+    document.addEventListener('focusout', later);
+    window.addEventListener('resize', again);
+    return () => {
+      document.removeEventListener('focusin', again);
+      document.removeEventListener('focusout', later);
+      window.removeEventListener('resize', again);
+    };
+  });
 </script>
 
-<div class="toasts" role="status" aria-live="polite">
+<div class="toasts" class:top bind:this={stack} role="status" aria-live="polite">
   {#if hidden > 0}
     <button type="button" class="more" onclick={() => dismissToast(toasts.list[0].id)} title="Dismiss the oldest">{hidden} more</button>
   {/if}
@@ -46,6 +88,10 @@
     align-items: flex-end;
     width: min(21rem, calc(100vw - 2rem));
     pointer-events: none;
+  }
+  .toasts.top {
+    top: 4rem;
+    bottom: auto;
   }
   .toast {
     display: flex;

@@ -391,8 +391,26 @@
     await enter('getblock(getbestblockhash())[height]');
     await waitFor('the nested result', () => $$('.console .line.reply .text').filter((t) => t.textContent === String(T().node.tip.height)).length >= 2, 30000);
     await check('console: nested commands and queries', true);
+    // A command that does more than read waits for the desktop (audit port-1 #3): declined, it does not run;
+    // accepted, it does.
+    const asked = (await host('test.confirmed')).length;
+    const heightBefore = T().node.tip.height;
+    await host('test.confirmAnswer', { yes: false });
+    await enter('getblockcount(generatetoaddress(1, getnewaddress()))');
+    await waitFor('the refusal', () => text('.console').includes('generatetoaddress was not run: it was declined'), 30000);
+    await sleep(1500);
+    const confirmedNow = await host('test.confirmed');
+    await check('console: a command that changes the node is confirmed by the desktop first, and not run when declined',
+      confirmedNow.length === asked + 1 && confirmedNow[asked].message.startsWith('Command: generatetoaddress\n') && T().node.tip.height === heightBefore, JSON.stringify(confirmedNow.slice(asked)));
+    await host('test.confirmAnswer', { yes: true });
     await enter('walletpassphrase "do not keep" 10');
     await waitFor('the error', () => text('.console').includes('(code -15)'), 30000);
+    await check('console: accepted on the desktop, it runs', (await host('test.confirmed')).length === asked + 2);
+    // A web address the page names opens only on the word of the desktop, its host first.
+    await host('test.confirmAnswer', { yes: false });
+    const opened = await host('app.open', { what: 'url', url: 'https://explorer.example/tx/1' });
+    const urlAsked = (await host('test.confirmed')).at(-1);
+    await check('app.open: a web address is confirmed by the desktop, its host first', opened === false && urlAsked.message.startsWith('Host: explorer.example\n'), JSON.stringify(urlAsked));
     await check('console: the passphrase stays out of the output and the history', !text('.console').includes('do not keep') && text('.console').includes('walletpassphrase(…)'));
     set(input, 'getblockch');
     await waitFor('the completion', () => text('.suggest').includes('getblockchaininfo'), 10000);

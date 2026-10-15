@@ -16,7 +16,9 @@ namespace webui {
 /**
  * The RPC methods the pages call through the bridge (kind "rpc"), and where they run. The page
  * calls no other: whatever it would need beyond them is a host method with rules of its own, and a
- * command typed by the user goes through the console (console.run), which runs any command.
+ * command typed by the user goes through the console (console.run), which runs any command, one that
+ * does more than read on the user's word given to the desktop (guard.h). The policy holds in the
+ * end-to-end tests too: their script sets the node up with "testrpc" (Bridge::OpenTestRpc).
  *
  * src/webui/app/src/test/rpcpolicy.test.ts checks that every method the pages call is listed here.
  */

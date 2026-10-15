@@ -6,6 +6,7 @@
 #define BITCOIN_WEBUI_NODEAPI_H
 
 #include <univalue.h>
+#include <webui/guard.h>
 
 #include <functional>
 #include <string>
@@ -24,7 +25,8 @@ class Bridge;
  * not cover:
  *
  *   console.check {line}            the line for the history, or why it cannot run (RPCConsole)
- *   console.run {line, wallet?}     run a console line: nested commands, queries (RPCExecutor)
+ *   console.run {line, wallet?}     run a console line: nested commands, queries (RPCExecutor); a command
+ *                                   that does more than read is confirmed in a dialog of the desktop first
  *   peers.disconnect {id}           disconnect a peer (RPCConsole::disconnectSelectedNode)
  *   peers.ban {id, seconds}         ban the address of a peer and disconnect it (banSelectedNode)
  *   bans.unban {address}            lift a ban (unbanSelectedNode)
@@ -42,7 +44,7 @@ public:
     //! Whether the page may read a file: only one the user chose.
     using ReadableFn = std::function<bool(const std::string& path)>;
 
-    NodeApi(NodeFn node, ReadableFn readable);
+    NodeApi(NodeFn node, ReadableFn readable, guard::ConfirmFn confirm);
 
     void Register(Bridge& bridge);
 
@@ -54,6 +56,7 @@ public:
 private:
     NodeFn m_node;
     ReadableFn m_readable;
+    guard::ConfirmFn m_confirm;
 };
 
 /** The hashes of the hash calculator for some bytes: sha256, sha256d, sha256dId, ripemd160, hash160, sha512, sha1, bytes. */

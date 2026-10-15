@@ -30,6 +30,7 @@
 #include <webui/appconfig.h>
 #include <webui/bridge.h>
 #include <webui/events.h>
+#include <webui/guard.h>
 #include <webui/i18n.h>
 #include <webui/assets.h>
 #include <webui/nodeapi.h>
@@ -690,6 +691,12 @@ bool App::Confirm(const Window::ConfirmDialog& dialog)
             m_test_confirmed.push_back(dialog);
             return answer;
         }
+        if (!m_test_script.empty()) {
+            // A test that did not expect the question: declined, and kept for test.confirmed (never a dialog
+            // on the desktop of whoever runs the tests).
+            m_test_confirmed.push_back(dialog);
+            return false;
+        }
     }
 #endif
     auto done{std::make_shared<std::promise<bool>>()};
@@ -1089,7 +1096,7 @@ void App::RegisterHostMethods()
     m_node_api = std::make_unique<NodeApi>(need_node, [this](const std::string& path) {
         LOCK(m_mutex);
         return m_readable.contains(path);
-    });
+    }, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); });
     m_node_api->Register(b);
 
 #if WEBUI_SIDECHAIN
@@ -1264,8 +1271,16 @@ void App::RegisterHostMethods()
                 if (!part.empty()) uri += "/" + PercentEncode(part);
             }
         } else if (what == "url") {
+            // The page names the address: one that is not a link of the app's own is opened on the user's
+            // word, given to the desktop, with its host first (a page could otherwise send what it read away).
             uri = ParamStr(params, "url");
-            if (!uri.starts_with("https://") && !uri.starts_with("http://")) throw HostError(BRIDGE_INVALID_REQUEST, "Only web addresses (http, https) are opened");
+            std::optional<Window::ConfirmDialog> dialog;
+            try {
+                dialog = guard::OpenUrlConfirmation(uri);
+            } catch (const std::invalid_argument& e) {
+                throw HostError(BRIDGE_INVALID_REQUEST, e.what());
+            }
+            if (dialog && !Confirm(*dialog)) return UniValue{false};
         } else {
             throw HostError(BRIDGE_INVALID_REQUEST, "what: debuglog, config or url");
         }
@@ -1351,6 +1366,12 @@ void App::RegisterHostMethods()
             LOCK(m_mutex);
             m_test_confirms.push_back(yes.get_bool());
             return UniValue{true};
+        });
+        b.RegisterHost("test.refused", [this](const UniValue&) {
+            // The RPC methods the policy refused to the pages (a page that calls one fails in a release).
+            UniValue out{UniValue::VARR};
+            for (const std::string& m : m_bridge->Refused()) out.push_back(m);
+            return out;
         });
         b.RegisterHost("test.confirmed", [this](const UniValue&) {
             // What the confirmations answered by the tests asked, in order.
@@ -1478,16 +1499,15 @@ int App::Run()
         dialog.pushKV("details", std::move(details));
         m_hub->Emit("dialog", std::move(dialog));
     });
-    // The pages call the RPC methods they need, and no other (the console runs any command). A test
-    // script (-webuitestscript, a debug option of the command line) drives the node itself, as the
-    // console would: with it, the other methods run too, apart from the quick calls.
-    if (m_test_script.empty()) {
-        m_bridge->SetRpcPolicy(PageRpcPolicy);
-    } else {
-        m_bridge->SetRpcPolicy([](const std::string& method) -> std::optional<Bridge::Thread> {
-            return PageRpcPolicy(method).value_or(Bridge::Thread::LONG);
-        });
-    }
+    // The pages call the RPC methods they need, and no other (the console runs any command, a command that
+    // does more than read on the user's word given to the desktop). They keep to it in the tests too: the
+    // policy that ships is the one tested (audit port-1 #5). A test script (-webuitestscript, in a build with
+    // WEBUI_TEST_HOOKS) sets the node up (wallets, blocks) with requests of the kind "testrpc", which a
+    // release does not take.
+    m_bridge->SetRpcPolicy(PageRpcPolicy);
+#ifdef WEBUI_TEST_HOOKS
+    if (!m_test_script.empty()) m_bridge->OpenTestRpc();
+#endif
     RegisterHostMethods();
 
     m_node_thread = std::thread([this] { NodeThread(); });

@@ -15,10 +15,13 @@
     await check('rpc getblockchaininfo', chain.chain === 'regtest', JSON.stringify(chain).slice(0, 80));
     const unknown = await rpc('no_such_method').then(() => null, (e) => e);
     await check('rpc error code', unknown && unknown.code === -32601, JSON.stringify(unknown));
+    // A page may not call a method outside its policy (rpcpolicy.cpp): the console is the way to any command.
+    const outside = await E2E.asPage('dumptxoutset', ['x'], true).then(() => null, (e) => e);
+    await check('rpc outside the policy of the pages is refused', outside && outside.code === -32601 && /does not call dumptxoutset/.test(outside.message), JSON.stringify(outside));
     const unknownHost = await host('no.such.method').then(() => null, (e) => e);
     await check('host error code', unknownHost && unknownHost.code === -32601, JSON.stringify(unknownHost));
     const started = Date.now();
-    const waiting = window.__chains({ rid: 'e2e-wait', kind: 'rpc', method: 'waitfornewblock', params: [60000] }).then(() => 'resolved', (e) => e);
+    const waiting = window.__chains({ rid: 'e2e-wait', kind: 'testrpc', method: 'waitfornewblock', params: [60000] }).then(() => 'resolved', (e) => e);
     await sleep(300);
     const cancelled = await window.__chains({ kind: 'cancel', rid: 'e2e-wait' });
     const outcome = await waiting;

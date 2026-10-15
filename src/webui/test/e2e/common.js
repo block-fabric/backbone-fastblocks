@@ -6,7 +6,15 @@ const E2E = (() => {
   const passed = [];
   const shots = [];
   const host = (method, params = {}) => window.__chains({ kind: 'host', method, params });
-  const rpc = (method, params = [], wallet) => window.__chains({ kind: 'rpc', method, params, ...(wallet == null ? {} : { wallet }) });
+  // The script sets the node up past the RPC policy of the pages ("testrpc", only with -webuitestscript in a
+  // build with WEBUI_TEST_HOOKS); the pages keep to the policy that ships, and report() fails on a method it
+  // refused them (audit port-1 #5). asPage() calls as a page does, for the checks of the policy itself.
+  const rpc = (method, params = [], wallet) => window.__chains({ kind: 'testrpc', method, params, ...(wallet == null ? {} : { wallet }) });
+  const expectedRefusals = new Set();
+  const asPage = (method, params = [], refused = false) => {
+    if (refused) expectedRefusals.add(method);
+    return window.__chains({ kind: 'rpc', method, params });
+  };
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const log = (message) => host('test.log', { message: String(message) });
   const T = () => window.__chainsTest;
@@ -51,6 +59,9 @@ const E2E = (() => {
 
   /** Say how the test went (the runner reads it), without ending the app. */
   async function report() {
+    const refused = (await host('test.refused').catch(() => [])).filter((m) => !expectedRefusals.has(m));
+    if (refused.length) failures.push(`the pages called RPC methods their policy refuses (rpcpolicy.cpp): ${refused.join(', ')}`);
+    else passed.push('the pages called no RPC method outside their policy');
     await log(`RESULT ${JSON.stringify({ passed: passed.length, failures, shots })}`);
   }
 
@@ -60,5 +71,5 @@ const E2E = (() => {
     await host('test.exit', { code: failures.length ? 1 : 0 });
   }
 
-  return { host, rpc, sleep, log, T, waitFor, check, snapshot, text, buttonByText, report, finish };
+  return { host, rpc, asPage, sleep, log, T, waitFor, check, snapshot, text, buttonByText, report, finish };
 })();

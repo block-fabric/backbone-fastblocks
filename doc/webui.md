@@ -141,7 +141,12 @@ App, on a thread of its own: intro, configuration, init, then shutdown
 wallet}`. RPC calls go to the in-process dispatcher, as the console of
 chains-qt does: no HTTP server, no credentials. They are limited to the
 methods of `rpcpolicy.cpp` (a frontend test checks that every method the pages
-name is there); the console (`console.run`) is the one way to run any command.
+name is there); the console (`console.run`) is the one way to run any command,
+and a command that does more than read waits for the user's word, given to the
+desktop (below). The policy holds in the end-to-end tests too: their script
+sets the node up with requests of the kind `testrpc` (taken only with
+`-webuitestscript` in a build with `WEBUI_TEST_HOOKS`), and each run fails on
+an RPC method the policy refused to a page (`test.refused`).
 Calls never run on the UI thread. Calls that may take long (a command of the
 console, a download, a rescan, a file chooser, loading a wallet,
 `scantxoutset`) run on a lane of their own and never hold up the quick ones. A
@@ -229,6 +234,27 @@ Rules the code keeps:
   up again wherever it is shown). Sidechain nodes get the RPC
   password of this node in an owner-only file (`-mainchainrpcpasswordfile`),
   never on their command line.
+* **The page does not act for the user where it matters.** The page draws the
+  app; it cannot, by itself, do what a compromised page would want
+  (guard.cpp, audit port-1 #3). These wait for a confirmation of the desktop,
+  in fixed words that say first what the host parsed:
+  - a command of the console that does more than read (anything but `get…`,
+    `list…`, `decode…`, `estimate…`, `verify…`, `help` and the commands that
+    only build or decode data; `listdescriptors` and `gethdkeys` always): the
+    name of the command first, once per command and line, checked as each
+    command runs, nested ones too;
+  - a web address that is not one of the app's own links (`app.open`): its
+    host first, http said to be unencrypted;
+  - in the app of a sidechain, what spends the wallet of the mainchain node
+    and where its credentials go (doc/sidechain.md).
+  A test that did not queue an answer (`test.confirmAnswer`) gets "no", never
+  a dialog on the desktop.
+* **Direction.** Text from outside is isolated as to direction: SafeText is
+  `dir="auto"`, every `translate="no"` is `unicode-bidi: isolate`, and a value
+  that can turn the text (a letter of a right-to-left script, a mark of
+  direction) put in `t()`/`tn()` goes between FSI and PDI, so that a title
+  starting with U+202E cannot turn the app's own sentence around, amounts
+  included (audit port-1 #2).
 * **Text is text.** No `{@html}`, no `innerHTML`: what comes from the chain,
   the node or the user shows as text (a test checks the sources). The content
   security policy allows nothing but the app's own files: no remote content,

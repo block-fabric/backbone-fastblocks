@@ -94,6 +94,36 @@ export function pluralIndex(code: string, n: number, count: number): number {
   return Math.max(0, Math.min(index, count - 1));
 }
 
+// Written as code points: the compiler of Svelte warns of marks of direction in the source.
+const FSI = String.fromCharCode(0x2068);
+const PDI = String.fromCharCode(0x2069);
+const LRI = String.fromCharCode(0x2066);
+const RLI = String.fromCharCode(0x2067);
+/** What can turn the direction of the text: a letter of a right-to-left script, or a mark of direction. */
+const BIDI = new RegExp('[\\u0590-\\u08FF\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069\\uFB1D-\\uFDFF\\uFE70-\\uFEFF]|\\uD802[\\uDC00-\\uDFFF]|\\uD803[\\uDC00-\\uDFFF]|\\uD83A[\\uDC00-\\uDFFF]|\\uD83B[\\uDC00-\\uDFFF]');
+
+/**
+ * A value put in a message of the app, kept to itself as to its direction (audit port-1 #2): a market title
+ * that starts with U+202E would otherwise turn the rest of the sentence around, amounts included. The value
+ * goes between FSI and PDI (Unicode bidi isolates); a PDI of its own without its opener is dropped, and the
+ * isolates it opens are closed, so that nothing in it reaches past its end. Plain ASCII cannot turn the
+ * text and is left as it is.
+ */
+export function isolate(value: string): string {
+  if (!BIDI.test(value)) return value;
+  let open = 0;
+  let out = '';
+  for (const ch of value) {
+    if (ch === LRI || ch === RLI || ch === FSI) open++;
+    else if (ch === PDI) {
+      if (open === 0) continue;
+      open--;
+    }
+    out += ch;
+  }
+  return FSI + out + PDI.repeat(open) + PDI;
+}
+
 /** Put the values in place of the placeholders, in one pass: what the values hold is not looked at again. */
 function fill(text: string, values: Record<string, string>): string {
   return text.replace(HOLDER, (h) => values[h] ?? h);
@@ -131,7 +161,7 @@ function template(source: string): Resolved | null {
  */
 export function t(source: string, ...args: unknown[]): string {
   void i18n.version;
-  const values: Record<string, string> = Object.fromEntries(args.map((a, i) => [`%${i + 1}`, a === null || a === undefined ? '' : String(a)]));
+  const values: Record<string, string> = Object.fromEntries(args.map((a, i) => [`%${i + 1}`, a === null || a === undefined ? '' : isolate(String(a))]));
   const found = template(source);
   if (!found) return fill(source, values);
   const form = choose(found.value, () => numberOf(fill(found.values['%n'] ?? '0', values)));
@@ -141,7 +171,7 @@ export function t(source: string, ...args: unknown[]): string {
 /** A message with plural forms (%n), in the language shown. */
 export function tn(source: string, n: number, ...args: unknown[]): string {
   void i18n.version;
-  const values: Record<string, string> = { '%n': String(n), ...Object.fromEntries(args.map((a, i) => [`%${i + 1}`, a === null || a === undefined ? '' : String(a)])) };
+  const values: Record<string, string> = { '%n': String(n), ...Object.fromEntries(args.map((a, i) => [`%${i + 1}`, a === null || a === undefined ? '' : isolate(String(a))])) };
   const found = template(source);
   // In English (or without the message), "(s)" is "s" but for one, as the English forms of chains-qt.
   if (!found) return fill(source.replace(/\(s\)/g, n === 1 ? '' : 's'), values);

@@ -185,3 +185,38 @@ describe('messages the app puts together, in French', () => {
     expect(niceTimeOffset(400 * 86400)).toBe('1 year and 4 weeks');
   });
 });
+
+describe('direction: text from outside cannot turn the words of the app around (audit port-1 #2)', () => {
+  afterEach(() => setCatalog(null));
+
+  it('isolates a value that can turn the text, in t() and tn(), in English and in French', async () => {
+    const { isolate } = await import('../lib/i18n.svelte');
+    const title = '‮txet emos';
+    const said = t('Buy shares of %1 for at most %2', title, '0.01010002');
+    // The title is between FSI and PDI, and the amount after it, untouched.
+    expect(said).toBe('Buy shares of ⁨‮txet emos⁩ for at most 0.01010002');
+    expect(tn('%n share(s) of %1', 2, title)).toBe('2 shares of ⁨‮txet emos⁩');
+    setCatalog(FR);
+    expect(t('%1 behind', '‮3 h')).toBe(t('%1 behind', 'X').replace('X', '⁨‮3 h⁩'));
+    setCatalog(null);
+    // Plain ASCII is left as it is (it cannot turn the text).
+    expect(t('Sent to %1', 'alice')).toBe('Sent to alice');
+    // A PDI of its own cannot close the isolate early; isolates it opens are closed before it ends.
+    expect(isolate('⁩‮abc')).toBe('⁨‮abc⁩');
+    expect(isolate('⁧abc')).toBe('⁨⁧abc⁩⁩');
+    expect(isolate('⁦a⁩b⁩')).toBe('⁨⁦a⁩b⁩');
+    // Hebrew and Arabic text are isolated too.
+    expect(isolate('שלום')).toBe('⁨שלום⁩');
+  });
+
+  it('shows text from outside isolated (dir="auto"), and the stylesheet isolates every translate="no"', () => {
+    const view = render(Toasts);
+    toast('error', 'Error', '‮abc 0.01');
+    flushSync();
+    const span = [...view.container.querySelectorAll('span[translate="no"]')].find((s) => s.textContent === '‮abc 0.01');
+    expect(span?.getAttribute('dir')).toBe('auto');
+    const css = readFileSync(join(__dirname, '../styles/base.css'), 'utf8');
+    expect(css).toMatch(/\[translate='no'\]\s*\{\s*unicode-bidi:\s*isolate;/);
+    toasts.list.length = 0;
+  });
+});
