@@ -10,6 +10,7 @@
 #include <test/util/setup_common.h>
 #include <webui/bridge.h>
 #include <webui/events.h>
+#include <webui/chainconfig.h>
 #include <webui/icontint.h>
 #include <webui/rpcpolicy.h>
 
@@ -156,7 +157,9 @@ BOOST_AUTO_TEST_CASE(page_rpc_policy)
         BOOST_CHECK_MESSAGE(!webui::PageRpcPolicy(refused), refused);
     }
     // The methods that need the keys go through wallet.withKeys, which unlocks for the call alone.
-    for (const char* keyed : {"createsidechaindeposit", "send", "walletprocesspsbt", "signmessage"}) BOOST_CHECK(webui::KeyedWalletRpc(keyed));
+    for (const char* keyed : {"send", "walletprocesspsbt", "signmessage"}) BOOST_CHECK(webui::KeyedWalletRpc(keyed));
+    // The deposit of the mainchain, the withdrawals of a sidechain (sidechainapi_tests).
+    BOOST_CHECK(webui::KeyedWalletRpc(WEBUI_SIDECHAIN ? "createwithdrawal" : "createsidechaindeposit"));
     for (const char* other : {"dumpwallet", "walletpassphrase", "sendtoaddress", "backupwallet"}) BOOST_CHECK(!webui::KeyedWalletRpc(other));
 
     Answers answers;
@@ -292,15 +295,18 @@ BOOST_AUTO_TEST_CASE(internal_errors)
 BOOST_AUTO_TEST_CASE(network_icon)
 {
     // A08: the icon of the app in the colours of the network, as NetworkStyle tints it.
-    BOOST_CHECK(webui::TintOf("main").None());
-    BOOST_CHECK_EQUAL(webui::TintOf("regtest").hue_shift, 160);
+    // The hue of the chain (chain.json brand.iconHue) comes first.
+    const int hue{webui::chain::ICON_HUE};
+    BOOST_CHECK_EQUAL(webui::TintOf("main").None(), hue % 360 == 0);
+    BOOST_CHECK_EQUAL(webui::TintOf("main").hue_shift, hue % 360);
+    BOOST_CHECK_EQUAL(webui::TintOf("regtest").hue_shift, (160 + hue) % 360);
     BOOST_CHECK_EQUAL(webui::TintOf("test").saturation_reduction, 30);
-    BOOST_CHECK_EQUAL(webui::TintOf("signet").hue_shift, 35);
+    BOOST_CHECK_EQUAL(webui::TintOf("signet").hue_shift, (35 + hue) % 360);
     // A red pixel, a grey one, a transparent green one (RGBA).
     std::vector<unsigned char> pixels{255, 0, 0, 255, 128, 128, 128, 200, 0, 255, 0, 0};
-    webui::TintPixels(pixels, 4, 3, 1, 12, webui::TintOf("main"));
+    webui::TintPixels(pixels, 4, 3, 1, 12, webui::IconTint{});
     BOOST_CHECK(pixels[0] == 255 && pixels[1] == 0);
-    webui::TintPixels(pixels, 4, 3, 1, 12, webui::TintOf("regtest"));
+    webui::TintPixels(pixels, 4, 3, 1, 12, webui::IconTint{160, 30});
     // Red turned by 160 degrees: a green-cyan, less saturated; the lightness and the alpha kept.
     BOOST_CHECK(pixels[0] < 60 && pixels[1] > 200 && pixels[2] > 100 && pixels[2] < 200);
     BOOST_CHECK_EQUAL(pixels[3], 255);

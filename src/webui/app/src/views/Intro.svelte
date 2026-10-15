@@ -1,5 +1,6 @@
 <script lang="ts">
   import SafeText from '../components/SafeText.svelte';
+  import { CHAIN } from '../chain/config';
   // The first start: where the node keeps its data, and whether it keeps every block (intro.cpp).
   import { host, type IntroData, type Space } from '../lib/rpc';
   import { app } from '../lib/state.svelte';
@@ -73,10 +74,10 @@
 
 <main class="intro">
   <div class="card">
-    <h1>Welcome to {app.info?.name ?? 'Chains'}</h1>
+    <h1>Welcome to {app.info?.name ?? CHAIN.name}</h1>
     <p class="lead">
       This is the first start of the app{app.info?.networkLabel ? ` on ${app.info.networkLabel}` : ''}. It will download and store a copy of
-      the Chains block chain; the wallet is stored with it. Choose where.
+      the {CHAIN.name} block chain; the wallet is stored with it. Choose where.
     </p>
 
     <fieldset>

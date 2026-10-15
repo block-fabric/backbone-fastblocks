@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   import SafeText from '../components/SafeText.svelte';
   // Send coins (SendCoinsDialog, SendCoinsEntry): several recipients, the fee, coin control ("Choose
   // coins": the coins of the wallet in the page), a confirmation with a delay, unsigned transactions
@@ -75,7 +76,7 @@
         ? 'Set external signer script path in Options -> Wallet'
         : 'Connect your hardware wallet first.'
       : info?.privateKeysDisabled
-        ? `Creates a Partially Signed Transaction (PSBT) for use with e.g. an offline ${app.info?.name ?? 'Chains'} wallet, or a PSBT-compatible hardware wallet.`
+        ? `Creates a Partially Signed Transaction (PSBT) for use with e.g. an offline ${app.info?.name ?? CHAIN.name} wallet, or a PSBT-compatible hardware wallet.`
         : 'Confirm the send action',
   );
   /** A custom fee that is not an amount, or below the minimum: nothing is sent with it (the smart fee is not taken in its place). */
@@ -235,7 +236,7 @@
       const r = await api.checkChange(text).catch(() => null);
       if (mine !== changeCheck || !r) return;
       if (!r.valid) {
-        changeStatus = { text: t('Warning: Invalid Chains address'), bad: true, accepted: '' };
+        changeStatus = { text: t('Warning: Invalid %1 address', CHAIN.name), bad: true, accepted: '' };
       } else if (!r.mine) {
         changeStatus = { text: t('Warning: Unknown change address'), bad: true, accepted: '' };
         const yes = await ask({
@@ -339,9 +340,9 @@
     const enableSend = !prepared.privateKeysDisabled || prepared.externalSigner;
     let review = t('Please, review your transaction.');
     if (prepared.privateKeysDisabled && !prepared.externalSigner) {
-      review = t('Please, review your transaction proposal. This will produce a Partially Signed Transaction (PSBT) which you can save or copy and then sign with e.g. an offline %1 wallet, or a PSBT-compatible hardware wallet.', app.info?.name ?? 'Chains');
+      review = t('Please, review your transaction proposal. This will produce a Partially Signed Transaction (PSBT) which you can save or copy and then sign with e.g. an offline %1 wallet, or a PSBT-compatible hardware wallet.', app.info?.name ?? CHAIN.name);
     } else if (prefs.psbtControls) {
-      review = t('Please, review your transaction. You can create and send this transaction or create a Partially Signed Transaction (PSBT), which you can save or copy and then sign with, e.g., an offline %1 wallet, or a PSBT-compatible hardware wallet.', app.info?.name ?? 'Chains');
+      review = t('Please, review your transaction. You can create and send this transaction or create a Partially Signed Transaction (PSBT), which you can save or copy and then sign with, e.g., an offline %1 wallet, or a PSBT-compatible hardware wallet.', app.info?.name ?? CHAIN.name);
     }
     const kvb = (prepared.vsize / 1000).toPrecision(3);
     const informative = [
@@ -426,7 +427,7 @@
             <button type="button" class="btn small" onclick={() => useAvailable(e)}>Use available balance</button>
           </div>
           {#if e.message}
-            <p class="message" title="A message that was attached to the chains: URI which will be stored with the transaction for your reference. Note: This message will not be sent over the Chains network.">
+            <p class="message" title="A message that was attached to the {CHAIN.uriScheme}: URI which will be stored with the transaction for your reference. Note: This message will not be sent over the {CHAIN.name} network.">
               <strong>Message:</strong> <span class="break" translate="no">{e.message}</span>
             </p>
           {/if}
@@ -458,7 +459,7 @@
             <span>Custom change address</span>
           </label>
           <div class="row grow">
-            <input type="text" class="mono grow" aria-label="Custom change address" placeholder="Enter a Chains address" spellcheck="false" autocomplete="off" disabled={!customChange} bind:value={changeAddress} />
+            <input type="text" class="mono grow" aria-label="Custom change address" placeholder={t('Enter a %1 address', CHAIN.name)} spellcheck="false" autocomplete="off" disabled={!customChange} bind:value={changeAddress} />
             {#if changeStatus.text}<span class:error={changeStatus.bad} class="change-label"><SafeText text={changeStatus.text} /></span>{/if}
           </div>
         </div>
@@ -541,7 +542,7 @@
     <p>Open payment request from URI or file</p>
     <div class="field">
       <label for="uri-input">URI</label>
-      <input id="uri-input" type="text" class="mono" placeholder="chains:" bind:value={uriText} autocomplete="off" spellcheck="false" aria-invalid={uriError ? 'true' : undefined} />
+      <input id="uri-input" type="text" class="mono" placeholder="{CHAIN.uriScheme}:" bind:value={uriText} autocomplete="off" spellcheck="false" aria-invalid={uriError ? 'true' : undefined} />
       {#if uriError}<span class="error">{uriError}</span>{/if}
     </div>
   </form>

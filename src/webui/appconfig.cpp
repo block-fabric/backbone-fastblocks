@@ -2,7 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <webui/appconfig.h>
+#include <webui/chainconfig.h>
 
 #include <logging.h>
 #include <util/fs_helpers.h>
@@ -54,23 +57,28 @@ UniValue ObjectWith(const UniValue& object, const std::string& key, UniValue val
 }
 } // namespace
 
+namespace {
+//! <stem>-app.json
+fs::path FileName() { return fs::u8path(std::string{chain::APP} + ".json"); }
+} // namespace
+
 AppConfig::AppConfig(fs::path path) : m_path(std::move(path)) {}
 
 fs::path AppConfig::DefaultPath()
 {
 #ifdef WIN32
-    return GetSpecialFolderPath(CSIDL_APPDATA) / "Chains" / "chains-app.json";
+    return GetSpecialFolderPath(CSIDL_APPDATA) / CLIENT_NAME / FileName();
 #else
     fs::path home;
     if (const char* h{std::getenv("HOME")}; h && *h) home = fs::PathFromString(h);
     else home = fs::PathFromString("/");
 #ifdef __APPLE__
-    return home / "Library" / "Application Support" / "Chains" / "chains-app.json";
+    return home / "Library" / "Application Support" / CLIENT_NAME / FileName();
 #else
     fs::path config;
     if (const char* xdg{std::getenv("XDG_CONFIG_HOME")}; xdg && *xdg) config = fs::PathFromString(xdg);
     else config = home / ".config";
-    return config / "Chains" / "chains-app.json";
+    return config / CLIENT_NAME / FileName();
 #endif
 #endif
 }

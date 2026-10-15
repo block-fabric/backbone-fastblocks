@@ -1,5 +1,6 @@
 // Where the user is: the page shown, and the dialog of the app that is open.
 import type { IconName } from '../components/Icon.svelte';
+import { LOCAL_PAGES, type LocalPage, type LocalPageId } from '../chain/local';
 
 export type PageId =
   | 'overview'
@@ -23,7 +24,12 @@ export type PageId =
   | 'kit'
   | 'home'
   | 'tools'
-  | 'advanced';
+  | 'advanced'
+  // A sidechain (chain.json role "sidechain"): the peg to its mainchain, blind merged mining.
+  | 'peg'
+  | 'bmm'
+  // The pages of the chain of its own (chain/local.ts).
+  | LocalPageId;
 
 export interface PageInfo {
   id: PageId;
@@ -68,6 +74,13 @@ export const PAGES: Record<PageId, PageInfo> = {
   tools: { id: 'tools', title: 'Tools', icon: 'hash', summary: 'Timestamp a file, prove the funds of the wallet, and the crypto tools (hash, Merkle tree, address decoder)', parity: ['L07', 'L08', 'L10'], ready: true },
   advanced: { id: 'advanced', title: 'Advanced transactions', icon: 'key', summary: 'Sign and verify messages, partially signed transactions (PSBT), and the multisig lounge', parity: ['K01', 'K02', 'K03', 'L09'], wallet: true, ready: true },
   home: { id: 'home', title: 'Home', icon: 'home', summary: 'Live cards of the wallet, the chain, the sidechains and the node (the dashboard layout)', parity: [], ready: true },
+  // The pages of a sidechain (doc/webui.md): the peg (deposits from the mainchain, withdrawals to it and
+  // their bundles) and blind merged mining. Only in the app of a sidechain (pageAvailable).
+  peg: { id: 'peg', title: 'Peg', icon: 'peg', summary: 'Deposit from the mainchain, withdraw to it, and follow the withdrawal bundles and their votes', parity: ['S01', 'S02', 'S03'], shortcut: 'Alt+5', ready: true },
+  bmm: { id: 'bmm', title: 'Merged mining', icon: 'merged', summary: 'Have the miners of the mainchain mine the blocks of this chain, for its fees (blind merged mining)', parity: ['S04'], ready: true },
+  ...(Object.fromEntries(
+    (LOCAL_PAGES as readonly LocalPage[]).map((p) => [p.id, { id: p.id, title: p.title, icon: p.icon, summary: p.summary, wallet: p.wallet, shortcut: p.shortcut, parity: [], ready: true }]),
+  ) as unknown as Record<LocalPageId, PageInfo>),
 };
 
 export type DialogId = 'about' | 'help' | 'uri' | 'sync' | null;

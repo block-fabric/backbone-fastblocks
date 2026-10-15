@@ -2,6 +2,13 @@
 // (doc/webui-layouts.md). Only data here; the shells are in views/layouts.
 import type { IconName } from '../components/Icon.svelte';
 import { PAGES, type PageId } from './nav.svelte';
+import { SIDECHAIN } from '../chain/config';
+import { LOCAL_PAGES, type LocalPage } from '../chain/local';
+
+/** The pages of the chain of its own in a section (chain/local.ts). */
+function localPages(section: LocalPage['section']): PageId[] {
+  return (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.section === section).map((p) => p.id as PageId);
+}
 
 export type LayoutId = 'workspace' | 'dashboard' | 'sidebar';
 
@@ -66,10 +73,48 @@ export interface Area {
 }
 
 /**
- * The workspace layout: five areas, each with its sub-tabs. Every page is in one. What concerns the
- * chain (its explorer, mining, the sidechains) comes before the tools.
+ * The workspace layout: five areas, each with its sub-tabs (four on a sidechain, whose Chain area has
+ * its peg and merged mining). Every page is in one. What concerns the chain (its explorer, mining, the
+ * sidechains, the peg) comes before the tools.
  */
-export const AREAS: readonly Area[] = [
+const SIDECHAIN_AREAS: readonly Area[] = [
+  {
+    id: 'wallet',
+    label: 'Wallet',
+    icon: 'wallet',
+    tabs: [
+      { page: 'overview' },
+      { page: 'send' },
+      { page: 'receive' },
+      { page: 'transactions', label: 'History' },
+      { page: 'wallets' },
+      { page: 'advanced', label: 'Advanced' },
+      ...localPages('wallet').map((page) => ({ page })),
+    ],
+  },
+  {
+    id: 'chain',
+    label: 'Chain',
+    icon: 'block',
+    tabs: [{ page: 'peg' }, { page: 'bmm' }, ...localPages('chain').map((page) => ({ page })), { page: 'explorer', label: 'Explorer' }],
+  },
+  { id: 'tools', label: 'Tools', icon: 'hash', tabs: [{ page: 'tools' }, ...localPages('tools').map((page) => ({ page }))] },
+  {
+    id: 'node',
+    label: 'Node',
+    icon: 'terminal',
+    tabs: [
+      { page: 'node', tab: 'console', label: 'Console' },
+      { page: 'node', tab: 'peers', label: 'Peers' },
+      { page: 'node', tab: 'info', label: 'Info' },
+      { page: 'node', tab: 'traffic', label: 'Traffic' },
+      { page: 'settings' },
+      { page: 'kit' },
+    ],
+  },
+];
+
+const MAINCHAIN_AREAS: readonly Area[] = [
   {
     id: 'wallet',
     label: 'Wallet',
@@ -118,6 +163,8 @@ export const AREAS: readonly Area[] = [
     ],
   },
 ];
+
+export const AREAS: readonly Area[] = SIDECHAIN ? SIDECHAIN_AREAS : MAINCHAIN_AREAS;
 
 /** The area a page is in (the interface kit and home: the node and the wallet). */
 export function areaOf(page: PageId): Area {
@@ -174,21 +221,38 @@ export interface QuickAction {
 }
 
 /** The quick actions of Home: Send and Receive, then what concerns the chain, then the tools. */
-export const HOME_QUICK_ACTIONS: readonly QuickAction[] = [
-  { label: 'Send', icon: 'send', page: 'send', panel: 'send' },
-  { label: 'Receive', icon: 'receive', page: 'receive', panel: 'receive' },
-  { label: 'Deposit to a sidechain', icon: 'sidechains', page: 'sidechains' },
-  { label: 'Block explorer', icon: 'explorer', page: 'explorer' },
-  { label: 'Mine', icon: 'mine', page: 'mine' },
-  { label: 'Sign message', icon: 'edit', page: 'messages', tab: 'sign' },
-  { label: 'Load PSBT', icon: 'paste', page: 'psbt' },
-];
+export const HOME_QUICK_ACTIONS: readonly QuickAction[] = SIDECHAIN
+  ? [
+      { label: 'Send', icon: 'send', page: 'send', panel: 'send' },
+      { label: 'Receive', icon: 'receive', page: 'receive', panel: 'receive' },
+      { label: 'Deposit', icon: 'down', page: 'peg', tab: 'deposit' },
+      { label: 'Withdraw', icon: 'up', page: 'peg', tab: 'withdraw' },
+      { label: 'Merged mining', icon: 'merged', page: 'bmm' },
+      ...(LOCAL_PAGES as readonly LocalPage[])
+        .filter((p) => p.quick && p.section !== 'tools')
+        .map((p): QuickAction => ({ label: p.quick!.label, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
+      { label: 'Block explorer', icon: 'explorer', page: 'explorer' },
+      { label: 'Sign message', icon: 'edit', page: 'messages', tab: 'sign' },
+      { label: 'Load PSBT', icon: 'paste', page: 'psbt' },
+      ...(LOCAL_PAGES as readonly LocalPage[])
+        .filter((p) => p.quick && p.section === 'tools')
+        .map((p): QuickAction => ({ label: p.quick!.label, icon: p.quick!.icon ?? p.icon, page: p.id as PageId, tab: p.quick!.tab })),
+    ]
+  : [
+      { label: 'Send', icon: 'send', page: 'send', panel: 'send' },
+      { label: 'Receive', icon: 'receive', page: 'receive', panel: 'receive' },
+      { label: 'Deposit to a sidechain', icon: 'sidechains', page: 'sidechains' },
+      { label: 'Block explorer', icon: 'explorer', page: 'explorer' },
+      { label: 'Mine', icon: 'mine', page: 'mine' },
+      { label: 'Sign message', icon: 'edit', page: 'messages', tab: 'sign' },
+      { label: 'Load PSBT', icon: 'paste', page: 'psbt' },
+    ];
 
 /** The sidebars (dashboard, compact): every page, in the sections of the areas. */
 export const NAV_SECTIONS: readonly NavSection[] = [
-  { title: 'Wallet', pages: ['overview', 'send', 'receive', 'transactions', 'wallets', 'advanced'] },
-  // What concerns the chain before the tools.
-  { title: 'Chain', pages: ['sidechains', 'mine', 'explorer'] },
-  { title: 'Tools', pages: ['tools'] },
+  { title: 'Wallet', pages: ['overview', 'send', 'receive', 'transactions', 'wallets', 'advanced', ...localPages('wallet')] },
+  // What concerns the chain before the tools: on a sidechain its peg and merged mining.
+  { title: 'Chain', pages: SIDECHAIN ? ['peg', 'bmm', ...localPages('chain'), 'explorer'] : ['sidechains', 'mine', 'explorer'] },
+  { title: 'Tools', pages: ['tools', ...localPages('tools')] },
   { title: 'Node', pages: ['node', 'settings', 'kit'] },
 ];

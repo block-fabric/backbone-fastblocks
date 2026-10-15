@@ -1,23 +1,22 @@
 <script lang="ts">
-  // The mark of Chains, its name and the network (testnet, signet, regtest).
+  // The mark of the chain (chain.json: brand.mark, in brand.color), its name and the network (testnet, signet, regtest).
+  import { CHAIN } from '../chain/config';
   import { app } from '../lib/state.svelte';
 
   let {
     name = true,
     onclick,
-    label = 'Chains: home',
+    label = `${CHAIN.name}: home`,
     expanded,
   }: { name?: boolean; onclick?: () => void; label?: string; expanded?: boolean } = $props();
 </script>
 
 {#snippet content()}
   <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-    <rect x="3" y="9" width="12" height="14" rx="3.5" />
-    <rect x="17" y="9" width="12" height="14" rx="3.5" />
-    <path d="M11 16h10" />
+    {#each CHAIN.brand.mark as d, i (i)}<path {d} />{/each}
   </svg>
   {#if name}
-    <span class="name">Chains</span>
+    <span class="name" translate="no">{CHAIN.name}</span>
     {#if app.info?.networkLabel}<span class="badge warning net">{app.info.networkLabel}</span>{/if}
   {/if}
 {/snippet}
@@ -51,8 +50,9 @@
     height: 1.9rem;
     flex: none;
     fill: none;
-    stroke: var(--accent);
+    stroke: var(--brand, var(--accent));
     stroke-width: 2.4;
+    stroke-linejoin: round;
   }
   .name {
     font-size: 1.15rem;

@@ -2,6 +2,7 @@
   // The multisig lounge (MultisigDialog of chains-qt): collect the keys of partners, make shared
   // addresses that need several signatures, and spend from them by passing a PSBT around.
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   import CopyButton from '../components/CopyButton.svelte';
   import Icon from '../components/Icon.svelte';
   import { confirm, errorText, inform, prompt, walletRpc } from '../lib/dialogs.svelte';
@@ -179,7 +180,7 @@
       const available = scan.unspents.reduce((sum, c) => sum + jsonCoinsToUnits(c.amount), 0n);
       if (inputs.length === 0) return warn(t('The shared address holds no coins.'));
       const change = available - amountUnits - feeUnits;
-      if (change < 0n) return warn(t('The shared address holds %1 CHN, which is less than the amount and the fee.', unitsToCoins(available)));
+      if (change < 0n) return warn(t('The shared address holds %1 %2, which is less than the amount and the fee.', unitsToCoins(available), CHAIN.coin.ticker));
       const outputs: Record<string, string>[] = [{ [destination.trim()]: amount.trim() }];
       // Change too small to be worth an output goes to the fee.
       if (change >= 1000n) outputs.push({ [addresses[0]]: unitsToCoins(change) });
@@ -307,7 +308,7 @@
           <li class:chosen={selectedAddress === i}>
             <label class="pick"><input type="radio" name="address" checked={selectedAddress === i} onchange={() => (selectedAddress = i)} /> <strong translate="no">{entry.name}</strong></label>
             <span class="badge accent">{signersText(entry.value)}</span>
-            <span class="balance num">{balances[entry.value] ?? '?'} CHN</span>
+            <span class="balance num">{balances[entry.value] ?? '?'} {CHAIN.coin.ticker}</span>
             <code class="break">{addressOf[entry.value] ?? '…'}</code>
             <span class="copies">
               <CopyButton text={addressOf[entry.value] ?? ''} label="Copy address" />
@@ -339,11 +340,11 @@
           <input id="multisig-destination" type="text" class="mono" bind:value={destination} />
         </div>
         <div class="field">
-          <label for="multisig-amount">Amount (CHN)</label>
+          <label for="multisig-amount">Amount ({CHAIN.coin.ticker})</label>
           <input id="multisig-amount" type="text" class="num" placeholder="0.00000000" bind:value={amount} />
         </div>
         <div class="field">
-          <label for="multisig-fee">Fee (CHN)</label>
+          <label for="multisig-fee">Fee ({CHAIN.coin.ticker})</label>
           <input id="multisig-fee" type="text" class="num" bind:value={fee} />
         </div>
         <div class="row"><button type="submit" class="btn primary" disabled={preparing}>Prepare transaction</button></div>

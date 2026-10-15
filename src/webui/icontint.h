@@ -15,10 +15,10 @@ namespace webui {
 struct IconTint {
     int hue_shift{0};
     int saturation_reduction{0};
-    bool None() const { return hue_shift == 0 || saturation_reduction == 0; }
+    bool None() const { return hue_shift == 0 && saturation_reduction == 0; }
 };
 
-/** The tint of a network: "main" none, "test" and "testnet4" 70/30, "signet" 35/15, "regtest" 160/30. */
+/** The tint of a network: "main" none, "test" and "testnet4" 70/30, "signet" 35/15, "regtest" 160/30; the hue of the chain (chain::ICON_HUE) added. */
 IconTint TintOf(const std::string& network);
 
 /**

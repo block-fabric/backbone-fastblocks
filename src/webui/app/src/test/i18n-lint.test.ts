@@ -30,7 +30,7 @@ const MESSAGE_CALLS: Record<string, { args: number[]; props: string[] }> = {
   warn: { args: [0], props: [] },
 };
 /** The name of the app (from the host), put in sentences of the app: not text from outside. */
-const ALLOWED = new Set(["app.info?.name ?? 'Chains'"]);
+const ALLOWED = new Set(["app.info?.name ?? 'Chains'", 'app.info?.name ?? CHAIN.name', 'CHAIN.name', 'CHAIN.mainchain?.name']);
 
 interface Finding {
   file: string;

@@ -2,6 +2,7 @@
   // The bell of the top bars: the new transactions since the app started, a dot while some are not
   // seen. A notice of the wallet shown opens its transaction in the detail panel.
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   import SafeText from './SafeText.svelte';
   import Amount from './Amount.svelte';
   import Icon from './Icon.svelte';
@@ -61,7 +62,7 @@
         {#if unread}<button type="button" class="btn ghost small" onclick={markAllRead}>Mark all as read</button>{/if}
       </header>
       {#if list.length === 0}
-        <p class="muted empty">No new transactions since Chains started. They show here as they come.</p>
+        <p class="muted empty">No new transactions since {CHAIN.name} started. They show here as they come.</p>
       {:else}
         <ul>
           {#each list.slice(0, 12) as n (n.wallet + n.txid)}

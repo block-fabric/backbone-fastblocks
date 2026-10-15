@@ -1,6 +1,7 @@
 <script lang="ts">
   // The page of chains-app: what it shows follows the phase of the app.
   import { onMount } from 'svelte';
+  import { CHAIN } from './chain/config';
   import AppDialogs from './components/AppDialogs.svelte';
   import DialogHost from './components/DialogHost.svelte';
   import NodeDialogs from './components/NodeDialogs.svelte';
@@ -123,7 +124,7 @@
     return text
       .split(/\r?\n/)
       .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#') && /^chains:/i.test(l));
+      .filter((l) => l && !l.startsWith('#') && l.toLowerCase().startsWith(`${CHAIN.uriScheme}:`));
   }
 
   function ondragover(e: DragEvent) {

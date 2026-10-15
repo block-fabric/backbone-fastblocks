@@ -3,6 +3,7 @@
   // settings.json as chains-qt keeps them; the window; the look. A change that only takes effect
   // after a restart says so, and the app can restart at once.
   import Icon from '../components/Icon.svelte';
+  import { CHAIN } from '../chain/config';
   import { confirm, errorText, inform } from '../lib/dialogs.svelte';
   import { nav } from '../lib/nav.svelte';
   import { host, type NodeOptions, type NodeOptionValues } from '../lib/rpc';
@@ -14,6 +15,8 @@
   import { clampFontAdjust, FONTS, MAX_FONT_ADJUST, MIN_FONT_ADJUST, THEMES, type FontChoice, type ThemeId } from '../lib/themes';
   import { UNITS, type Unit } from '../lib/units';
   import LayoutPicker from '../components/LayoutPicker.svelte';
+  import MainchainSettings from '../components/MainchainSettings.svelte';
+  import { SIDECHAIN } from '../chain/config';
   import { frame } from '../lib/windowframe.svelte';
 
   // Appearance first: the look, the layout and the title bar (doc/webui-layouts.md).
@@ -23,6 +26,8 @@
     { id: 'wallet', label: 'Wallet' },
     { id: 'network', label: 'Network' },
     { id: 'window', label: 'Window' },
+    // A sidechain: the connection to its mainchain node.
+    ...(SIDECHAIN ? [{ id: 'mainchain', label: CHAIN.mainchain?.name ?? 'Mainchain' }] : []),
   ];
   const tab = $derived(TABS.some((t) => t.id === nav.tab) ? nav.tab : 'display');
 
@@ -136,7 +141,7 @@
   }
 
   async function restart() {
-    if (!(await confirm(t('Restart'), t('%1 will stop and start again with the new settings. Restart now?', app.info?.name ?? t('Chains')), { yes: 'Restart' }))) return;
+    if (!(await confirm(t('Restart'), t('%1 will stop and start again with the new settings. Restart now?', app.info?.name ?? CHAIN.name), { yes: 'Restart' }))) return;
     if (pending > 0 && (await applyChanges(options)) === null) return;
     try {
       await host.restart();
@@ -221,15 +226,17 @@
   {/if}
   {#if loadError}<p class="error">{loadError}</p>{/if}
 
-  {#if tab === 'main' && options}
+  {#if tab === 'mainchain' && options}
+    <MainchainSettings {options} {set} changed={(next) => { options = next; changedNow = true; }} />
+  {:else if tab === 'main' && options}
     <section class="panel">
       <div class="panel-body form">
         {#if app.info?.platform !== 'macos'}
           <label class="check">
             <input type="checkbox" checked={options.startAtLogin} onchange={(e) => set('startAtLogin', (e.currentTarget as HTMLInputElement).checked)} />
-            <span>Start {app.info?.name ?? 'Chains'} on system login</span>
+            <span>Start {app.info?.name ?? CHAIN.name} on system login</span>
           </label>
-          <p class="hint">Automatically start {app.info?.name ?? 'Chains'} after logging in to the system.</p>
+          <p class="hint">Automatically start {app.info?.name ?? CHAIN.name} after logging in to the system.</p>
         {/if}
 
         <div class="field-row" title={ignored('prune') ? overriddenTip : undefined}>
@@ -424,7 +431,7 @@
               <option value="embedded">Embedded (the font of the theme)</option>
               <option value="system">Default system monospaced font</option>
             </select>
-            <span class="hint">Sample: <span class="num sample">21 000 000.00000000 CHN</span></span>
+            <span class="hint">Sample: <span class="num sample">21 000 000.00000000 {CHAIN.coin.ticker}</span></span>
           </div>
         </div>
 
@@ -448,9 +455,9 @@
           </label>
           <span class="hint" role="status">
             {#if frame.restartNeeded}
-              Applies after a restart of Chains.
+              Applies after a restart of {CHAIN.name}.
             {:else}
-              Instead of the title bar of Chains, with its own minimize, maximize and close buttons.
+              Instead of the title bar of {CHAIN.name}, with its own minimize, maximize and close buttons.
             {/if}
           </span>
         {/if}

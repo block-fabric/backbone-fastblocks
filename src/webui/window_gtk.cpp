@@ -7,6 +7,7 @@
 // scheme chains-app://, with its content security policy as a header.
 
 #include <webui/assets.h>
+#include <webui/chainconfig.h>
 #include <webui/tray_gtk.h>
 #include <support/cleanse.h>
 #include <webui/window.h>
@@ -85,7 +86,7 @@ public:
             gtk_window_set_icon(GTK_WINDOW(m_window), icon);
             g_object_unref(icon);
         } else {
-            gtk_window_set_icon_name(GTK_WINDOW(m_window), "chains");
+            gtk_window_set_icon_name(GTK_WINDOW(m_window), std::string{chain::STEM}.c_str());
         }
         if (options.maximized) gtk_window_maximize(GTK_WINDOW(m_window));
         // The integrated title bar: the page draws the title bar and the handles at the edges.

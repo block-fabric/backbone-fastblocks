@@ -33,6 +33,7 @@ namespace webui {
 class AppConfig;
 class Bridge;
 class NodeApi;
+class SidechainApi;
 class SidechainNodes;
 class EventHub;
 class NodeEvents;
@@ -134,6 +135,7 @@ private:
     std::unique_ptr<NodeApi> m_node_api;
     //! The nodes of sidechains run from here.
     std::unique_ptr<SidechainNodes> m_sidechain_nodes;
+    std::unique_ptr<SidechainApi> m_sidechain_api;
     std::thread m_node_thread;
     std::atomic<bool> m_restart_requested{false};
     //! Messages and questions of the node.

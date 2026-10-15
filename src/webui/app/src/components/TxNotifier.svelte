@@ -43,7 +43,8 @@
           if (desktop) host.notify(t('New transaction'), t('In wallet %1', walletDisplayName(wallet))).catch(() => undefined);
           continue;
         }
-        for (const r of fresh.filter((x) => x.txid === txid)) {
+        // A block of a sidechain that pays its miner nothing (blind merged mining without fees) is no news.
+        for (const r of fresh.filter((x) => x.txid === txid && !(x.type === 'mined' && x.amount === 0n))) {
           const incoming = r.amount >= 0n;
           const amount = prefs.mask ? '••••••' : formatAmount(r.amount, prefs.unit, { withUnit: true, plus: true });
           const lines = [t('Date: %1', formatTime(r.time)), t('Amount: %1', amount), t('Type: %1', typeText(r.type) || t('Other'))];

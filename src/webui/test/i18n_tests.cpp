@@ -6,6 +6,7 @@
 // the messages of the node translated through it.
 
 #include <test/util/setup_common.h>
+#include <webui/chainconfig.h>
 #include <webui/assets.h>
 #include <webui/i18n.h>
 
@@ -80,7 +81,7 @@ BOOST_AUTO_TEST_CASE(choose_and_translate)
     BOOST_CHECK_EQUAL(webui::TranslateCore(message.c_str()), message);
 
     BOOST_CHECK_EQUAL(webui::NormalizeMessage("Loading wallet..."), "Loading wallet…");
-    BOOST_CHECK_EQUAL(webui::NormalizeMessage("Bitcoin Core is running"), "Chains is running");
+    BOOST_CHECK_EQUAL(webui::NormalizeMessage("Bitcoin Core is running"), std::string{webui::chain::NAME} + " is running");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

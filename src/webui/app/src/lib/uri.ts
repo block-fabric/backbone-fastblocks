@@ -1,8 +1,9 @@
-// Payment URIs (BIP 21) of Chains: chains:<address>?amount=1.5&label=...&message=...
+// Payment URIs (BIP 21) of this chain: <scheme>:<address>?amount=1.5&label=...&message=... (the scheme of chain.json)
 // As GUIUtil::parseBitcoinURI and formatBitcoinURI of chains-qt.
 import { parseAmount, satsToCoins } from './units';
+import { CHAIN } from '../chain/config';
 
-export const SCHEME = 'chains';
+export const SCHEME = CHAIN.uriScheme;
 
 export interface PaymentRequest {
   address: string;

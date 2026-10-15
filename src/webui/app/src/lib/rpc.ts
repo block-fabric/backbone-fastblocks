@@ -220,6 +220,8 @@ export const host = {
   setOption: (name: keyof NodeOptionValues, value: unknown) => request<NodeOptions>('host', 'options.set', { name, value }),
   // A setting that names a program (the signer): the file chooser and a confirmation of the desktop; null when cancelled.
   chooseProgramOption: (name: 'signer') => request<NodeOptions | null>('host', 'options.chooseProgram', { name }),
+  // A setting that names a file the node reads (a sidechain's mainchain cookie or password file): the file chooser of the desktop; null when cancelled.
+  chooseFileOption: (name: 'mainchainrpccookiefile' | 'mainchainrpcpasswordfile') => request<NodeOptions | null>('host', 'options.chooseFile', { name }),
   validProxy: (address: string) => request<boolean>('host', 'options.validProxy', { address }),
   resetOptions: () => request<boolean>('host', 'options.reset', {}),
   applyOptions: () => request<NodeOptions>('host', 'options.apply', {}),
@@ -256,6 +258,13 @@ export interface NodeOptionValues {
   torPort: string;
   lang: string;
   startAtLogin: boolean;
+  // A sidechain: the connection to its mainchain node (-mainchainrpc*; empty for the default).
+  mainchainConnect?: string;
+  mainchainPort?: string;
+  mainchainWallet?: string;
+  mainchainUser?: string;
+  mainchainCookieFile?: string;
+  mainchainPasswordFile?: string;
 }
 
 export interface NodeOptions extends NodeOptionValues {
@@ -268,6 +277,9 @@ export interface NodeOptions extends NodeOptionValues {
   restartRequired: boolean;
   /** Changes written since the last Apply, that Cancel takes back. */
   pending?: number;
+  /** A sidechain: the defaults of the connection to the mainchain node, and what the command line or the configuration file sets of it. */
+  mainchainDefaults?: { port: number; connect: string };
+  mainchainIgnored?: Record<string, string>;
 }
 
 export interface Hashes {

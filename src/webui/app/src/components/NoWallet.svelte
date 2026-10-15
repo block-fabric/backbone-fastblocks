@@ -2,6 +2,7 @@
   // What a page that needs a wallet shows without one: how to get one, or that this node runs without
   // wallets (-disablewallet), as chains-qt then shows no wallet pages at all.
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   import Icon from './Icon.svelte';
   import { go, type PageInfo } from '../lib/nav.svelte';
   import { walletsEnabled } from '../lib/state.svelte';
@@ -22,7 +23,7 @@
           <button type="button" class="btn" onclick={() => go('wallets', 'open')}>Open wallet…</button>
         </div>
       {:else}
-        <p class="muted">This node runs without wallets (the option -disablewallet is set). Start Chains without it to use wallets.</p>
+        <p class="muted">This node runs without wallets (the option -disablewallet is set). Start {CHAIN.name} without it to use wallets.</p>
       {/if}
     </div>
   </div>

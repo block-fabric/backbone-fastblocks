@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <webui/icontint.h>
+#include <webui/chainconfig.h>
 
 #include <algorithm>
 #include <cmath>
@@ -11,10 +12,14 @@ namespace webui {
 
 IconTint TintOf(const std::string& network)
 {
-    if (network == "test" || network == "testnet4") return {70, 30};
-    if (network == "signet") return {35, 15};
-    if (network == "regtest") return {160, 30};
-    return {};
+    // The hue of the chain (chain.json, brand.iconHue: one icon for every chain of the family, told
+    // apart by its colour), then that of the network.
+    IconTint tint{};
+    if (network == "test" || network == "testnet4") tint = {70, 30};
+    if (network == "signet") tint = {35, 15};
+    if (network == "regtest") tint = {160, 30};
+    tint.hue_shift = ((tint.hue_shift + chain::ICON_HUE) % 360 + 360) % 360;
+    return tint;
 }
 
 namespace {

@@ -10,6 +10,7 @@
 
 #include <sync.h>
 #include <webui/assets.h>
+#include <webui/chainconfig.h>
 
 #include <cstdlib>
 #include <map>
@@ -35,8 +36,8 @@ std::string NormalizeMessage(const std::string& message)
 {
     std::string s{message};
     ReplaceAll(s, "...", "…");
-    ReplaceAll(s, "Bitcoin Core", "Chains");
-    ReplaceAll(s, "Bitcoin", "Chains");
+    ReplaceAll(s, "Bitcoin Core", std::string{chain::NAME});
+    ReplaceAll(s, "Bitcoin", std::string{chain::NAME});
     return s;
 }
 

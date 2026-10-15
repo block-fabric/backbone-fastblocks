@@ -4,10 +4,12 @@ import { go, nav, type PageId } from './nav.svelte';
 import { host } from './rpc';
 import { prefs, savePrefs, wallets } from './state.svelte';
 import { clampFontAdjust } from './themes';
+import { SIDECHAIN } from '../chain/config';
 
 /** Ctrl+letter: the tabs of the node window (the Window menu of chains-qt). */
 const NODE_TABS: Record<string, string> = { i: 'info', t: 'console', n: 'traffic', p: 'peers' };
-const PAGE_KEYS: Record<string, PageId> = { '1': 'overview', '2': 'send', '3': 'receive', '4': 'transactions', '5': 'sidechains' };
+// Alt+5: the sidechains of the mainchain, the peg of a sidechain.
+const PAGE_KEYS: Record<string, PageId> = { '1': 'overview', '2': 'send', '3': 'receive', '4': 'transactions', '5': SIDECHAIN ? 'peg' : 'sidechains' };
 const WALLET_PAGES = new Set<PageId>(['send', 'receive', 'transactions']);
 
 /** Close what is on top: the newest open dialog (as Escape does), else the node window. */

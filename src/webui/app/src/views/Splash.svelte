@@ -1,6 +1,7 @@
 <script lang="ts">
   // While the node starts (or stops): what it does now.
   import { app } from '../lib/state.svelte';
+  import { CHAIN } from '../chain/config';
   import { host } from '../lib/rpc';
 
   let { stopping = false }: { stopping?: boolean } = $props();
@@ -19,10 +20,10 @@
     <rect class="b" x="40" y="6" width="20" height="20" rx="6" />
     <path d="M24 16h16" />
   </svg>
-  <h1>{app.info?.name ?? 'Chains'}</h1>
+  <h1>{app.info?.name ?? CHAIN.name}</h1>
   {#if app.info?.networkLabel}<span class="badge warning">{app.info.networkLabel}</span>{/if}
   {#if stopping}
-    <p class="message" role="status">{app.info?.name ?? 'Chains'} is shutting down…</p>
+    <p class="message" role="status">{app.info?.name ?? CHAIN.name} is shutting down…</p>
     <p class="hint">Do not shut down the computer until this window disappears.</p>
   {:else}
     <p class="message" role="status">{app.initMessage || 'Starting…'}</p>

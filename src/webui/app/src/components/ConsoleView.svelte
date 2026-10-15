@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   // The console of the node window (RPCConsole): commands with nesting and queries, a history
   // (arrows), completion of command names (Tab), a wallet to run them on, help-console, Ctrl+L.
   import { onMount, tick } from 'svelte';
@@ -34,7 +35,7 @@
   function greet() {
     if (consoleState.welcomed) return;
     consoleState.welcomed = true;
-    say('info', welcome(app.info?.name ?? 'Chains'));
+    say('info', welcome(app.info?.name ?? CHAIN.name));
     say('error', SCAM_WARNING);
   }
 

@@ -9,6 +9,8 @@ add_executable(test_chains-app
   appconfig_tests.cpp
   assets_tests.cpp
   bridge_tests.cpp
+  chainconfig_tests.cpp
+  sidechainapi_tests.cpp
   events_tests.cpp
   hardening_tests.cpp
   i18n_tests.cpp
@@ -18,6 +20,7 @@ add_executable(test_chains-app
   windowframe_tests.cpp
   $<$<BOOL:${ENABLE_WALLET}>:walletapi_tests.cpp>
 )
+set_target_properties(test_chains-app PROPERTIES OUTPUT_NAME test_${CLIENT_BIN_NAME}-app)
 target_link_libraries(test_chains-app
   core_interface
   chains_webui_core
@@ -48,7 +51,22 @@ add_test(NAME webui_test_hooks_built
   COMMAND ${CMAKE_COMMAND} -DAPP=$<TARGET_FILE:chains-app> -DEXPECT=${WEBUI_TEST_HOOKS} -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/check_test_hooks.cmake
 )
 # The end-to-end tests drive the app with its test hooks.
-if(WEBUI_TEST_HOOKS AND XVFB_RUN_EXECUTABLE AND Python3_Interpreter_FOUND)
+if(WEBUI_SIDECHAIN)
+  # A sidechain: its blocks need a mainchain. The app against a live regtest mainchain (chainsd, in
+  # WEBUI_MAINCHAIN_BIN_DIR): a deposit, merged mining, a withdrawal and its bundle paid. The other
+  # end-to-end tests are the mainchain's (they mine their own blocks): not run here.
+  set(WEBUI_MAINCHAIN_BIN_DIR "$ENV{MAINCHAIN_BIN_DIR}" CACHE PATH "Folder of chainsd, the mainchain node of the end-to-end test of a sidechain (default: $MAINCHAIN_BIN_DIR)")
+  if(WEBUI_TEST_HOOKS AND XVFB_RUN_EXECUTABLE AND Python3_Interpreter_FOUND AND EXISTS "${WEBUI_MAINCHAIN_BIN_DIR}/chainsd")
+    add_test(NAME webui_e2e_sidechain
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_sidechain.py
+        --app $<TARGET_FILE:chains-app>
+        --mainchain-bin ${WEBUI_MAINCHAIN_BIN_DIR}
+        --tmp ${CMAKE_CURRENT_BINARY_DIR}/e2e-sidechain
+        --shots ${CMAKE_CURRENT_BINARY_DIR}/e2e-shots
+    )
+    set_tests_properties(webui_e2e_sidechain PROPERTIES TIMEOUT 2400 RUN_SERIAL TRUE)
+  endif()
+elseif(WEBUI_TEST_HOOKS AND XVFB_RUN_EXECUTABLE AND Python3_Interpreter_FOUND)
   add_test(NAME webui_e2e_smoke
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_smoke.py
       --app $<TARGET_FILE:chains-app>

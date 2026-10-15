@@ -5,6 +5,7 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <webui/walletapi.h>
+#include <webui/chainconfig.h>
 
 #include <addresstype.h>
 #include <chainparams.h>
@@ -174,7 +175,7 @@ std::string PurposeName(AddressPurpose purpose)
 
 std::string FormatCoins(CAmount amount)
 {
-    return FormatMoney(amount) + " CHN";
+    return FormatMoney(amount) + " " + CURRENCY_UNIT;
 }
 
 std::string EncodePsbt(const PartiallySignedTransaction& psbtx)
@@ -226,7 +227,7 @@ CCoinControl MakeCoinControl(const UniValue& params)
     for (const COutPoint& o : OutpointsParam(params, "selected")) cc.Select(o);
     if (const std::string change{OptStr(params, "changeAddress")}; !change.empty()) {
         const CTxDestination dest{DecodeDestination(change)};
-        if (!IsValidDestination(dest)) throw HostError(WalletApi::SEND_REFUSED, "Warning: Invalid Chains address (custom change address)");
+        if (!IsValidDestination(dest)) throw HostError(WalletApi::SEND_REFUSED, strprintf("Warning: Invalid %s address (custom change address)", CLIENT_NAME));
         cc.destChange = dest;
     }
     if (const auto fee_rate{OptInt(params, "feeRate")}) {
@@ -1289,7 +1290,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
         auto w{get_wallet(params)};
         const std::string address{Str(params, "address")};
         const std::string label{OptStr(params, "label")};
-        if (!IsValidDestinationString(address)) throw HostError(WalletApi::SEND_REFUSED, strprintf("The entered address \"%s\" is not a valid Chains address.", address));
+        if (!IsValidDestinationString(address)) throw HostError(WalletApi::SEND_REFUSED, strprintf("The entered address \"%s\" is not a valid %s address.", address, CLIENT_NAME));
         const CTxDestination dest{DecodeDestination(address)};
         if (w->getAddress(dest, /*name=*/nullptr, /*purpose=*/nullptr)) throw HostError(WalletApi::SEND_REFUSED, duplicate_warning(*w, address, true));
         w->setAddressBook(dest, label, AddressPurpose::SEND);
@@ -1311,7 +1312,7 @@ WalletApi::WalletApi(NodeFn node, FileFn may_use_file) : m_node(std::move(node))
             // Only sending addresses can change their address.
             if (!sending) throw HostError("The address of a receiving address cannot be changed");
             const CTxDestination dest{DecodeDestination(new_address)};
-            if (std::get_if<CNoDestination>(&dest)) throw HostError(WalletApi::SEND_REFUSED, strprintf("The entered address \"%s\" is not a valid Chains address.", new_address));
+            if (std::get_if<CNoDestination>(&dest)) throw HostError(WalletApi::SEND_REFUSED, strprintf("The entered address \"%s\" is not a valid %s address.", new_address, CLIENT_NAME));
             if (w->getAddress(dest, nullptr, nullptr)) throw HostError(WalletApi::SEND_REFUSED, duplicate_warning(*w, new_address, true));
             w->delAddressBook(cur);
             w->setAddressBook(dest, label, purpose);

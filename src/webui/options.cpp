@@ -5,8 +5,10 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <webui/options.h>
+#include <webui/chainconfig.h>
 
 #include <webui/appconfig.h>
+#include <webui/chainconfig.h>
 
 #include <common/args.h>
 #include <common/settings.h>
@@ -22,6 +24,7 @@
 #include <util/chaintype.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
+#include <util/string.h>
 #include <validation.h>
 #ifdef ENABLE_WALLET
 #include <wallet/wallet.h>
@@ -123,8 +126,8 @@ fs::path AutostartDir()
 fs::path AutostartFile(ArgsManager& args)
 {
     const ChainType chain{args.GetChainType()};
-    if (chain == ChainType::MAIN) return AutostartDir() / "chains-app.desktop";
-    return AutostartDir() / fs::u8path(strprintf("chains-app-%s.desktop", ChainTypeToString(chain)));
+    if (chain == ChainType::MAIN) return AutostartDir() / fs::u8path(strprintf("%s.desktop", chain::APP));
+    return AutostartDir() / fs::u8path(strprintf("%s-%s.desktop", chain::APP, ChainTypeToString(chain)));
 }
 #endif
 
@@ -133,8 +136,8 @@ fs::path AutostartFile(ArgsManager& args)
 fs::path StartupShortcutPath(ArgsManager& args)
 {
     const ChainType chain{args.GetChainType()};
-    if (chain == ChainType::MAIN) return GetSpecialFolderPath(CSIDL_STARTUP) / "Chains.lnk";
-    return GetSpecialFolderPath(CSIDL_STARTUP) / fs::u8path(strprintf("Chains (%s).lnk", ChainTypeToString(chain)));
+    if (chain == ChainType::MAIN) return GetSpecialFolderPath(CSIDL_STARTUP) / fs::u8path(strprintf("%s.lnk", CLIENT_NAME));
+    return GetSpecialFolderPath(CSIDL_STARTUP) / fs::u8path(strprintf("%s (%s).lnk", CLIENT_NAME, ChainTypeToString(chain)));
 }
 
 //! COM on this thread for as long as it lives.
@@ -148,9 +151,58 @@ struct ComScope {
 #endif
 } // namespace
 
-NodeOptions::NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal, ChooseProgramFn choose_program)
-    : m_node(node), m_args(args), m_restart(std::move(restart)), m_journal(std::move(journal)), m_choose_program(std::move(choose_program))
+NodeOptions::NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal, ChooseProgramFn choose_program, ChooseFileFn choose_file)
+    : m_node(node), m_args(args), m_restart(std::move(restart)), m_journal(std::move(journal)), m_choose_program(std::move(choose_program)), m_choose_file(std::move(choose_file))
 {
+}
+
+namespace {
+#if WEBUI_SIDECHAIN
+//! The settings of the connection to the mainchain node (-mainchainrpc*), by the names of Get.
+struct MainchainSetting {
+    const char* key;
+    const char* setting;
+    //! A file: chosen in the file chooser of the desktop, never a text of the page.
+    bool file;
+};
+constexpr MainchainSetting MAINCHAIN_SETTINGS[]{
+    {"mainchainConnect", "mainchainrpcconnect", false},
+    {"mainchainPort", "mainchainrpcport", false},
+    {"mainchainWallet", "mainchainrpcwallet", false},
+    {"mainchainUser", "mainchainrpcuser", false},
+    {"mainchainCookieFile", "mainchainrpccookiefile", true},
+    {"mainchainPasswordFile", "mainchainrpcpasswordfile", true},
+};
+#endif
+} // namespace
+
+bool NodeOptions::NamesFile(const std::string& name)
+{
+#if WEBUI_SIDECHAIN
+    for (const auto& m : MAINCHAIN_SETTINGS) {
+        if (m.file && name == m.setting) return true;
+    }
+#endif
+    (void)name;
+    return false;
+}
+
+UniValue NodeOptions::ChooseFile(const std::string& name)
+{
+    if (!NamesFile(name)) throw std::runtime_error("No option naming a file: " + name);
+    if (m_node.isSettingIgnored(name)) throw std::runtime_error("This option is set on the command line or in the configuration file.");
+    if (!m_choose_file) throw std::runtime_error("Files cannot be chosen here.");
+    const std::string current{SettingToString(m_node.getPersistentSetting(name), "")};
+    const std::string title{name == "mainchainrpccookiefile" ? strprintf("The cookie file of the %s node (.cookie in its data directory)", chain::MAINCHAIN_NAME)
+                                                             : strprintf("The file with the RPC password of the %s node (owner-only)", chain::MAINCHAIN_NAME)};
+    const auto chosen{m_choose_file(title, current)};
+    if (!chosen) return UniValue{};
+    if (*chosen != current) {
+        if (m_journal) m_journal(name);
+        m_node.updateRwSetting(name, *chosen);
+        m_restart(true);
+    }
+    return Get();
 }
 
 bool NodeOptions::NamesProgram(const std::string& name)
@@ -224,7 +276,7 @@ bool NodeOptions::SetStartAtLogin(ArgsManager& args, bool start)
     const ChainType chain{args.GetChainType()};
     file << "[Desktop Entry]\n";
     file << "Type=Application\n";
-    file << (chain == ChainType::MAIN ? std::string{"Name=Chains\n"} : strprintf("Name=Chains (%s)\n", ChainTypeToString(chain)));
+    file << (chain == ChainType::MAIN ? strprintf("Name=%s\n", CLIENT_NAME) : strprintf("Name=%s (%s)\n", CLIENT_NAME, ChainTypeToString(chain)));
     file << "Exec=" << exe << strprintf(" -min -chain=%s\n", ChainTypeToString(chain));
     file << "Terminal=false\n";
     file << "Hidden=false\n";
@@ -285,6 +337,23 @@ UniValue NodeOptions::Get()
     proxy("onion", "torUse", "torIp", "torPort", out);
     out.pushKV("lang", SettingToString(setting("lang"), ""));
     out.pushKV("startAtLogin", StartAtLogin(m_args));
+#if WEBUI_SIDECHAIN
+    // The connection to the mainchain node: empty for the default (shown apart: mainchainDefaults).
+    UniValue mainchain_ignored{UniValue::VOBJ};
+    for (const auto& m : MAINCHAIN_SETTINGS) {
+        out.pushKV(m.key, SettingToString(setting(m.setting), ""));
+        if (m_node.isSettingIgnored(m.setting)) mainchain_ignored.pushKV(m.key, m_args.GetArg(std::string{"-"} + m.setting, ""));
+    }
+    UniValue defaults{UniValue::VOBJ};
+    const std::string network{ChainTypeToString(m_args.GetChainType())};
+    for (const auto& n : chain::NETWORKS) {
+        if (n.id == network || (n.id == "test" && network == "test")) defaults.pushKV("port", n.mainchain_rpc_port);
+    }
+    defaults.pushKV("connect", "127.0.0.1");
+    out.pushKV("mainchainDefaults", std::move(defaults));
+    // Set on the command line or in the configuration file: the page shows the value, and cannot change it.
+    out.pushKV("mainchainIgnored", std::move(mainchain_ignored));
+#endif
 
     // What the command line or chains.conf decides (OptionsModel::addOverriddenOption).
     UniValue ignored{UniValue::VOBJ};
@@ -411,6 +480,13 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
         update(n, v);
         restart();
     }};
+    // A setting whose absence means its default: empty text takes it away.
+    const auto set_optional_text{[&](const std::string& n, const std::string& v) {
+        if (v == SettingToString(setting(n), "")) return;
+        update(n, v.empty() ? common::SettingsValue{} : common::SettingsValue{v});
+        restart();
+    }};
+    (void)set_optional_text;
 
     const UniValue now{Get()};
     if (name == "dbcache") {
@@ -457,6 +533,25 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
         set_proxy_field(name == "proxyPort" ? "proxy" : "onion", false, strprintf("%d", port), "");
     } else if (name == "lang") {
         set_text("lang", Str(value));
+#if WEBUI_SIDECHAIN
+    } else if (name.starts_with("mainchain")) {
+        const auto* m{std::ranges::find_if(MAINCHAIN_SETTINGS, [&](const MainchainSetting& m) { return name == m.key; })};
+        if (m == std::end(MAINCHAIN_SETTINGS)) throw std::runtime_error("No option " + name);
+        if (m_node.isSettingIgnored(m->setting)) throw std::runtime_error("This option is set on the command line or in the configuration file.");
+        const std::string text{util::TrimString(Str(value))};
+        if (m->file) {
+            // A file is chosen with Choose…, in a dialog of the desktop: the page can only take it away.
+            if (!text.empty()) throw std::runtime_error("The file is chosen with Choose…, in a dialog of the desktop.");
+        } else if (name == "mainchainPort") {
+            const auto port{ToIntegral<uint16_t>(text)};
+            if (!text.empty() && (!port || *port == 0)) throw std::runtime_error("The port is a number from 1 to 65535.");
+        } else if (name == "mainchainConnect") {
+            if (text.find_first_of(" \t/@") != std::string::npos) throw std::runtime_error("The address of the mainchain node is a host name or an IP address.");
+        } else if (text.size() > 200 || text.find_first_of("\r\n") != std::string::npos) {
+            throw std::runtime_error("This text cannot be used here.");
+        }
+        set_optional_text(m->setting, text);
+#endif
     } else if (name == "startAtLogin") {
         if (m_journal && Bool(value) != StartAtLogin(m_args)) m_journal("@startAtLogin");
         if (!SetStartAtLogin(m_args, Bool(value))) throw std::runtime_error("The app could not be set to start at login");

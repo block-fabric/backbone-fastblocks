@@ -7,6 +7,10 @@
     history: 'M4 12a8 8 0 1 0 2.3-5.6M4 4v4h4M12 8v4l3 2',
     sidechains: 'M7 7a3 3 0 1 0 0 .01M17 17a3 3 0 1 0 0 .01M17 7a3 3 0 1 0 0 .01M9.6 8.5l4.8 7M10 7h4',
     nodes: 'M4 6h16v4H4zM4 14h16v4H4zM7 8h.01M7 16h.01',
+    // A sidechain: the peg (coins down to it, up back to the mainchain), merged mining (its blocks
+    // committed to in the blocks of the mainchain).
+    peg: 'M8 4v14M4.5 14.5L8 18l3.5-3.5M16 20V6M12.5 9.5L16 6l3.5 3.5',
+    merged: 'M3 6h7v5H3zM14 13h7v5h-7zM10 8.5h2.5a1.5 1.5 0 0 1 1.5 1.5v5.5',
     mine: 'M14.5 4.5l5 5M4 20l9-9M12 6l6 6-2 2-6-6z',
     explorer: 'M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM15.5 15.5L20 20',
     terminal: 'M4 5h16v14H4zM7 9l3 3-3 3M12 15h5',

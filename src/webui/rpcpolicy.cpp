@@ -4,6 +4,9 @@
 
 #include <webui/rpcpolicy.h>
 
+#include <webui/chainconfig.h>
+#include <webui/local.h>
+
 #include <map>
 #include <set>
 
@@ -14,7 +17,8 @@ using enum Bridge::Thread;
 // Keep in order; LONG for the methods that may run for long (they never hold up the quick ones).
 const std::map<std::string, Bridge::Thread>& Methods()
 {
-    static const std::map<std::string, Bridge::Thread> methods{
+    static const std::map<std::string, Bridge::Thread> methods{[] {
+    std::map<std::string, Bridge::Thread> methods{
         // The chain and the node.
         {"getbestblockhash", WORKER},
         {"getblock", WORKER},
@@ -32,6 +36,20 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"help", WORKER},
         {"listbanned", WORKER},
         {"uptime", WORKER},
+#if WEBUI_SIDECHAIN
+        // A sidechain (the Peg and Merged mining pages, the dashboard): the mainchain it follows, its
+        // withdrawals and bundles, blind merged mining.
+        {"createwithdrawal", WORKER},
+        {"getbmminfo", WORKER},
+        {"getdepositaddress", WORKER},
+        {"getmainchaininfo", WORKER},
+        {"getwithdrawalbundle", WORKER},
+        {"listwithdrawals", WORKER},
+        {"refundwithdrawal", WORKER},
+        {"requestbmmblock", LONG},
+        {"setbmm", WORKER},
+        {"syncmainchain", LONG},
+#else
         // Mining with the processor (the Mine page).
         {"getgenerate", WORKER},
         {"setgenerate", WORKER},
@@ -47,6 +65,7 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"removesidechainproposal", WORKER},
         {"setdefaultwithdrawalvote", WORKER},
         {"setwithdrawalvote", WORKER},
+#endif
         // Addresses, scripts and PSBTs (multisig lounge, proof of funds, crypto tools).
         {"createpsbt", WORKER},
         {"decodepsbt", WORKER},
@@ -69,11 +88,17 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"walletpassphrase", WORKER},
         // What needs the keys: run as is by a wallet that needs no unlocking (a locked one answers -13,
         // and the page asks for the passphrase and goes through wallet.withKeys).
+#if !WEBUI_SIDECHAIN
         {"createsidechaindeposit", WORKER},
+#endif
         {"send", WORKER},
         {"signmessage", WORKER},
         {"walletprocesspsbt", WORKER},
     };
+    // The methods of this chain's own pages (local.cpp).
+    for (const auto& [name, thread] : local::RpcMethods()) methods.emplace(name, thread);
+    return methods;
+    }()};
     return methods;
 }
 } // namespace
@@ -94,7 +119,18 @@ std::vector<std::string> PageRpcMethods()
 
 bool KeyedWalletRpc(const std::string& method)
 {
-    static const std::set<std::string> methods{"createsidechaindeposit", "send", "signmessage", "walletprocesspsbt"};
+    static const std::set<std::string> methods{[] {
+        std::set<std::string> m{"send", "signmessage", "walletprocesspsbt",
+#if WEBUI_SIDECHAIN
+                                "createwithdrawal", "refundwithdrawal",
+#else
+                                "createsidechaindeposit",
+#endif
+        };
+        // The keyed methods of this chain's own pages (local.cpp).
+        m.merge(local::KeyedRpcMethods());
+        return m;
+    }()};
     return methods.contains(method);
 }
 

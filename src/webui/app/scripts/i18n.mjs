@@ -18,6 +18,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), '..');
+// The chain of the app (src/chain/chain.json): its name takes the place of "Bitcoin", its scheme that of "bitcoin:".
+const CHAIN = JSON.parse(readFileSync(join(APP, 'src/chain/chain.json'), 'utf8'));
 const CATALOGS = join(APP, '../locale');
 const OUT = join(APP, 'public/locales');
 const RTL = new Set(['ar', 'fa', 'he', 'ur', 'ps', 'ug', 'sd', 'ku_IQ', 'yi']);
@@ -33,16 +35,16 @@ function unescapeXml(s) {
     .replace(/&amp;/g, '&');
 }
 
-/** As chains-app writes a message: no mnemonic, an ellipsis, Chains. */
+/** As the app writes a message: no mnemonic, an ellipsis, the name of the chain. */
 export function normalize(s) {
   return s
     .replace(/&&/g, '\u0000')
     .replace(/&(?=\S)/g, '')
     .replace(/\u0000/g, '&')
     .replace(/\.\.\./g, '…')
-    .replace(/\bBitcoin Core\b/g, 'Chains')
-    .replace(/\bBitcoin\b/g, 'Chains')
-    .replace(/\bbitcoin:/g, 'chains:')
+    .replace(/\bBitcoin Core\b/g, CHAIN.name)
+    .replace(/\bBitcoin\b/g, CHAIN.name)
+    .replace(/\bbitcoin:/g, `${CHAIN.uriScheme}:`)
     .trim();
 }
 

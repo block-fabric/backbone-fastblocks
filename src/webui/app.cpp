@@ -5,6 +5,7 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <webui/app.h>
+#include <webui/chainconfig.h>
 
 #include <chainparams.h>
 #include <clientversion.h>
@@ -35,6 +36,8 @@
 #include <webui/nodeevents.h>
 #include <webui/options.h>
 #include <webui/rpcpolicy.h>
+#include <webui/local.h>
+#include <webui/sidechainapi.h>
 #include <webui/sidechainnodes.h>
 #include <webui/singleinstance.h>
 #ifdef WIN32
@@ -119,14 +122,14 @@ void SetupUIArgs(ArgsManager& argsman)
     argsman.AddArg("-resetguisettings", "Reset all settings changed in the GUI", ArgsManager::ALLOW_ANY, OptionsCategory::GUI);
     argsman.AddArg("-splash", strprintf("Show splash screen on startup (default: %u)", DEFAULT_SPLASHSCREEN), ArgsManager::ALLOW_ANY, OptionsCategory::GUI);
     argsman.AddArg("-webuidevtools", "Enable the web inspector and the context menu of the web view (default: 0)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
-    argsman.AddArg("-webuiconfig=<file>", "File of the app settings (default: chains-app.json in the configuration folder of the user)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
+    argsman.AddArg("-webuiconfig=<file>", strprintf("File of the app settings (default: %s.json in the configuration folder of the user)", webui::chain::APP), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
 #ifdef WEBUI_TEST_HOOKS
     // Only in a build for the tests (cmake -DWEBUI_TEST_HOOKS=ON): a release has neither the options nor the hooks.
     argsman.AddArg("-webuitestscript=<file>", "Run this script in the page once it is loaded, with the test methods of the bridge (for the tests of the app)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
     argsman.AddArg("-webuitestshots=<dir>", "Folder for the pictures the test script takes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
 #endif
 #ifdef WIN32
-    argsman.AddArg("-webuiregisteruri", "Open chains: payment URIs with this program, for this user, unless another one does (default: 1; never with -webuitestscript)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
+    argsman.AddArg("-webuiregisteruri", strprintf("Open %s: payment URIs with this program, for this user, unless another one does (default: 1; never with -webuitestscript)", webui::chain::URI_SCHEME), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::GUI);
 #endif
 }
 
@@ -864,7 +867,7 @@ void App::RegisterHostMethods()
     });
     b.RegisterHost("app.help", [this](const UniValue&) {
         UniValue out{UniValue::VOBJ};
-        out.pushKV("usage", "Usage: chains-app [options] [URI]");
+        out.pushKV("usage", strprintf("Usage: %s [options] [URI]", webui::chain::APP));
         out.pushKV("options", m_args.GetHelpMessage());
         return out;
     });
@@ -1089,6 +1092,11 @@ void App::RegisterHostMethods()
     });
     m_node_api->Register(b);
 
+#if WEBUI_SIDECHAIN
+    // The pages of a sidechain: its mainchain node, through the node's own connection to it.
+    m_sidechain_api = std::make_unique<SidechainApi>(need_node);
+    m_sidechain_api->Register(b);
+#else
     // The nodes of sidechains run from here (the Sidechain Nodes window).
     const auto sidechain_key{[this] {
         LOCK(m_mutex);
@@ -1112,6 +1120,9 @@ void App::RegisterHostMethods()
             return Confirm({.title = title, .message = message, .accept = accept});
         });
     m_sidechain_nodes->Register(b);
+#endif
+    // The host methods of this chain's own pages (local.cpp).
+    local::RegisterHost(b, need_node);
 
     // The options of the node (OptionsModel), in settings.json; the flag of a restart in the preferences.
     const auto options{[this, need_node]() {
@@ -1147,6 +1158,13 @@ void App::RegisterHostMethods()
                                                  "Accept only if you know what it is.", title, *path)};
             if (!Confirm({.title = title, .message = question, .accept = "Use this program"})) return std::nullopt;
             return path;
+        }, [this](const std::string& title, const std::string& current) -> std::optional<std::string> {
+            // A file the node reads (the cookie file of the mainchain node): chosen by the user in the file
+            // chooser of the desktop, never a text of the page.
+            Window::FileDialog dialog;
+            dialog.title = title;
+            if (!current.empty()) dialog.start_dir = fs::PathToString(fs::PathFromString(current).parent_path());
+            return Choose(dialog);
         }};
     }};
     const auto with_pending{[this](UniValue out) {
@@ -1176,6 +1194,16 @@ void App::RegisterHostMethods()
         // of the desktop. Null when the user cancelled.
         try {
             auto out{options().ChooseProgram(ParamStr(params, "name"))};
+            return out.isNull() ? out : with_pending(std::move(out));
+        } catch (const std::runtime_error& e) {
+            throw HostError(BRIDGE_INVALID_REQUEST, e.what());
+        }
+    }, Bridge::Thread::LONG);
+    b.RegisterHost("options.chooseFile", [options, with_pending](const UniValue& params) {
+        // A setting that names a file the node reads (a sidechain's mainchain cookie or password file): through
+        // the file chooser of the desktop. Null when the user cancelled.
+        try {
+            auto out{options().ChooseFile(ParamStr(params, "name"))};
             return out.isNull() ? out : with_pending(std::move(out));
         } catch (const std::runtime_error& e) {
             throw HostError(BRIDGE_INVALID_REQUEST, e.what());
@@ -1387,7 +1415,7 @@ int App::Run()
 
 #ifdef WIN32
     // The payment URIs of the chain (the installer of chains-qt registers them for all users).
-    if (m_args.GetBoolArg("-webuiregisteruri", true) && m_args.GetArg("-webuitestscript", "").empty()) RegisterUriScheme("chains", CLIENT_NAME);
+    if (m_args.GetBoolArg("-webuiregisteruri", true) && m_args.GetArg("-webuitestscript", "").empty()) RegisterUriScheme(std::string{webui::chain::URI_SCHEME}, CLIENT_NAME);
 #endif
 
     Window::Options options;

@@ -16,6 +16,13 @@
   import Transactions from '../pages/Transactions.svelte';
   import Wallets from '../pages/Wallets.svelte';
   import Home from './home/Home.svelte';
+  import SideHome from './home/SideHome.svelte';
+  import Peg from '../pages/Peg.svelte';
+  import Bmm from '../pages/Bmm.svelte';
+  import LocalPages from '../chain/LocalPages.svelte';
+  import { SIDECHAIN } from '../chain/config';
+  import { LOCAL_PAGES } from '../chain/local';
+  import { chainHas } from '../lib/commands.svelte';
   import { nav, PAGES } from '../lib/nav.svelte';
   import { wallets, walletsEnabled } from '../lib/state.svelte';
 
@@ -23,11 +30,16 @@
   // With -disablewallet there are no wallet pages (chains-qt builds no wallet UI then): they say why.
   const walletsOn = $derived(walletsEnabled());
   const page = $derived(PAGES[nav.page]);
+  /** A page of the chain of its own (chain/local.ts). */
+  const local = $derived(LOCAL_PAGES.some((p: { id: string }) => p.id === nav.page));
 </script>
 
 {#key nav.page}
-  {#if nav.page === 'home'}
-    <Home />
+  {#if !chainHas(nav.page)}
+    <!-- A page of the kit this chain does not have (chain.json: drop): the overview instead. -->
+    <Overview />
+  {:else if nav.page === 'home'}
+    {#if SIDECHAIN}<SideHome />{:else}<Home />{/if}
   {:else if nav.page === 'overview'}
     <Overview />
   {:else if nav.page === 'node'}
@@ -46,6 +58,12 @@
     <Explorer />
   {:else if nav.page === 'tools'}
     <Tools />
+  {:else if nav.page === 'peg'}
+    <Peg />
+  {:else if nav.page === 'bmm'}
+    <Bmm />
+  {:else if local && !(page.wallet && noWallet)}
+    <LocalPages page={nav.page} />
   {:else if (page.wallet && noWallet) || (!walletsOn && nav.page === 'wallets')}
     <NoWallet {page} />
   {:else if nav.page === 'send'}

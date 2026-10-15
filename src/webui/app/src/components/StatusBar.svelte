@@ -1,5 +1,6 @@
 <script lang="ts">
   import SafeText from './SafeText.svelte';
+  import { CHAIN } from '../chain/config';
   // The bar at the bottom: sync, the chain as it grows, peers, the unit of amounts, the lock of the wallet.
   import { t } from '../lib/i18n.svelte';
   import Icon from './Icon.svelte';
@@ -117,7 +118,7 @@
       class="btn ghost small"
       aria-haspopup="menu"
       aria-expanded={netMenu}
-      title={node.networkActive ? `${node.connections} active connection${node.connections === 1 ? '' : 's'} to the Chains network. Click for more actions.` : 'Network activity disabled. Click for more actions.'}
+      title={node.networkActive ? `${node.connections} active connection${node.connections === 1 ? '' : 's'} to the ${CHAIN.name} network. Click for more actions.` : 'Network activity disabled. Click for more actions.'}
       onclick={() => (netMenu = !netMenu)}
     >
       <Icon name={node.networkActive ? 'peers' : 'offline'} size={16} />

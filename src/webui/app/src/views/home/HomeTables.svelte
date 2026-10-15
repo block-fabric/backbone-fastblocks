@@ -55,6 +55,7 @@
     blocks,
     peers,
     now,
+    hide = [],
   }: {
     recent: TxRecord[];
     history: { time: number; balance: bigint }[];
@@ -66,15 +67,18 @@
     blocks: BlockRow[];
     peers: Peer[];
     now: number;
+    /** Tabs not shown (a sidechain has no sidechains of its own). */
+    hide?: string[];
   } = $props();
 
   type Tab = 'transactions' | 'sidechains' | 'blocks' | 'peers';
-  const TABS: { id: Tab; label: string; open: string }[] = [
+  const ALL_TABS: { id: Tab; label: string; open: string }[] = [
     { id: 'transactions', label: 'Transactions', open: 'All transactions' },
     { id: 'sidechains', label: 'Sidechains', open: 'Open the sidechains' },
     { id: 'blocks', label: 'Blocks', open: 'Block explorer' },
     { id: 'peers', label: 'Peers', open: 'All peers' },
   ];
+  const TABS = $derived(ALL_TABS.filter((tb) => !hide.includes(tb.id)));
   let tab: Tab = $state('transactions');
   const counts = $derived({ transactions: recent.length, sidechains: sidechains.length, blocks: blocks.length, peers: peers.length });
 

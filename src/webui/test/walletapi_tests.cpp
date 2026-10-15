@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <consensus/amount.h>
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
@@ -15,6 +17,7 @@
 #include <util/strencodings.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <chainparams.h>
 #include <webui/bridge.h>
 #include <webui/walletapi.h>
 
@@ -248,7 +251,7 @@ BOOST_AUTO_TEST_CASE(send_receive_and_history)
     Call("wallets.create", Obj({{"name", "bob"}}));
     const std::string a1{Call("wallet.newAddress", Obj({{"wallet", "alice"}, {"label", "mining"}, {"type", "bech32"}})).get_str()};
     const std::string b1{Call("wallet.newAddress", Obj({{"wallet", "bob"}, {"label", "from alice"}})).get_str()};
-    BOOST_CHECK(a1.starts_with("rchn1q"));
+    BOOST_CHECK(a1.starts_with(Params().Bech32HRP() + "1q"));
     BOOST_CHECK_EQUAL(ErrorOf("wallet.newAddress", Obj({{"wallet", "bob"}, {"type", "nonsense"}})), webui::BRIDGE_INVALID_REQUEST);
 
     // Coins for alice: a block, then 100 more to make it mature.
@@ -427,7 +430,7 @@ BOOST_AUTO_TEST_CASE(address_book_requests_and_messages)
     ErrorOf("wallet.addressBook.add", Obj({{"wallet", "book"}, {"address", mine}, {"label", "x"}}), &message);
     BOOST_CHECK_EQUAL(message, "Address \"" + mine + "\" already exists as a receiving address with label \"me\" and so cannot be added as a sending address.");
     ErrorOf("wallet.addressBook.add", Obj({{"wallet", "book"}, {"address", "rchn1qnope"}}), &message);
-    BOOST_CHECK_EQUAL(message, "The entered address \"rchn1qnope\" is not a valid Chains address.");
+    BOOST_CHECK_EQUAL(message, strprintf("The entered address \"rchn1qnope\" is not a valid %s address.", CLIENT_NAME));
     BOOST_CHECK(!Call("wallet.addressBook.edit", Obj({{"wallet", "book"}, {"address", theirs}, {"label", "Carol"}}))["changed"].get_bool());
     Call("wallet.addressBook.edit", Obj({{"wallet", "book"}, {"address", theirs}, {"label", "Carol B."}, {"newAddress", theirs2}}));
     // Receiving addresses: the label only, and never deleted.

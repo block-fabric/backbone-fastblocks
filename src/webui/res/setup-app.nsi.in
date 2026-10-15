@@ -24,7 +24,7 @@ Unicode true
 !define MUI_STARTMENUPAGE_REGISTRY_VALUENAME StartMenuGroup
 !define MUI_STARTMENUPAGE_DEFAULTFOLDER "@CLIENT_NAME@"
 !define MUI_FINISHPAGE_RUN "$WINDIR\explorer.exe"
-!define MUI_FINISHPAGE_RUN_PARAMETERS $INSTDIR\chains-app.exe
+!define MUI_FINISHPAGE_RUN_PARAMETERS $INSTDIR\@CLIENT_BIN_NAME@-app.exe
 !define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
 !define MUI_UNWELCOMEFINISHPAGE_BITMAP "@abs_top_srcdir@/share/pixmaps/nsis-wizard.bmp"
 !define MUI_UNFINISHPAGE_NOAUTOCLOSE
@@ -50,7 +50,7 @@ Var StartMenuGroup
 !insertmacro MUI_LANGUAGE English
 
 # Installer attributes
-InstallDir $PROGRAMFILES64\Chains
+InstallDir $PROGRAMFILES64\@CLIENT_NAME@
 CRCCheck force
 XPStyle on
 BrandingText " "
@@ -70,15 +70,15 @@ ShowUninstDetails show
 Section -Main SEC0000
     SetOutPath $INSTDIR
     SetOverwrite on
-    File "@BIN_DIR@/chains-app.exe"
+    File "@BIN_DIR@/@CLIENT_BIN_NAME@-app.exe"
     File /oname=COPYING.txt "@abs_top_srcdir@/COPYING"
-    File /oname=readme.txt "@abs_top_srcdir@/src/webui/res/README-windows.txt"
+    File /oname=readme.txt "@webui_release@/README-windows.txt"
     SetOutPath $INSTDIR\daemon
-    File "@BIN_DIR@/chainsd.exe"
-    File "@BIN_DIR@/chains-cli.exe"
-    File "@BIN_DIR@/chains-tx.exe"
-    File "@BIN_DIR@/chains-wallet.exe"
-    File "@BIN_DIR@/chains-util.exe"
+    File "@BIN_DIR@/@CLIENT_BIN_NAME@d.exe"
+    File "@BIN_DIR@/@CLIENT_BIN_NAME@-cli.exe"
+    File "@BIN_DIR@/@CLIENT_BIN_NAME@-tx.exe"
+    File "@BIN_DIR@/@CLIENT_BIN_NAME@-wallet.exe"
+    File "@BIN_DIR@/@CLIENT_BIN_NAME@-util.exe"
     SetOutPath $INSTDIR
     WriteRegStr HKCU "${REGKEY}\Components" Main 1
 SectionEnd
@@ -89,24 +89,24 @@ Section -post SEC0001
     WriteUninstaller $INSTDIR\uninstall.exe
     !insertmacro MUI_STARTMENU_WRITE_BEGIN Application
     CreateDirectory $SMPROGRAMS\$StartMenuGroup
-    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\$(^Name).lnk" $INSTDIR\chains-app.exe
-    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\@CLIENT_NAME@ (testnet).lnk" "$INSTDIR\chains-app.exe" "-testnet" "$INSTDIR\chains-app.exe" 1
-    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\@CLIENT_NAME@ (signet).lnk" "$INSTDIR\chains-app.exe" "-signet" "$INSTDIR\chains-app.exe" 2
+    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\$(^Name).lnk" $INSTDIR\@CLIENT_BIN_NAME@-app.exe
+    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\@CLIENT_NAME@ (testnet).lnk" "$INSTDIR\@CLIENT_BIN_NAME@-app.exe" "-testnet" "$INSTDIR\@CLIENT_BIN_NAME@-app.exe" 1
+    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\@CLIENT_NAME@ (signet).lnk" "$INSTDIR\@CLIENT_BIN_NAME@-app.exe" "-signet" "$INSTDIR\@CLIENT_BIN_NAME@-app.exe" 2
     CreateShortcut "$SMPROGRAMS\$StartMenuGroup\Uninstall $(^Name).lnk" $INSTDIR\uninstall.exe
     !insertmacro MUI_STARTMENU_WRITE_END
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayName "$(^Name)"
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayVersion "@CLIENT_VERSION_STRING@"
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" Publisher "${COMPANY}"
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" URLInfoAbout "${URL}"
-    WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayIcon $INSTDIR\chains-app.exe
+    WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayIcon $INSTDIR\@CLIENT_BIN_NAME@-app.exe
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" UninstallString $INSTDIR\uninstall.exe
     WriteRegDWORD HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" NoModify 1
     WriteRegDWORD HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" NoRepair 1
-    # The payment URIs (as chains-qt's installer; the app registers them for the user otherwise).
-    WriteRegStr HKCR "chains" "URL Protocol" ""
-    WriteRegStr HKCR "chains" "" "URL:@CLIENT_NAME@"
-    WriteRegStr HKCR "chains\DefaultIcon" "" "$INSTDIR\chains-app.exe,0"
-    WriteRegStr HKCR "chains\shell\open\command" "" '"$INSTDIR\chains-app.exe" "%1"'
+    # The payment URIs (as the installer of the Qt GUI did; the app registers them for the user otherwise).
+    WriteRegStr HKCR "@WEBUI_CHAIN_URI_SCHEME@" "URL Protocol" ""
+    WriteRegStr HKCR "@WEBUI_CHAIN_URI_SCHEME@" "" "URL:@CLIENT_NAME@"
+    WriteRegStr HKCR "@WEBUI_CHAIN_URI_SCHEME@\DefaultIcon" "" "$INSTDIR\@CLIENT_BIN_NAME@-app.exe,0"
+    WriteRegStr HKCR "@WEBUI_CHAIN_URI_SCHEME@\shell\open\command" "" '"$INSTDIR\@CLIENT_BIN_NAME@-app.exe" "%1"'
 SectionEnd
 
 # Macro for selecting uninstaller sections
@@ -124,7 +124,7 @@ done${UNSECTION_ID}:
 
 # Uninstaller sections
 Section /o -un.Main UNSEC0000
-    Delete /REBOOTOK $INSTDIR\chains-app.exe
+    Delete /REBOOTOK $INSTDIR\@CLIENT_BIN_NAME@-app.exe
     Delete /REBOOTOK $INSTDIR\COPYING.txt
     Delete /REBOOTOK $INSTDIR\readme.txt
     RMDir /r /REBOOTOK $INSTDIR\daemon
@@ -137,13 +137,13 @@ Section -un.post UNSEC0001
     Delete /REBOOTOK "$SMPROGRAMS\$StartMenuGroup\$(^Name).lnk"
     Delete /REBOOTOK "$SMPROGRAMS\$StartMenuGroup\@CLIENT_NAME@ (testnet).lnk"
     Delete /REBOOTOK "$SMPROGRAMS\$StartMenuGroup\@CLIENT_NAME@ (signet).lnk"
-    Delete /REBOOTOK "$SMSTARTUP\Chains.lnk"
+    Delete /REBOOTOK "$SMSTARTUP\@CLIENT_NAME@.lnk"
     Delete /REBOOTOK $INSTDIR\uninstall.exe
     DeleteRegValue HKCU "${REGKEY}" StartMenuGroup
     DeleteRegValue HKCU "${REGKEY}" Path
     DeleteRegKey /IfEmpty HKCU "${REGKEY}\Components"
     DeleteRegKey /IfEmpty HKCU "${REGKEY}"
-    DeleteRegKey HKCR "chains"
+    DeleteRegKey HKCR "@WEBUI_CHAIN_URI_SCHEME@"
     RmDir /REBOOTOK $SMPROGRAMS\$StartMenuGroup
     RmDir /REBOOTOK $INSTDIR
 SectionEnd

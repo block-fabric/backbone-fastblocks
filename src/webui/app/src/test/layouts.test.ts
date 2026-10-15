@@ -9,6 +9,17 @@ import { go, nav, PAGES, type PageId } from '../lib/nav.svelte';
 import { app, applyPrefs, node, prefs, wallets } from '../lib/state.svelte';
 import { resetWalletData } from '../lib/walletdata.svelte';
 import Shell from '../views/Shell.svelte';
+import { CHAIN, SIDECHAIN } from '../chain/config';
+import { chainHas } from '../lib/commands.svelte';
+import { LOCAL_PAGES, type LocalPage } from '../chain/local';
+
+/** The items of the old menus that are about the sidechains of the mainchain: not in the app of a sidechain. */
+const MAINCHAIN_ONLY = new Set(['Sidechains', 'Sidechain nodes', 'Solo mine', 'Sidechain proposals', 'Withdrawal votes']);
+/** The quick actions of the home, in their order: the chain's (its sidechains and mining, or its peg) between Send and Receive and the tools. */
+const localQuick = (tools: boolean) => (LOCAL_PAGES as readonly LocalPage[]).filter((p) => p.quick && (p.section === 'tools') === tools).map((p) => p.quick!.label);
+const QUICK = SIDECHAIN
+  ? ['Send', 'Receive', 'Deposit', 'Withdraw', 'Merged mining', ...localQuick(false), 'Block explorer', 'Sign message', 'Load PSBT', ...localQuick(true)]
+  : ['Send', 'Receive', 'Deposit to a sidechain', 'Block explorer', 'Mine', 'Sign message', 'Load PSBT'];
 
 /** The menu bar of chains-qt as views/Shell.svelte had it before the layouts: every item must stay reachable. */
 const OLD_MENUS: Record<string, string[]> = {
@@ -47,7 +58,7 @@ const OLD_MENUS: Record<string, string[]> = {
     'Increase font size',
     'Decrease font size',
     'Command-line options',
-    'About Chains',
+    `About ${CHAIN.name}`,
     'Exit',
   ],
 };
@@ -106,7 +117,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  app.info = { name: 'Chains', version: 'test', bugreport: '', network: 'regtest', networkLabel: 'regtest', datadir: '/tmp', walletEnabled: true, devtools: false, test: false, platform: 'linux', blockSpacing: 600 };
+  app.info = { name: CHAIN.name, version: 'test', bugreport: '', network: 'regtest', networkLabel: 'regtest', datadir: '/tmp', walletEnabled: true, devtools: false, test: false, platform: 'linux', blockSpacing: 600 };
   prefs.mask = false;
   prefs.loaded = true;
   node.tip = { height: 10, time: 1_700_000_000, hash: 'ab'.repeat(32), progress: 1, state: 'synced', ibd: false, loadingBlocks: false };
@@ -133,17 +144,19 @@ describe('the commands', () => {
     // Every item of the old menus is still in a menu (the menus were regrouped: chain before tools).
     const all = buildCommands().filter((c) => (MENU_GROUPS as readonly string[]).includes(c.group));
     for (const [menu, labels] of Object.entries(OLD_MENUS)) {
-      for (const label of labels) expect(all.map((c) => c.label), `${menu} → ${label}`).toContain(label);
+      for (const label of labels) if (!(SIDECHAIN && MAINCHAIN_ONLY.has(label))) expect(all.map((c) => c.label), `${menu} → ${label}`).toContain(label);
     }
     const groups = [...MENU_GROUPS] as string[];
     expect(groups.indexOf('Chains')).toBeLessThan(groups.indexOf('Tools'));
     const chains = all.filter((c) => c.group === 'Chains').map((c) => c.label);
-    for (const label of ['Sidechains', 'Sidechain nodes', 'Solo mine', 'Block explorer']) expect(chains).toContain(label);
+    for (const label of SIDECHAIN ? ['Peg', 'Deposit…', 'Withdraw…', 'Merged mining', 'Block explorer'] : ['Sidechains', 'Sidechain nodes', 'Solo mine', 'Block explorer']) expect(chains).toContain(label);
+    // A sidechain has none of the items of the sidechains of the mainchain.
+    if (SIDECHAIN) for (const label of MAINCHAIN_ONLY) expect(all.map((c) => c.label), label).not.toContain(label);
   });
 
   it('reach every page, and every page is in each layout', () => {
     const all = buildCommands();
-    const pages = (Object.keys(PAGES) as PageId[]).filter((p) => p !== 'kit' && p !== 'home' && !PAGES[p].tabOf);
+    const pages = (Object.keys(PAGES) as PageId[]).filter((p) => p !== 'kit' && p !== 'home' && !PAGES[p].tabOf && chainHas(p));
     for (const p of pages) {
       expect(all.some((c) => c.id === `page.${p}`), p).toBe(true);
       expect(AREAS.some((a) => a.tabs.some((t) => t.page === p)), `workspace: ${p}`).toBe(true);
@@ -152,7 +165,7 @@ describe('the commands', () => {
     expect(LAYOUTS.map((l) => l.id)).toEqual(['workspace', 'dashboard', 'sidebar']);
   });
 
-  it('sidechain nodes: a tab of the Sidechains page, not a page of its own', () => {
+  it.skipIf(SIDECHAIN)('sidechain nodes: a tab of the Sidechains page, not a page of its own', () => {
     expect(PAGES['sidechain-nodes'].tabOf).toEqual({ page: 'sidechains', tab: 'nodes' });
     expect(NAV_SECTIONS.some((s) => s.pages.includes('sidechain-nodes'))).toBe(false);
     expect(AREAS.some((a) => a.tabs.some((t) => t.page === 'sidechain-nodes'))).toBe(false);
@@ -319,7 +332,7 @@ describe('the layouts', () => {
     prefs.layout = 'workspace';
     render(Shell);
     const areas = screen.getByRole('navigation', { name: 'Areas' });
-    expect(within(areas).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Wallet', 'Chain', 'Sidechains', 'Tools', 'Node']);
+    expect(within(areas).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(SIDECHAIN ? ['Wallet', 'Chain', 'Tools', 'Node'] : ['Wallet', 'Chain', 'Sidechains', 'Tools', 'Node']);
     const subtabs = screen.getByRole('navigation', { name: 'Wallet pages' });
     expect(within(subtabs).getByRole('button', { name: 'Overview' }).getAttribute('aria-current')).toBe('page');
     await fireEvent.click(within(areas).getByRole('button', { name: 'Node' }));
@@ -340,7 +353,8 @@ describe('the layouts', () => {
     await waitFor(() => expect(panel.textContent).toContain('7 confirmations'));
   });
 
-  it('dashboard: live cards that open their pages and the panel', async () => {
+  // The home of a sidechain has cards of its own: test/sidechain.test.ts.
+  it.skipIf(SIDECHAIN)('dashboard: live cards that open their pages and the panel', async () => {
     prefs.layout = 'dashboard';
     go('home');
     render(Shell);
@@ -371,7 +385,7 @@ describe('the layouts', () => {
     expect(within(side).getAllByRole('button', { name: /Home|Overview|Wallets|^Tools|Settings/ }).length).toBeGreaterThanOrEqual(5);
   }, 20000);
 
-  it('dashboard: the Deposit and Withdrawals of a sidechain open the real tabs, the sidechain chosen', async () => {
+  it.skipIf(SIDECHAIN)('dashboard: the Deposit and Withdrawals of a sidechain open the real tabs, the sidechain chosen', async () => {
     prefs.layout = 'dashboard';
     go('home');
     render(Shell);
@@ -448,7 +462,7 @@ describe('the layouts', () => {
     // The unit is chosen in the status bar only, not in the card.
     expect(within(card).queryByRole('combobox', { name: 'Unit of amounts' })).toBeNull();
     expect(within(side).getByRole('button', { name: /Close wallet/ })).toBeTruthy();
-    expect(within(side).getByRole('button', { name: /Quit Chains/ })).toBeTruthy();
+    expect(within(side).getByRole('button', { name: new RegExp(`Quit ${CHAIN.name}`) })).toBeTruthy();
   });
 
   it('compact: an icon rail named for screen readers, opened on demand', async () => {
@@ -495,8 +509,8 @@ describe('the layouts', () => {
 
   it('chain before tools, in every list of actions and every menu', () => {
     // The helper finds a list out of order.
-    expect(chainBeforeTools(['send', 'timestamp', 'mine'] as PageId[], (p) => p)).toEqual({ chain: 'mine', tool: 'timestamp' });
-    expect(chainBeforeTools(['send', 'mine', 'tools', 'node'] as PageId[], (p) => p)).toBeNull();
+    expect(chainBeforeTools(['send', 'timestamp', 'explorer'] as PageId[], (p) => p)).toEqual({ chain: 'explorer', tool: 'timestamp' });
+    expect(chainBeforeTools(['send', 'explorer', 'tools', 'node'] as PageId[], (p) => p)).toBeNull();
     expect(pageKind('explorer')).toBe('chain');
     expect(pageKind('tools')).toBe('tools');
     expect(pageKind('crypto')).toBe('tools');
@@ -517,7 +531,7 @@ describe('the layouts', () => {
       expect(chainBeforeTools(pages, (p) => p), name).toBeNull();
     }
     // Home: Send and Receive first, then the chain, then the tools.
-    expect(HOME_QUICK_ACTIONS.map((q) => q.label)).toEqual(['Send', 'Receive', 'Deposit to a sidechain', 'Block explorer', 'Mine', 'Sign message', 'Load PSBT']);
+    expect(HOME_QUICK_ACTIONS.map((q) => q.label)).toEqual(QUICK);
   });
 
   it('dashboard: the quick actions of Home in that order, as shown', () => {
@@ -526,8 +540,8 @@ describe('the layouts', () => {
     render(Shell);
     const row = screen.getByRole('navigation', { name: 'Quick actions' });
     const labels = within(row).getAllByRole('button').map((b) => b.textContent?.trim() ?? '');
-    expect(labels.slice(0, 7)).toEqual(['Send', 'Receive', 'Deposit to a sidechain', 'Block explorer', 'Mine', 'Sign message', 'Load PSBT']);
-    expect(chainBeforeTools(labels.slice(0, 7), (l) => HOME_QUICK_ACTIONS.find((q) => q.label === l)?.page)).toBeNull();
+    expect(labels.slice(0, QUICK.length)).toEqual(QUICK);
+    expect(chainBeforeTools(labels.slice(0, QUICK.length), (l) => HOME_QUICK_ACTIONS.find((q) => q.label === l)?.page)).toBeNull();
   });
 
   it('the dashboard is the default layout', () => {

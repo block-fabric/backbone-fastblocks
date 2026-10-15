@@ -12,6 +12,8 @@
 // the shadow, the rounded corners and snapping.
 
 #include <webui/assets.h>
+#include <webui/chainconfig.h>
+#include <tinyformat.h>
 #include <webui/icontint.h>
 #include <webui/window.h>
 
@@ -223,7 +225,7 @@ public:
         // The data of WebView2 (its caches) in the local folder of the app, not in the roaming one
         // webview/webview would choose; the runtime takes it from the environment.
         if (GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", nullptr, 0) == 0) {
-            const fs::path folder{GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / "Chains" / "WebView2"};
+            const fs::path folder{GetSpecialFolderPath(CSIDL_LOCAL_APPDATA) / fs::u8path(std::string{chain::NAME}) / "WebView2"};
             SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", folder.wstring().c_str());
         }
         m_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
@@ -672,7 +674,7 @@ private:
             return 0;
         case WM_QUERYENDSESSION:
             // As chains-qt (WinShutdownMonitor): the node stops cleanly before Windows ends the session.
-            ShutdownBlockReasonCreate(m_hwnd, L"Chains is shutting down. Do not interrupt it.");
+            ShutdownBlockReasonCreate(m_hwnd, widen_string(strprintf("%s is shutting down. Do not interrupt it.", chain::NAME)).c_str());
             if (m_callbacks.session_ending) m_callbacks.session_ending();
             return FALSE;
         case WM_TIMER: {
@@ -934,7 +936,7 @@ private:
         nid.uCallbackMessage = WM_APP_TRAY;
         if (!m_tray_icon) m_tray_icon = AppIcon(GetSystemMetrics(SM_CXSMICON), m_tint);
         nid.hIcon = m_tray_icon;
-        const std::string tip{m_tray.tooltip.empty() ? std::string{"Chains"} : m_tray.tooltip};
+        const std::string tip{m_tray.tooltip.empty() ? std::string{chain::NAME} : m_tray.tooltip};
         wcsncpy(nid.szTip, widen_string(tip).c_str(), std::size(nid.szTip) - 1);
         if (m_tray_added) {
             Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -1083,8 +1085,8 @@ std::unique_ptr<Window> Window::Create(const Options& options, Callbacks callbac
     } catch (const webview::exception& e) {
         LogError("webui: cannot show the interface: %s", e.what());
         // No WebView2 Runtime (Windows 10 before 2021, or removed).
-        if (e.error().code() == WEBVIEW_ERROR_MISSING_DEPENDENCY && MessageBoxW(nullptr, L"Chains cannot show its interface: the Microsoft Edge WebView2 Runtime is missing.\n\nOpen its download page?",
-                        L"Chains", MB_YESNO | MB_ICONERROR) == IDYES) {
+        if (e.error().code() == WEBVIEW_ERROR_MISSING_DEPENDENCY && MessageBoxW(nullptr, widen_string(strprintf("%s cannot show its interface: the Microsoft Edge WebView2 Runtime is missing.\n\nOpen its download page?", chain::NAME)).c_str(),
+                        widen_string(std::string{chain::NAME}).c_str(), MB_YESNO | MB_ICONERROR) == IDYES) {
             ShellExecuteW(nullptr, L"open", L"https://go.microsoft.com/fwlink/p/?LinkId=2124703", nullptr, nullptr, SW_SHOWNORMAL);
         }
         throw std::runtime_error(std::string{"WebView2: "} + e.what());

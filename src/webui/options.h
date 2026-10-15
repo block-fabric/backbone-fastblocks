@@ -45,7 +45,19 @@ public:
      */
     using ChooseProgramFn = std::function<std::optional<std::string>(const std::string& title, const std::string& current)>;
 
-    NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal = {}, ChooseProgramFn choose_program = {});
+    /** Have the user choose a file for a setting that names one (title, the file set now): the file chooser of the desktop. */
+    using ChooseFileFn = std::function<std::optional<std::string>(const std::string& title, const std::string& current)>;
+
+    NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal = {}, ChooseProgramFn choose_program = {}, ChooseFileFn choose_file = {});
+
+    /**
+     * The settings that name a file the node reads (a sidechain: the cookie file and the password file of the
+     * mainchain node). As programs, the page can only clear them; a file is set with ChooseFile.
+     */
+    static bool NamesFile(const std::string& name);
+
+    /** Set a setting that names a file (NamesFile) to one the user chooses (ChooseFileFn). @return Get(), or null when cancelled */
+    UniValue ChooseFile(const std::string& name);
 
     /**
      * The settings that name a program the node runs (-signer). The page can only clear them (Set with an
@@ -61,6 +73,9 @@ public:
      * Every option with its value, as the Settings page shows them:
      *   dbcache, par, prune, pruneSize, spendZeroConf, signer, natpmp, listen, server,
      *   proxyUse, proxyIp, proxyPort, torUse, torIp, torPort, lang, startAtLogin;
+     * a sidechain also mainchainConnect, mainchainPort, mainchainWallet, mainchainUser, mainchainCookieFile,
+     * mainchainPasswordFile (-mainchainrpc*, empty for the default), mainchainDefaults {port, connect} and
+     * mainchainIgnored {key: value} (the ones set on the command line or in the configuration file);
      * ignored {setting: true} for the ones set on the command line or in chains.conf,
      * overridden (the text of chains-qt: "-par=4 -listen=0 "), limits, restartRequired,
      * proxyReach {ipv4, ipv6, tor} (the networks the proxy shown is used for now).
@@ -83,6 +98,7 @@ private:
     RestartFlag m_restart;
     Journal m_journal;
     ChooseProgramFn m_choose_program;
+    ChooseFileFn m_choose_file;
 };
 
 class AppConfig;

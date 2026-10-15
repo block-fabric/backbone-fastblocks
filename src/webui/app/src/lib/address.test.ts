@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { bech32Decode, checkAddress } from './address';
+import { CHAIN } from '../chain/config';
+
+// The regtest addresses of this chain (chain/chain.json).
+const R = CHAIN.networks.regtest.hrp;
 
 // Made with the bech32 reference algorithm for the human-readable parts of Chains.
 function encode(hrp: string, data: number[], bech32m: boolean): string {
@@ -38,8 +42,8 @@ function program(bytes: number): number[] {
 }
 
 describe('addresses', () => {
-  const v0 = encode('rchn', [0, ...program(20)], false);
-  const v1 = encode('rchn', [1, ...program(32)], true);
+  const v0 = encode(R, [0, ...program(20)], false);
+  const v1 = encode(R, [1, ...program(32)], true);
 
   it('decodes bech32 and bech32m', () => {
     expect(bech32Decode(v0)?.encoding).toBe('bech32');
@@ -56,7 +60,7 @@ describe('addresses', () => {
     const typo = v0.slice(0, -1) + (v0.endsWith('q') ? 'p' : 'q');
     expect(await checkAddress(typo, 'regtest')).toMatchObject({ valid: false, error: 'This address has a typing error in it' });
     expect(await checkAddress(v0, 'main')).toMatchObject({ valid: false, error: 'This address is for another network' });
-    expect(await checkAddress(encode('rchn', [0, ...program(20)], true), 'regtest')).toMatchObject({ valid: false });
+    expect(await checkAddress(encode(R, [0, ...program(20)], true), 'regtest')).toMatchObject({ valid: false });
     expect(await checkAddress('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', 'main')).toMatchObject({ valid: false });
     expect(await checkAddress('', 'main')).toMatchObject({ valid: false, error: 'Enter an address' });
     expect(await checkAddress('hello', 'main')).toMatchObject({ valid: false });

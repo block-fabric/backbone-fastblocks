@@ -1,4 +1,5 @@
-// Test helpers: addresses of Chains made with the bech32 reference algorithm.
+// Test helpers: addresses of this chain (chain/chain.json) made with the bech32 reference algorithm.
+import { CHAIN } from '../chain/config';
 // Made with the bech32 reference algorithm for the human-readable parts of Chains.
 export function encode(hrp: string, data: number[], bech32m: boolean): string {
   const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
@@ -36,5 +37,5 @@ export function program(bytes: number): number[] {
 }
 
 /** A valid P2WPKH and a P2TR address of a network. */
-export const regtestP2wpkh = encode('rchn', [0, ...program(20)], false);
-export const regtestP2tr = encode('rchn', [1, ...program(32)], true);
+export const regtestP2wpkh = encode(CHAIN.networks.regtest.hrp, [0, ...program(20)], false);
+export const regtestP2tr = encode(CHAIN.networks.regtest.hrp, [1, ...program(32)], true);

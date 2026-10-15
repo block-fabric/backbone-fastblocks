@@ -3,6 +3,7 @@
   // and the requests made before (RecentRequestsTableModel), kept in the wallet. Its Addresses tab: the
   // receiving addresses of the wallet (there is no Addresses page: user decision, 2026-10-15).
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   import SafeText from '../components/SafeText.svelte';
   import Amount from '../components/Amount.svelte';
   import AmountInput from '../components/AmountInput.svelte';
@@ -172,7 +173,7 @@
               type="text"
               bind:value={message}
               autocomplete="off"
-              title="An optional message to attach to the payment request, which will be displayed when the request is opened. Note: The message will not be sent with the payment over the Chains network."
+              title="An optional message to attach to the payment request, which will be displayed when the request is opened. Note: The message will not be sent with the payment over the {CHAIN.name} network."
             />
           </div>
           <div class="field">

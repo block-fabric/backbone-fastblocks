@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <test/util/setup_common.h>
+#include <webui/chainconfig.h>
 #include <webui/appconfig.h>
 
 #include <boost/test/unit_test.hpp>
@@ -84,8 +85,8 @@ BOOST_AUTO_TEST_CASE(size_limit)
 BOOST_AUTO_TEST_CASE(default_path)
 {
     const fs::path path{webui::AppConfig::DefaultPath()};
-    BOOST_CHECK_EQUAL(fs::PathToString(path.filename()), "chains-app.json");
-    BOOST_CHECK_EQUAL(fs::PathToString(path.parent_path().filename()), "Chains");
+    BOOST_CHECK_EQUAL(fs::PathToString(path.filename()), std::string{webui::chain::APP} + ".json");
+    BOOST_CHECK_EQUAL(fs::PathToString(path.parent_path().filename()), std::string{webui::chain::NAME});
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -1,3 +1,4 @@
+import { CHAIN } from '../chain/config';
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import AmountInputHarness from './AmountInputHarness.svelte';
@@ -196,7 +197,7 @@ describe('the send page', () => {
   it('fills a recipient from a payment URI', async () => {
     useWallet();
     setTransport(async (r) => (r.method === 'wallet.info' ? INFO : r.method === 'validateaddress' ? { isvalid: true } : null));
-    nav.pendingUri = `chains:${regtestP2wpkh}?amount=0.25&label=Coffee&message=Thanks`;
+    nav.pendingUri = `${CHAIN.uriScheme}:${regtestP2wpkh}?amount=0.25&label=Coffee&message=Thanks`;
     nav.uriSeq++;
     render(Send);
     await waitFor(() => expect((screen.getByLabelText('Pay to') as HTMLInputElement).value).toBe(regtestP2wpkh));

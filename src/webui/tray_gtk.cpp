@@ -6,6 +6,7 @@
 // QSystemTrayIcon and Notificator of chains-qt do them.
 
 #include <webui/tray_gtk.h>
+#include <webui/chainconfig.h>
 #include <webui/icontint.h>
 
 #include <logging.h>
@@ -204,7 +205,7 @@ struct GtkTray::Impl {
     GVariant* ItemProperty(const std::string& name)
     {
         if (name == "Category") return g_variant_new_string("ApplicationStatus");
-        if (name == "Id") return g_variant_new_string("chains-app");
+        if (name == "Id") return g_variant_new_string(std::string{chain::APP}.c_str());
         if (name == "Title") return g_variant_new_string(tray.tooltip.c_str());
         if (name == "Status") return g_variant_new_string(tray.visible ? "Active" : "Passive");
         if (name == "WindowId") return g_variant_new_int32(0);
@@ -275,7 +276,7 @@ struct GtkTray::Impl {
         }
         if (!status_icon) {
             GdkPixbuf* icon{AppIcon(64)};
-            status_icon = icon ? gtk_status_icon_new_from_pixbuf(icon) : gtk_status_icon_new_from_icon_name("chains");
+            status_icon = icon ? gtk_status_icon_new_from_pixbuf(icon) : gtk_status_icon_new_from_icon_name(std::string{chain::STEM}.c_str());
             if (icon) g_object_unref(icon);
             g_signal_connect(status_icon, "activate", G_CALLBACK(+[](GtkStatusIcon*, gpointer self) {
                                  auto* impl{static_cast<Impl*>(self)};
@@ -491,7 +492,7 @@ void DesktopNotify(const std::string& title, const std::string& body, const std:
     g_variant_builder_init(&hints, G_VARIANT_TYPE("a{sv}"));
     // Urgency: low 0, normal 1, critical 2 (as Notificator).
     g_variant_builder_add(&hints, "{sv}", "urgency", g_variant_new_byte(level == "critical" ? 2 : 1));
-    g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string("chains-app"));
+    g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string(std::string{chain::APP}.c_str()));
     if (GdkPixbuf* icon{AppIcon(64)}) {
         GdkPixbuf* rgba{gdk_pixbuf_get_has_alpha(icon) ? icon : gdk_pixbuf_add_alpha(icon, FALSE, 0, 0, 0)};
         const int width{gdk_pixbuf_get_width(rgba)}, height{gdk_pixbuf_get_height(rgba)}, stride{gdk_pixbuf_get_rowstride(rgba)};
@@ -502,7 +503,7 @@ void DesktopNotify(const std::string& title, const std::string& body, const std:
         g_object_unref(icon);
     }
     g_dbus_connection_call(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify",
-                           g_variant_new("(susssasa{sv}i)", "Chains", 0u, "", title.c_str(), body.c_str(), &actions, &hints, -1),
+                           g_variant_new("(susssasa{sv}i)", std::string{chain::NAME}.c_str(), 0u, "", title.c_str(), body.c_str(), &actions, &hints, -1),
                            nullptr, G_DBUS_CALL_FLAGS_NONE, 5000, nullptr,
                            +[](GObject* source, GAsyncResult* result, gpointer) {
                                GError* call_error{nullptr};

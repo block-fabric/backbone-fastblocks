@@ -1,6 +1,7 @@
 <script lang="ts">
   // The dialogs of the app itself: about, command-line options.
   import SafeText from './SafeText.svelte';
+  import { CHAIN } from '../chain/config';
   import Dialog from './Dialog.svelte';
   import { host } from '../lib/rpc';
   import { nav } from '../lib/nav.svelte';
@@ -19,7 +20,7 @@
 </script>
 
 {#if nav.dialog === 'about'}
-  <Dialog open={true} title="About {about?.name ?? 'Chains'}" onclose={close}>
+  <Dialog open={true} title="About {about?.name ?? CHAIN.name}" onclose={close}>
     <p class="version"><SafeText text={about?.name} /> version {about?.version}</p>
     <pre class="license">{about?.license}</pre>
     <p class="muted credits">

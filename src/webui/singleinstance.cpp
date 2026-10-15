@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <webui/singleinstance.h>
+#include <webui/chainconfig.h>
 
 #include <crypto/sha256.h>
 #include <logging.h>
@@ -46,7 +47,7 @@ fs::path SingleInstance::SocketPath(const fs::path& datadir_net)
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
     const std::string dir{fs::PathToString(fs::absolute(datadir_net))};
     CSHA256().Write(reinterpret_cast<const unsigned char*>(dir.data()), dir.size()).Finalize(hash.data());
-    const std::string name{"chains-app-" + HexStr(std::span{hash}.first(10)) + ".sock"};
+    const std::string name{std::string{chain::APP} + "-" + HexStr(std::span{hash}.first(10)) + ".sock"};
 #ifdef WIN32
     return fs::PathFromString(name);
 #else
@@ -59,7 +60,7 @@ fs::path SingleInstance::SocketPath(const fs::path& datadir_net)
         return fs::PathFromString(runtime) / fs::PathFromString(name);
     }
     std::error_code ec;
-    const fs::path own{fs::temp_directory_path(ec) / fs::PathFromString(strprintf("chains-app-%u", static_cast<unsigned>(::geteuid())))};
+    const fs::path own{fs::temp_directory_path(ec) / fs::PathFromString(strprintf("%s-%u", std::string{chain::APP}, static_cast<unsigned>(::geteuid())))};
     if (ec) return {};
     ::mkdir(fs::PathToString(own).c_str(), 0700);
     if (!PrivateDir(own)) {
@@ -112,7 +113,7 @@ std::wstring PipeName(const fs::path& socket)
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
     CSHA256().Write(reinterpret_cast<const unsigned char*>(key.data()), key.size()).Finalize(hash.data());
     // A SID is ASCII, and so is the name.
-    const std::string name{"\\\\.\\pipe\\chains-app-" + HexStr(std::span{hash}.first(12))};
+    const std::string name{"\\\\.\\pipe\\" + std::string{chain::APP} + "-" + HexStr(std::span{hash}.first(12))};
     return std::wstring(name.begin(), name.end());
 }
 

@@ -1,5 +1,6 @@
-// Addresses of Chains, checked as they are typed (the node checks them again
-// with validateaddress before anything is sent).
+// Addresses of this chain (chain/chain.json), checked as they are typed (the node checks them again
+// with validateaddress before anything is sent); those of the mainchain of a sidechain too (withdrawals).
+import { CHAIN, type NetworkInfo } from '../chain/config';
 
 export interface NetworkParams {
   /** Human-readable part of bech32 addresses. */
@@ -9,15 +10,20 @@ export interface NetworkParams {
   script: number;
 }
 
-export const NETWORKS: Record<string, NetworkParams> = {
-  main: { hrp: 'chn', pubkey: 28, script: 88 },
-  test: { hrp: 'tchn', pubkey: 111, script: 196 },
-  signet: { hrp: 'tchn', pubkey: 111, script: 196 },
-  regtest: { hrp: 'rchn', pubkey: 111, script: 196 },
-};
+function paramsOf(networks: Record<string, NetworkInfo>): Record<string, NetworkParams> {
+  const out: Record<string, NetworkParams> = {};
+  for (const [id, n] of Object.entries(networks)) out[id] = { hrp: n.hrp, pubkey: n.pubkey, script: n.script };
+  out.testnet4 = out.test;
+  return out;
+}
 
-export function networkParams(network: string): NetworkParams {
-  return NETWORKS[network] ?? NETWORKS.main;
+export const NETWORKS: Record<string, NetworkParams> = paramsOf(CHAIN.networks);
+/** The networks of the mainchain (a sidechain's withdrawals go to its addresses). */
+export const MAINCHAIN_NETWORKS: Record<string, NetworkParams> = CHAIN.mainchain ? paramsOf(CHAIN.mainchain.networks) : NETWORKS;
+
+export function networkParams(network: string, chain: 'own' | 'mainchain' = 'own'): NetworkParams {
+  const networks = chain === 'mainchain' ? MAINCHAIN_NETWORKS : NETWORKS;
+  return networks[network] ?? networks.main;
 }
 
 // --- bech32 / bech32m (BIP 173, BIP 350) ---
@@ -123,11 +129,12 @@ export type AddressCheck =
   | { valid: true; kind: 'bech32' | 'base58'; type: string }
   | { valid: false; error: string };
 
-/** Whether text is an address of this network, checked offline. */
-export async function checkAddress(text: string, network: string): Promise<AddressCheck> {
+/** Whether text is an address of this network (or of the mainchain of a sidechain), checked offline. */
+export async function checkAddress(text: string, network: string, chain: 'own' | 'mainchain' = 'own'): Promise<AddressCheck> {
   const address = text.trim();
   if (!address) return { valid: false, error: 'Enter an address' };
-  const params = networkParams(network);
+  const params = networkParams(network, chain);
+  const networks = chain === 'mainchain' ? MAINCHAIN_NETWORKS : NETWORKS;
 
   if (address.toLowerCase().startsWith(params.hrp + '1')) {
     const decoded = bech32Decode(address);
@@ -156,14 +163,19 @@ export async function checkAddress(text: string, network: string): Promise<Addre
     return { valid: false, error: 'This address is for another network' };
   }
   // A bech32 address of another network.
-  const other = Object.values(NETWORKS).find((p) => address.toLowerCase().startsWith(p.hrp + '1'));
+  const other = Object.values(networks).find((p) => address.toLowerCase().startsWith(p.hrp + '1'));
   if (other) return { valid: false, error: 'This address is for another network' };
-  return { valid: false, error: 'This is not an address of Chains' };
+  // An address of the other chain of the peg (the mainchain, or this sidechain): said apart, it is an easy slip.
+  const across = chain === 'mainchain' ? NETWORKS : CHAIN.mainchain ? MAINCHAIN_NETWORKS : {};
+  if (Object.values(across).some((p) => address.toLowerCase().startsWith(p.hrp + '1'))) {
+    return { valid: false, error: chain === 'mainchain' ? `This is an address of ${CHAIN.name}, not of ${CHAIN.mainchain?.name ?? ''}` : `This is an address of ${CHAIN.mainchain?.name ?? ''}, not of ${CHAIN.name}` };
+  }
+  return { valid: false, error: `This is not an address of ${chain === 'mainchain' ? (CHAIN.mainchain?.name ?? CHAIN.name) : CHAIN.name}` };
 }
 
 /** An example address of a network, for placeholders. */
-export function exampleAddress(network: string): string {
-  return `${networkParams(network).hrp}1q…`;
+export function exampleAddress(network: string, chain: 'own' | 'mainchain' = 'own'): string {
+  return `${networkParams(network, chain).hrp}1q…`;
 }
 
 /**

@@ -1,6 +1,8 @@
 <script lang="ts">
   // Typing or pasting an address of Chains: checked at once offline, then by the node.
   import Icon from './Icon.svelte';
+  import { CHAIN } from '../chain/config';
+  import { t } from '../lib/i18n.svelte';
   import { checkAddress, exampleAddress } from '../lib/address';
   import { host, rpc } from '../lib/rpc';
   import { app } from '../lib/state.svelte';
@@ -14,7 +16,20 @@
     onbook = undefined,
     disabled = false,
     hint = '',
-  }: { value?: string; valid?: boolean; id: string; label?: string; required?: boolean; onbook?: () => void; disabled?: boolean; hint?: string } = $props();
+    of = 'own',
+  }: {
+    value?: string;
+    valid?: boolean;
+    id: string;
+    label?: string;
+    required?: boolean;
+    onbook?: () => void;
+    disabled?: boolean;
+    hint?: string;
+    /** An address of this chain, or (a sidechain's withdrawals) of its mainchain, which only the offline check knows. */
+    of?: 'own' | 'mainchain';
+  } = $props();
+  const chainName = $derived(of === 'mainchain' ? (CHAIN.mainchain?.name ?? CHAIN.name) : CHAIN.name);
 
   let error = $state('');
   let checking = $state(false);
@@ -33,10 +48,18 @@
     }
     checking = true;
     const timer = setTimeout(async () => {
-      const local = await checkAddress(text, net);
+      const local = await checkAddress(text, net, of);
       if (mine !== generation) return;
       if (!local.valid) {
         error = local.error;
+        checking = false;
+        return;
+      }
+      if (of === 'mainchain') {
+        // The node of this chain does not know the addresses of the mainchain: the mainchain node checks it
+        // when the withdrawal is made.
+        error = '';
+        valid = true;
         checking = false;
         return;
       }
@@ -77,7 +100,7 @@
       class="mono grow"
       autocomplete="off"
       spellcheck="false"
-      placeholder={`Enter an address of Chains (${exampleAddress(network)})`}
+      placeholder={t('Enter an address of %1 (%2)', chainName, exampleAddress(network, of))}
       bind:value
       onblur={() => (touched = true)}
       aria-invalid={error ? 'true' : undefined}

@@ -62,6 +62,29 @@ export function installMock(options: MockOptions = {}): void {
     'wallet.addresses': () => [],
     'wallet.requests': () => [],
     'wallet.fee': () => ({ feePerK: 1000, fallback: false, target: 6, requiredFeePerK: 1000 }),
+    // A sidechain (chain.json role "sidechain"): its mainchain node, through the host (peg.*).
+    'peg.connection': () => ({ connected: true, node: '127.0.0.1:29554', slot: 5, walletSet: false, wallet: '', auth: 'cookie', cookieFile: '~/.chains/regtest/.cookie' }),
+    'peg.call': (p) => {
+      const args = (p.params ?? []) as number[];
+      switch (p.method) {
+        case 'getdrivechaininfo':
+          return { withdrawalperiod: 600, withdrawalminscore: 300, height: height + 500 };
+        case 'listwithdrawalbundles':
+          return [{ slot: 5, hash: 'cd'.repeat(32), index: 0, height: height + 400, score: 120, lastupvote: height + 500, blocksleft: 480, payable: false, known: true, vote: 'upvote' }];
+        case 'getsidechainevents':
+          return Array.from({ length: Math.min(60, Number(args[2])) }, (_, i) => {
+            const h = Number(args[1]) + Number(args[2]) - 60 + i;
+            return { height: h, hash: hash(h + 7), previousblockhash: hash(h + 6), time: start - (60 - i) * 60, bmm: i % 3 ? hash(h) : undefined, deposits: i === 58 ? [{ destination: 's5_rsc1qdeposit_abcdef', amount: 2, txid: 'de'.repeat(32), burnindex: 0 }] : [], bundles: [], proposed: i === 10 ? ['cd'.repeat(32)] : [], pending: i >= 10 ? [{ hash: 'cd'.repeat(32), score: i * 2 }] : [] };
+          });
+        case 'getbalances':
+          return { mine: { trusted: 42 } };
+        case 'getnewaddress':
+          return 'rchn1qmainchainwallet';
+        default:
+          return null;
+      }
+    },
+    'peg.deposit': () => ({ txid: 'de'.repeat(32), total: 9.25 }),
   };
 
   /** Records as the host sends them (RecordJson): a salary, some spending, mined coins. */
@@ -104,6 +127,15 @@ export function installMock(options: MockOptions = {}): void {
       { slot: 5, title: 'BitNames', description: 'Names and their records', escrow: { txid: 'bb', n: 0, amount: 2 }, pendingbundles: 0 },
     ],
     listwithdrawalbundles: () => [{ slot: 2, hash: 'cd'.repeat(32), score: 14, blocksleft: 86, payable: false }],
+    getmainchaininfo: () => ({ slot: 5, connected: true, node: '127.0.0.1:29554', height: height + 500, bestblockhash: hash(height + 500), tipheight: height + 498 }),
+    getbmminfo: () => ({ mining: true, address: 'rsc1qminer', always: false, idle: false, lastfees: 0.0012, lastoffer: 0.001188, requests: 31, blocks: 27, outbid: 2, candidates: 1 }),
+    getwithdrawalbundle: () => ({ status: 'pending', hash: 'cd'.repeat(32), height: height - 20, withdrawals: 2, amount: 1.5, mainchainfee: 0.0002, waiting: 1 }),
+    listwithdrawals: () => [
+      { txid: 'w1'.repeat(32), vout: 0, amount: 1, mainchainfee: 0.0001, mainchainscript: '00', refundaddress: 'rsc1qrefund', height: height - 30, status: 'bundled' },
+      { txid: 'w2'.repeat(32), vout: 1, amount: 0.25, mainchainfee: 0.0001, mainchainscript: '00', refundaddress: 'rsc1qrefund2', height: height - 2, status: 'waiting' },
+    ],
+    getaddressinfo: () => ({ ismine: true }),
+    getdepositaddress: () => ({ depositaddress: 's5_rsc1qdeposit_abcdef', address: 'rsc1qdeposit', slot: 5 }),
     getsidechainevents: (p) => Array.from({ length: Number(p[2]) }, (_, i) => ({ height: Number(p[1]) + i, bmm: (i * (Number(p[0]) + 3)) % 4 !== 0 ? 'ab' : undefined })),
   };
 

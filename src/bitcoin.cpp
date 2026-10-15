@@ -29,7 +29,7 @@ Options:
   -h, --help             Show full help message
 
 Commands:
-  gui [ARGS]     Start GUI, equivalent to running 'chains-app [ARGS]'.
+  gui [ARGS]     Start GUI, equivalent to running '<stem>-app [ARGS]'.
   node [ARGS]    Start node, equivalent to running 'bitcoind [ARGS]' or 'bitcoin-node [ARGS]'.
   rpc [ARGS]     Call RPC method, equivalent to running 'bitcoin-cli -named [ARGS]'.
   wallet [ARGS]  Call wallet command, equivalent to running 'bitcoin-wallet [ARGS]'.
@@ -42,7 +42,7 @@ Additional less commonly used commands:
   bench [ARGS]      Run bench command, equivalent to running 'bench_bitcoin [ARGS]'.
   chainstate [ARGS] Run bitcoin kernel chainstate util, equivalent to running 'bitcoin-chainstate [ARGS]'.
   test [ARGS]       Run unit tests, equivalent to running 'test_bitcoin [ARGS]'.
-  test-gui [ARGS]   Run GUI unit tests, equivalent to running 'test_chains-app [ARGS]'.
+  test-gui [ARGS]   Run GUI unit tests, equivalent to running 'test_<stem>-app [ARGS]'.
 )";
 
 static constexpr auto HELP_SHORT = R"(
@@ -106,7 +106,7 @@ int main(int argc, char* argv[])
         } else if (cmd.command == "test") {
             args.emplace_back("test_bitcoin");
         } else if (cmd.command == "test-gui") {
-            args.emplace_back("test_chains-app");
+            args.emplace_back("test_" CLIENT_BIN_NAME "-app");
         } else if (cmd.command == "util") {
             args.emplace_back(CLIENT_BIN_NAME "-util");
         } else {
@@ -172,12 +172,12 @@ bool UseMultiprocess(const CommandLine& cmd)
     return args.IsArgSet("-ipcbind") || args.IsArgSet("-ipcconnect") || args.IsArgSet("-ipcfd");
 }
 
-//! Execute the specified bitcoind, chains-app or other command line in `args`
+//! Execute the specified bitcoind, <stem>-app or other command line in `args`
 //! using src, bin and libexec directory paths relative to this executable, where
 //! the path to this executable is specified in `wrapper_argv0`.
 //!
 //! @param args Command line arguments to execute, where first argument should
-//!             be a relative path to a bitcoind, chains-app or other executable
+//!             be a relative path to a bitcoind, <stem>-app or other executable
 //!             that will be located on the PATH or relative to wrapper_argv0.
 //!
 //! @param wrapper_argv0 String containing first command line argument passed to

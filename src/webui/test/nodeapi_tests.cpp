@@ -15,6 +15,7 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <validation.h>
+#include <chainparams.h>
 #include <webui/appconfig.h>
 #include <webui/bridge.h>
 #include <webui/console.h>
@@ -218,7 +219,7 @@ BOOST_AUTO_TEST_CASE(node_api)
     // The address decoder.
     const std::string address{EncodeDestination(WitnessV0KeyHash{coinbaseKey.GetPubKey()})};
     const UniValue decoded{api.Call("tools.decode", Obj({{"text", address}}))};
-    BOOST_CHECK_EQUAL(decoded["bech32"]["prefix"].get_str(), "rchn");
+    BOOST_CHECK_EQUAL(decoded["bech32"]["prefix"].get_str(), Params().Bech32HRP());
     BOOST_CHECK_EQUAL(decoded["bech32"]["encoding"].get_str(), "bech32");
     BOOST_CHECK_EQUAL(decoded["bech32"]["witnessVersion"].getInt<int>(), 0);
     BOOST_CHECK_EQUAL(decoded["bech32"]["witnessProgram"].get_str(), HexStr(coinbaseKey.GetPubKey().GetID()));

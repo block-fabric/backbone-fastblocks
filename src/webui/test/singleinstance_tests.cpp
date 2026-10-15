@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <test/util/setup_common.h>
+#include <webui/chainconfig.h>
 #include <webui/singleinstance.h>
 
 #include <boost/test/unit_test.hpp>
@@ -53,7 +54,7 @@ BOOST_AUTO_TEST_CASE(socket_path)
     const fs::path b{webui::SingleInstance::SocketPath(fs::PathFromString("/data/two"))};
     BOOST_CHECK(a != b);
     BOOST_CHECK(a == webui::SingleInstance::SocketPath(fs::PathFromString("/data/one")));
-    BOOST_CHECK(fs::PathToString(a.filename()).starts_with("chains-app-"));
+    BOOST_CHECK(fs::PathToString(a.filename()).starts_with(std::string{webui::chain::APP} + "-"));
     BOOST_CHECK(fs::PathToString(a).size() < 100);
 }
 

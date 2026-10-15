@@ -6,6 +6,7 @@
   // foot the menus of chains-qt, the theme, the text size (and the palette in the rail), then
   // Close wallet and Quit, apart. The dashboard's current page is a filled pill; the rail's a bar.
   import { t } from '../lib/i18n.svelte';
+  import { CHAIN } from '../chain/config';
   import Brand from './Brand.svelte';
   import Icon from './Icon.svelte';
   import MenuButton from './MenuButton.svelte';
@@ -205,7 +206,7 @@
           onclick={() => c.run()}
         >
           <Icon name={c.id === 'node.exit' ? 'power' : 'logout'} size={18} />
-          {#if !collapsed}<span class="grow">{c.id === 'node.exit' ? 'Quit Chains' : 'Close wallet'}</span>{/if}
+          {#if !collapsed}<span class="grow">{c.id === 'node.exit' ? t('Quit %1', CHAIN.name) : t('Close wallet')}</span>{/if}
         </button>
       {/each}
     </div>

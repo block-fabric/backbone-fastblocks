@@ -1,7 +1,13 @@
 // Amounts: satoshis as bigint, shown and typed in the unit the user chose
-// (the units of chains-qt: CHN, mCHN, bits, sat).
+// (the units of chains-qt: CHN, mCHN, bits, sat). The ids are the kit's (kept in the preferences); the
+// names shown are those of the coin of this chain (chain.json: coin.ticker, coin.name).
+
+import { CHAIN } from '../chain/config';
 
 export type Unit = 'CHN' | 'mCHN' | 'bits' | 'sat';
+
+const TICKER = CHAIN.coin.ticker;
+const COIN_NAME = CHAIN.coin.name;
 
 export interface UnitInfo {
   id: Unit;
@@ -13,9 +19,9 @@ export interface UnitInfo {
 }
 
 export const UNITS: readonly UnitInfo[] = [
-  { id: 'CHN', short: 'CHN', long: 'Chains', decimals: 8 },
-  { id: 'mCHN', short: 'mCHN', long: 'Milli-Chains (1 / 1 000)', decimals: 5 },
-  { id: 'bits', short: 'bits', long: 'Micro-Chains (bits) (1 / 1 000 000)', decimals: 2 },
+  { id: 'CHN', short: TICKER, long: COIN_NAME, decimals: 8 },
+  { id: 'mCHN', short: `m${TICKER}`, long: `Milli-${COIN_NAME} (1 / 1 000)`, decimals: 5 },
+  { id: 'bits', short: 'bits', long: `Micro-${COIN_NAME} (bits) (1 / 1 000 000)`, decimals: 2 },
   { id: 'sat', short: 'sat', long: 'Satoshi (sat) (1 / 100 000 000)', decimals: 0 },
 ];
 
