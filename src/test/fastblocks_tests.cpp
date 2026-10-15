@@ -5428,4 +5428,175 @@ BOOST_FIXTURE_TEST_CASE(tickets_honest_relay_under_a_flood, FastBlocksSetup)
     BOOST_CHECK(latency == 1);
 }
 
+BOOST_FIXTURE_TEST_CASE(attack7_spare_header_replayed_costs_signatures, FastBlocksSetup)
+{
+    // ATTACK (review 7; audit 6 review, item 15). A validator that signed two headers of a slot (slashed,
+    // or not caring) signs a third. Any peer can then send that third header again and again: it is
+    // spare (refused alone, header-spare, not the peer's fault), so it never enters the block index and
+    // each copy is checked afresh: HeaderSpare is asked before the signature is, CheckHeader checks the
+    // signature, and NoteSigned makes a proof of it with the first header, whose two signatures
+    // CheckEvidence checks again (the pool knows the offence already). Nothing is cached, nothing is
+    // rate limited, nobody is punished: Schnorr checks under cs_main for one small message each.
+    StartPos();
+    for (int i{1}; i <= 5; ++i) Take(PosBlock(i));
+    const CBlockHeader victim{WITH_LOCK(::cs_main, return Tip()->pprev->GetBlockHeader())};
+    const int64_t slot{pos::SlotOf(victim.nTime, Pos())};
+    const auto sibling{[&](uint8_t n) {
+        CBlock block{victim};
+        block.hashMerkleRoot = uint256{n};
+        BOOST_REQUIRE(pos::Producer::Sign(block, Leader(slot), Genesis()));
+        return static_cast<CBlockHeader>(block);
+    }};
+    BOOST_REQUIRE_EQUAL(HeaderReason({sibling(1)}, /*source=*/4), "");
+    const CBlockHeader third{sibling(2)};
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceAdded(40, /*inbound=*/true));
+    constexpr int COPIES{500};
+    const uint64_t sigs_before{pos::BlockSigChecks()};
+    const uint64_t walks_before{Hooks().IndexWalks()};
+    int spare{0};
+    for (int n{0}; n < COPIES; ++n) spare += HeaderReason({third}, /*source=*/40) == "header-spare";
+    const uint64_t sigs{pos::BlockSigChecks() - sigs_before};
+    const uint64_t walks{Hooks().IndexWalks() - walks_before};
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(40));
+    BOOST_CHECK_EQUAL(spare, COPIES);
+    BOOST_CHECK(!Index(third.GetHash()));
+    BOOST_TEST_MESSAGE(COPIES << " copies of one spare header from one inbound peer: " << sigs << " signature checks, " << walks
+                              << " block index entries walked, none punished");
+    BOOST_CHECK_MESSAGE(sigs <= static_cast<uint64_t>(pos::EVIDENCE_CHECKS_BURST),
+                        "attack works: a spare header sent again costs " << sigs / COPIES << " signature checks a copy, without bound or blame");
+}
+
+BOOST_FIXTURE_TEST_CASE(attack7_early_slot_header_walks_the_chain, FastBlocksSetup)
+{
+    // ATTACK (review 7; any inbound peer, no stake). AcceptBlockHeader asks HeaderCheckable (and
+    // HeaderSpare) before ContextualCheckBlockHeader's time-too-old: HeaderCheckable calls LeaderOf with
+    // no bound (`within`), so a header of slot 1 on the tip walks SetFor down to genesis (no anchor is
+    // before the epoch before epoch 0), under cs_main, before the median-time check turns it away. The
+    // peer is disconnected for it, but each new connection costs a walk of the whole chain: the fix of
+    // attack5_old_slot_evidence_walks_the_chain (EvidenceWithin) was made for proofs, not for headers.
+    StartPos();
+    const CBlock base{PosBlock(1)};
+    constexpr int CHAIN{200000};
+    const CBlockIndex* long_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        CBlockIndex* best{nullptr};
+        CBlockHeader header{Tip()->GetBlockHeader()};
+        header.nVersion = 0x20000000; // a BMM header: no extension
+        header.ext = {};
+        uint256 prev{Genesis()};
+        for (int i{0}; i < CHAIN; ++i) {
+            header.hashPrevBlock = prev;
+            header.nTime = static_cast<uint32_t>(pos::SlotTime(i + 1, Pos()));
+            header.hashMerkleRoot = ArithToUint256(arith_uint256{static_cast<uint64_t>(i + 1)});
+            CBlockIndex* index{Chainman().m_blockman.AddToBlockIndex(header, best)};
+            prev = index->GetBlockHash();
+            long_tip = index;
+        }
+    }
+    const uint256 tip{long_tip->GetBlockHash()};
+    constexpr int HEADERS{16};
+    const auto walks{[&](int64_t slot, std::string& reason) {
+        const uint64_t before{Hooks().IndexWalks()};
+        // (The next slot's: taken unchecked, the set of its epoch not known on that branch; slot 1's: time-too-old.)
+        for (int i{0}; i < HEADERS; ++i) reason = HeaderReason({UnsignedHeader(base, tip, slot, 0, static_cast<uint8_t>(i + 1))}, /*source=*/i % 16);
+        return Hooks().IndexWalks() - before;
+    }};
+    std::string recent_reason, early_reason;
+    const uint64_t recent{walks(CHAIN + 1, recent_reason)};
+    const uint64_t early{walks(1, early_reason)};
+    BOOST_TEST_MESSAGE(HEADERS << " headers on a chain of " << CHAIN << ": of the next slot " << recent << " entries walked (" << recent_reason << "), of slot 1 " << early
+                               << " (" << early_reason << ", one a connection)");
+    BOOST_CHECK_EQUAL(early_reason, "time-too-old");
+    BOOST_CHECK_MESSAGE(early < 10 * recent + HEADERS * 100, "attack works: a header of an old slot costs a walk of the whole chain under cs_main before its time is checked, "
+                                                               << early / HEADERS << " entries each against " << recent / HEADERS);
+}
+
+BOOST_FIXTURE_TEST_CASE(attack7_seed_moved_beyond_the_kept_epochs, SeedSetup)
+{
+    // ATTACK (review 7; audit 6 review, item 16: a mainchain reorg some epochs deep). EPOCH_SEEDS keeps
+    // the seeds of the last three epochs only (SEED_EPOCHS_KEPT). A mainchain reorg that moves the seed of
+    // an older epoch is not seen by a running node: CheckSeeds compares only what the table has, so the
+    // state of that epoch (the leaders charged for the slots its blocks skipped) stays what the old seed
+    // gave, while a node that takes the chain in afresh connects those blocks under the record as it is
+    // now: the two states differ (consensus split; later sets, jailing).
+    StartPos();
+    const int64_t spe{Pos().slots_per_epoch};
+    const int64_t e1{pos::EpochOf(base_slot, Pos()) + 1};
+    const int64_t e2{e1 + 1};
+    const int64_t e5{e2 + 3};
+    const auto at{[&](int64_t slot) { return static_cast<int>(slot - base_slot); }};
+    Slot(at(e1 * spe) + 1);
+    Main();
+    Take(PosBlock(at(e1 * spe) + 2));
+    Slot(at(e2 * spe) + 1);
+    Main();
+    Take(PosBlock(at(e2 * spe) + 7));
+    CBlockIndex* first{WITH_LOCK(::cs_main, return Chain().m_chain.Tip())};
+    for (int64_t e{e2 + 1}; e <= e5; ++e) {
+        Slot(at(e * spe) + 1);
+        Main();
+    }
+    Take(PosBlock(at(e5 * spe) + 2));
+    const CBlockIndex* last{Tip()};
+    using Snapshot = std::map<uint256, pos::Liveness>;
+    const auto liveness{[&]() {
+        Snapshot snapshot;
+        LOCK(::cs_main);
+        for (const CKey& k : keys) {
+            if (const auto l{pos::GetLiveness(Chain().SideState().View(), e2, XOnly(k))}) snapshot[XOnly(k)] = *l;
+        }
+        return snapshot;
+    }};
+    const Snapshot original{liveness()};
+    Hooks().CheckSeeds();
+    BOOST_REQUIRE(Tip() == last);
+    const auto leaders{[&]() {
+        std::vector<uint256> keys_of;
+        LOCK(::cs_main);
+        for (int64_t slot{e2 * spe}; slot <= e2 * spe + 7; ++slot) keys_of.push_back(Hooks().LeaderOf(*first->pprev, slot).pubkey);
+        keys_of.push_back(Hooks().LeaderOf(*last->pprev, pos::SlotOf(last->nTime, Pos())).pubkey);
+        return keys_of;
+    }};
+    const std::vector<uint256> before{leaders()};
+    const auto seed_height{pos::SeedHeight(e2, Pos(), Record())};
+    BOOST_REQUIRE(seed_height && *seed_height > 0);
+    // The mainchain reorg: from the block that seeds e2 on, other blocks (the same commitments). One with
+    // which the block of e2 keeps its leader, and a slot of e2 it skipped has another. (The block of e5
+    // may lose its leader: both nodes then turn it away alike.)
+    std::vector<sidechain::MainBlock> replaced;
+    bool found{false};
+    for (int salt{1}; salt < 300 && !found; ++salt) {
+        replaced = Record().Truncate(*seed_height - 1);
+        for (sidechain::MainBlock main : replaced) {
+            main.prev_hash = Record().TipHash();
+            main.hash = ArithToUint256(UintToArith256(main.hash) + salt);
+            BOOST_REQUIRE(Record().Append(main));
+        }
+        const std::vector<uint256> after{leaders()};
+        found = after[7] == before[7] && !std::equal(after.begin(), after.begin() + 7, before.begin());
+        if (!found) {
+            Record().Truncate(*seed_height - 1);
+            for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+        }
+    }
+    BOOST_REQUIRE(found);
+    // The running node sees the reorg.
+    Hooks().CheckSeeds();
+    const Snapshot running{liveness()};
+    const CBlockIndex* running_tip{Tip()};
+    // As a node that takes the chain in afresh connects it, under the record as it is now.
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, first, /*by_record=*/true));
+        WITH_LOCK(::cs_main, Chain().ReconsiderRecordFailure(first));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    const Snapshot fresh{liveness()};
+    BOOST_CHECK(Tip() == running_tip);
+    BOOST_TEST_MESSAGE("liveness of epoch " << e2 << ": running node " << (running == original ? "as before the reorg" : "changed") << ", fresh node "
+                                             << (fresh == original ? "as before the reorg" : "changed"));
+    BOOST_CHECK_MESSAGE(running == fresh, "attack works: a mainchain reorg moving the seed of an epoch older than the three kept splits a running node from a fresh one");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
