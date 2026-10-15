@@ -122,6 +122,7 @@ Header of a PoS block (`ContextualCheckBlockHeader`):
 | Signed by the slot's leader (checked before any rule that reads more of the chain, or lets the header wait; when the node does not know the epoch's set yet, the set of an anchor of a branch it never connected, when the block is connected) | `bad-pos-sig` |
 | A header whose epoch's set the node does not know: the branch leaves the active chain at or above its final block, and the anchor that made the set is not on the active chain (the state pruned that one's set). Not punished | `bad-pos-fork-too-deep` |
 | ... and, from a peer, it fits the budget of headers the node cannot check yet: the peer holds fewer than `unchecked_headers_per_peer` (10000; 2000 on regtest), and their stored blocks weigh at most `unchecked_block_bytes_per_peer` (32 MiB), whatever other peers hold; an inbound peer, `unchecked_headers_per_inbound_peer` (500; on regtest 2000, or `-posuncheckedinbound`) and `unchecked_block_bytes_per_inbound_peer` (8 MiB; 32 MiB on regtest), and only while fewer than `unchecked_inbound_holders` (8) other inbound peers hold any: see "Headers and blocks the node cannot check yet" (template; not consensus). Not punished; asked again once the tip moved | `unchecked-budget` |
+| ... and, from a peer, the block index has fewer than two headers of its slot for good (the first, and the proof that its leader signed twice): a further one is spare, taken only with a header on top of it in the same message, and then unchecked (its peer's, gone with it unless its block is connected); see "Headers of a slot" (template `HeaderSpare`; not consensus). Not punished; asked again once the tip moved | `header-spare` |
 | The slot has started (± `max_future_seconds`, 2 s); may come later if its leader signed it; one whose leader the node cannot tell (set or seed unknown) does not wait, nor is punished | `pos-time-future`, `pos-time-future-unchecked` |
 | Its slot is after the slot of the last PoS block on its chain | `bad-pos-slot` |
 | Without an acknowledgement: less than `max_unanchored_slots` after the first block of stake no anchor covers, as far as the headers tell (the first one after the last BMM block, or the last acknowledgement) | `bad-pos-unanchored` |
@@ -148,6 +149,33 @@ sets the state keeps (`bad-pos-fork-too-deep`). How many such headers a node
 holds, and what it does with their signatures and blocks, is the next section's
 design: they belong to the peers that sent them (`unchecked-budget`), and a block
 whose signature fails when connected is a failure of that copy, not of the block.
+
+**Headers of a slot.** A header costs its leader a signature, nothing more: the
+leader of a slot can sign as many headers of it as it likes (another merkle root
+each), on the block before it, deep in the chain too, and once unbonded or banned
+it has nothing left to lose. Each would be checked (the node knows the leader, so
+no budget of unchecked headers applies), and the order of chains is not work (no
+anti-DoS work threshold). So the block index keeps at most two headers of a slot
+for good (`FastBlocksHooks::HeaderSpare`, counting the entries the template says
+are there for good, `HeaderKept`: taken checked, connected, or loaded at
+startup): the first, and a second, the proof that its leader signed twice (or a
+block of the slot on another branch, whose set has another leader). A further one
+from a peer is *spare* (template, doc/sidechain.md, "Spare headers"):
+
+- alone (a `headers` message of it alone, a block, a compact block): refused,
+  `header-spare`, not punished; the proof it makes is still noted (Evidence);
+- with a header on top of it in the same message: taken unchecked, the peer's
+  within its budget (see the next section), kept for good only once its block is
+  connected. An honest node may have seen two other headers of the slot first and
+  still needs the one the network builds on: the peer that sends it a block on
+  that one answers its `getheaders` with the headers from the fork, the spare
+  header and the block's on it.
+
+The node's own blocks (and `-reindex`) are never spare. Memory and disk for
+headers of a slot: two entries for good, and what peers hold within their budget
+of unchecked headers, gone with them. (Review 6: 2000 headers one leader signed
+for one slot, seven blocks deep, were each a permanent entry of the block index;
+`attack6_leader_signs_headers_without_bound`, `slot_spare_header_taken_on_a_branch`.)
 
 A header that may come later (`pos-time-future`, `pos-ack-unknown`,
 `pos-seed-unknown`, and `bmm-unknown` for a BMM block) waits in the template's bounded set of waiting
@@ -1454,6 +1482,19 @@ design: "Headers and blocks the node cannot check yet".)
   leads; the limit before it leads, why it stays, and the operator's way past
   it: see "The limit of a long branch" above (`feature_fastblocks_window.py`;
   regtest options `-posuncheckedheaders` and `-posuncheckedbytes`).
+
+### Review 6 (2026-10-15)
+
+- **A leader signed headers of its slot without bound** (the one attack that
+  worked): each was checked and taken, a permanent block index entry on every
+  node, at the cost of a signature. Fixed at the root, the cost of a header: at
+  most two headers of a slot are kept for good; a further one from a peer is
+  spare, taken only with a header on top of it and then unchecked (see "Headers of
+  a slot"; template "Spare headers"). `attack6_leader_signs_headers_without_bound`
+  (2000 headers of one slot: one taken, the proof; the rest `header-spare`),
+  `slot_spare_header_taken_on_a_branch`, and the template's
+  `spare_headers_only_on_a_branch` (taken with a header on top, gone with its
+  peer, kept for good once connected).
 
 ## Deviations from the design (phase 5)
 

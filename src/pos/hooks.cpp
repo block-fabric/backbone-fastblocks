@@ -214,6 +214,34 @@ bool FastBlocksHooks::HeaderCheckable(const CBlockHeader& header, const CBlockIn
     return LeaderOf(prev, SlotOf(time, m_params)).status != LeaderStatus::SET_UNKNOWN;
 }
 
+bool FastBlocksHooks::HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const
+{
+    AssertLockHeld(::cs_main);
+    if (!IsPosHeader(header)) return false;
+    const int64_t time{header.nTime};
+    if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) return false;
+    const auto found{m_slot_headers.find(SlotOf(time, m_params))};
+    return found != m_slot_headers.end() && !found->second.back().IsNull();
+}
+
+void FastBlocksHooks::HeaderKept(const CBlockIndex& index) const
+{
+    AssertLockHeld(::cs_main);
+    if (!index.m_ext) return;
+    const int64_t time{index.nTime};
+    if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) return;
+    // The first MAX_SLOT_HEADERS of the slot, each once (an entry may be told of twice). Past those, the
+    // slot's further ones are those of connected blocks (or the node's own): no need to count them.
+    const uint256 hash{index.GetBlockHash()};
+    for (uint256& kept : m_slot_headers[SlotOf(time, m_params)]) {
+        if (kept == hash) return;
+        if (kept.IsNull()) {
+            kept = hash;
+            return;
+        }
+    }
+}
+
 sidechain::ChainHooks::UncheckedBudget FastBlocksHooks::UncheckedLimits() const
 {
     return {.per_peer = static_cast<size_t>(m_params.unchecked_headers_per_peer),

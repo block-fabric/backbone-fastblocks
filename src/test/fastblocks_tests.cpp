@@ -4909,4 +4909,50 @@ BOOST_FIXTURE_TEST_CASE(attack6_leader_signs_headers_without_bound, FastBlocksSe
     BOOST_CHECK_MESSAGE(growth <= 16, "attack works: one validator key adds " << growth << " permanent block index entries for one slot, without bound");
 }
 
+BOOST_FIXTURE_TEST_CASE(slot_spare_header_taken_on_a_branch, FastBlocksSetup)
+{
+    // Two headers of a slot are in the block index for good (the first, and the proof that its leader
+    // signed twice); a further one from a peer is spare: refused alone (header-spare, not punished),
+    // taken unchecked with a header on top of it (the branch a block builds on, which the node may
+    // need: an honest node may have seen other headers of the slot first), and gone with its peer.
+    StartPos();
+    for (int i{1}; i <= 5; ++i) Take(PosBlock(i));
+    const CBlockHeader victim{WITH_LOCK(::cs_main, return Tip()->pprev->GetBlockHeader())};
+    const int64_t slot{pos::SlotOf(victim.nTime, Pos())};
+    BOOST_REQUIRE_EQUAL(slot, Slot(4));
+    const auto sibling{[&](uint8_t n) {
+        CBlock block{victim};
+        block.hashMerkleRoot = uint256{n};
+        BOOST_REQUIRE(pos::Producer::Sign(block, Leader(slot), Genesis()));
+        return static_cast<CBlockHeader>(block);
+    }};
+    const size_t before{WITH_LOCK(::cs_main, return Chainman().m_blockman.m_block_index.size())};
+    BOOST_CHECK_EQUAL(HeaderReason({sibling(1)}, /*source=*/4), "");
+    BOOST_CHECK(Index(sibling(1).GetHash()) && !Index(sibling(1).GetHash())->m_unchecked);
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
+    BlockValidationState state;
+    const std::vector<CBlockHeader> alone{sibling(2)};
+    BOOST_CHECK(!Chainman().ProcessNewBlockHeaders(alone, /*min_pow_checked=*/true, state, nullptr, /*source=*/4));
+    BOOST_CHECK(state.GetResult() == BlockValidationResult::BLOCK_HEADER_LOW_WORK);
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "header-spare");
+    BOOST_CHECK(!Index(sibling(2).GetHash()));
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Chainman().m_blockman.m_block_index.size()), before + 1);
+    // On a branch: the next slot's leader signed a header on top of it.
+    CBlock on{UnsignedHeader(victim, sibling(2).GetHash(), Slot(5), 0)};
+    BOOST_REQUIRE(pos::Producer::Sign(on, Leader(Slot(5)), Genesis()));
+    BOOST_CHECK_EQUAL(HeaderReason({sibling(2), on}, /*source=*/4), "");
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* spare{Chainman().m_blockman.LookupBlockIndex(sibling(2).GetHash())};
+        BOOST_REQUIRE(spare);
+        BOOST_CHECK(spare->m_unchecked && Chainman().HoldsUnchecked(*spare, 4));
+        BOOST_CHECK(Chainman().m_blockman.LookupBlockIndex(on.GetHash())->m_unchecked);
+        Chainman().UncheckedSourceGone(4);
+        BOOST_CHECK(!Chainman().m_blockman.LookupBlockIndex(sibling(2).GetHash()));
+        BOOST_CHECK(!Chainman().m_blockman.LookupBlockIndex(on.GetHash()));
+        BOOST_CHECK_EQUAL(Chainman().m_blockman.m_block_index.size(), before + 1);
+        Chainman().UncheckedSourceAdded(4);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

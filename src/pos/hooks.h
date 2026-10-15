@@ -16,6 +16,7 @@
 #include <sync.h>
 #include <uint256.h>
 
+#include <array>
 #include <atomic>
 #include <deque>
 #include <map>
@@ -23,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class CBlockIndex;
@@ -202,6 +204,17 @@ public:
      */
     bool HeaderCheckable(const CBlockHeader& header, const CBlockIndex& prev) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
     UncheckedBudget UncheckedLimits() const override;
+    /**
+     * At most MAX_SLOT_HEADERS headers of blocks of stake of a slot are in the block index for good: the
+     * first, and a second, the proof that its leader signed twice (or a block of another branch, whose
+     * set has another leader). A further one from a peer is spare: its leader signs as many as it likes,
+     * at the cost of a signature each, so it is taken only on the branch of a header on top of it, and
+     * then unchecked (template: "Spare headers"). See doc/fastblocks.md, "Headers of a slot". Called with
+     * cs_main held.
+     */
+    bool HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void HeaderKept(const CBlockIndex& index) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    static constexpr size_t MAX_SLOT_HEADERS{2};
     bool CheckBlock(const CBlock& block, BlockValidationState& state) const override EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex, !m_acks_mutex);
     bool IsWaitReason(const std::string& reject_reason) const override;
     //! A node a little behind on the record after a mainchain reorg must not cut itself off from the peers that took an anchor back first.
@@ -384,6 +397,9 @@ private:
     mutable Mutex m_final_mutex;
     mutable int m_final_height GUARDED_BY(m_final_mutex){-1};
     mutable std::pair<uint256, uint256> m_final_for GUARDED_BY(m_final_mutex);
+
+    //! The headers of blocks of stake in the block index for good, by slot: the first MAX_SLOT_HEADERS (HeaderSpare).
+    mutable std::unordered_map<int64_t, std::array<uint256, MAX_SLOT_HEADERS>> m_slot_headers GUARDED_BY(::cs_main);
 
     mutable Mutex m_sets_mutex;
     struct KnownSet {
