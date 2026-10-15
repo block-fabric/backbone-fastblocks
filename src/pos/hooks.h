@@ -442,8 +442,6 @@ private:
     mutable std::set<uint256> m_seed_failed GUARDED_BY(m_sets_mutex);
     //! The mainchain tip for which the seeds of the active chain were last checked.
     mutable uint256 m_seeds_checked_for GUARDED_BY(m_sets_mutex);
-    //! The seeds of the epochs of the newest blocks of the active chain, as of that check (nothing: not known then).
-    mutable std::map<int64_t, std::optional<uint256>> m_epoch_seeds GUARDED_BY(m_sets_mutex);
 
     mutable Mutex m_acks_mutex;
     //! Commitment (h*) of each acknowledging block seen, and the blocks of each commitment.

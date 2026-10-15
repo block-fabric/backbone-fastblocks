@@ -2916,6 +2916,97 @@ BOOST_FIXTURE_TEST_CASE(seed_moved_state_connected_again, SeedSetup)
     BOOST_CHECK(liveness() == original);
 }
 
+BOOST_FIXTURE_TEST_CASE(seed_moved_while_the_node_was_down, SeedSetup)
+{
+    // As seed_moved_state_connected_again, but the reorg comes while the node is down (or before its
+    // first check after it started): what it compares the record with is what its blocks read, in the
+    // chain's state, not what it saw before in memory. A node restarted (hooks made afresh, nothing in
+    // memory) connects the blocks of the epoch again too, and has the state a node that takes the
+    // chain in afresh has (review of audit 6, the check of BMM-anchor and seed timing).
+    StartPos();
+    const int64_t spe{Pos().slots_per_epoch};
+    const int64_t e1{pos::EpochOf(base_slot, Pos()) + 1};
+    const int64_t e2{e1 + 1};
+    const auto at{[&](int64_t slot) { return static_cast<int>(slot - base_slot); }};
+    Slot(at(e1 * spe) + 1);
+    Main();
+    Take(PosBlock(at(e1 * spe) + 2));
+    Take(PosBlock(at(e1 * spe) + 3));
+    Slot(at(e2 * spe) + 1);
+    Main();
+    for (int k : {7, 9, 11, 13, 15, 17}) Take(PosBlock(at(e2 * spe) + k));
+    const uint256 tip{Tip()->GetBlockHash()};
+    using Snapshot = std::map<std::pair<int64_t, uint256>, pos::Liveness>;
+    const auto liveness{[&]() {
+        Snapshot snapshot;
+        LOCK(::cs_main);
+        for (int64_t e{e1 - 1}; e <= e2; ++e) {
+            for (const CKey& k : keys) {
+                if (const auto l{pos::GetLiveness(Chain().SideState().View(), e, XOnly(k))}) snapshot[{e, XOnly(k)}] = *l;
+            }
+        }
+        return snapshot;
+    }};
+    const Snapshot original{liveness()};
+    // The node goes down; the mainchain replaces the block that seeds e2 (by one with which the first
+    // block of e2 keeps its leader, and a slot it skipped does not).
+    const int seed_height{Record().Height() - 1};
+    const CBlockIndex* first{WITH_LOCK(::cs_main, return Chain().m_chain[Tip()->nHeight - 5])};
+    BOOST_REQUIRE_EQUAL(pos::SlotOf(first->nTime, Pos()), e2 * spe + 7);
+    const auto leaders{[&]() {
+        std::vector<uint256> keys_of;
+        LOCK(::cs_main);
+        for (int64_t slot{e2 * spe}; slot <= e2 * spe + 7; ++slot) keys_of.push_back(Hooks().LeaderOf(*first->pprev, slot).pubkey);
+        return keys_of;
+    }};
+    const std::vector<uint256> leaders_before{leaders()};
+    std::vector<sidechain::MainBlock> replaced;
+    bool found{false};
+    for (int salt{1}; salt < 100 && !found; ++salt) {
+        replaced = Record().Truncate(seed_height - 1);
+        for (sidechain::MainBlock main : replaced) {
+            main.prev_hash = Record().TipHash();
+            main.hash = ArithToUint256(UintToArith256(main.hash) + salt);
+            BOOST_REQUIRE(Record().Append(main));
+        }
+        const std::vector<uint256> leaders_after{leaders()};
+        found = leaders_after.back() == leaders_before.back() && !std::equal(leaders_after.begin(), leaders_after.end() - 1, leaders_before.begin());
+        if (!found) {
+            Record().Truncate(seed_height - 1);
+            for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+        }
+    }
+    BOOST_REQUIRE(found);
+    // The node starts again: its first check.
+    {
+        pos::FastBlocksHooks restarted{*params};
+        restarted.Attach(&Chainman());
+        restarted.CheckSeeds();
+    }
+    const CBlockIndex* now{Tip()};
+    const Snapshot checked{liveness()};
+    BOOST_CHECK_MESSAGE(checked != original, "the state still reads the seed the record no longer has");
+    // As the chain is connected afresh under the record as it is now.
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, const_cast<CBlockIndex*>(first), /*by_record=*/true));
+        WITH_LOCK(::cs_main, Chain().ReconsiderRecordFailure(const_cast<CBlockIndex*>(first)));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+        BOOST_CHECK(Tip() == now);
+        BOOST_CHECK(liveness() == checked);
+    }
+    // The record as it was, the node down again: the first state again.
+    Record().Truncate(seed_height - 1);
+    for (const sidechain::MainBlock& main : replaced) BOOST_REQUIRE(Record().Append(main));
+    {
+        pos::FastBlocksHooks restarted{*params};
+        restarted.Attach(&Chainman());
+        restarted.CheckSeeds();
+    }
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
+    BOOST_CHECK(liveness() == original);
+}
+
 BOOST_FIXTURE_TEST_CASE(anchor_slot_from_the_commitment, FastBlocksSetup)
 {
     // A BMM block whose time is set back (as far as the median time of the chain allows: after a

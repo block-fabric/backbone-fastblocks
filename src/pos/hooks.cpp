@@ -39,6 +39,12 @@ namespace {
 const sidechain::Cell<FastState> FAST_STATE{0x55, FastState{}};
 //! The pot accrued as of a block, by height: written by the PoS blocks that add to it, erased once paid.
 const sidechain::Table<uint32_t, int64_t> POT_ACCRUED{0x56};
+//! The seed of each recent epoch the blocks of stake of the chain read (for their leaders, and those
+//! they charged for the slots they skipped), by epoch: what CheckSeeds compares the record with. In the
+//! state, so that what it says is what the blocks connected read, after a restart too.
+const sidechain::Table<uint64_t, uint256> EPOCH_SEEDS{0x5e};
+//! Epochs before the block's own whose seeds EPOCH_SEEDS keeps (a block charges a slot an epoch back at most).
+constexpr int64_t SEED_EPOCHS_KEPT{2};
 
 FastBlocksHooks* g_installed{nullptr};
 
@@ -806,6 +812,24 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
         }
         m_staking.NoteLiveness(out, slot, leader.pubkey, missed);
         fast.last_pos_slot = slot;
+        // The seeds read, as the record gave them (CheckSeeds); those of epochs long past go.
+        {
+            const int64_t epoch{EpochOf(slot, m_params)};
+            std::map<int64_t, uint256> read{{epoch, leader.seed}};
+            for (const auto& [charged, schedule] : epochs) {
+                if (schedule.status == LeaderStatus::OK) read.emplace(charged, schedule.seed);
+            }
+            for (const auto& [at, seed] : read) {
+                if (EPOCH_SEEDS.Get(state.View(), static_cast<uint64_t>(at)) != seed) EPOCH_SEEDS.Put(out, static_cast<uint64_t>(at), seed);
+            }
+            std::vector<uint64_t> old;
+            EPOCH_SEEDS.ForEach(state.View(), [&](const uint64_t& at, const uint256&) {
+                if (static_cast<int64_t>(at) + SEED_EPOCHS_KEPT >= epoch) return false;
+                old.push_back(at);
+                return true;
+            });
+            for (const uint64_t at : old) EPOCH_SEEDS.Erase(out, at);
+        }
 
         // Proofs that leaders signed twice: punished, and the block paid for them.
         PosSections sections;
@@ -1037,37 +1061,33 @@ void FastBlocksHooks::CheckSeeds() const
     std::vector<CBlockIndex*> again;
     {
         LOCK(::cs_main);
-        // The newest blocks of the active chain: a mainchain reorg reaches the seeds of the last epochs
-        // only. Their blocks of stake, and the epochs whose seeds they read: their own, and that of the
-        // slots they skipped (the leaders they charged for them, which the sets that anchors make
-        // after depend on).
+        // An epoch whose seed, as the blocks of the active chain read it (its state: what they were
+        // connected with, before a restart too), the record moved since: the blocks of stake from its
+        // start on are connected again, even if their own leaders did not change, so that their state
+        // is the one the record gives now. (Not a copy in memory of what an earlier check saw: a node
+        // that restarted, or whose record moved before its first check, would see no change.)
+        std::optional<int64_t> changed;
+        EPOCH_SEEDS.ForEach(chainman->ActiveChainstate().SideState().View(), [&](const uint64_t& at, const uint256& used) {
+            const int64_t epoch{static_cast<int64_t>(at)};
+            const auto now{EpochSeed(epoch, m_params, record)};
+            if (now && *now != used && (!changed || epoch < *changed)) changed = epoch;
+            return true;
+        });
+        // The newest blocks of the active chain (a mainchain reorg reaches the seeds of the last epochs
+        // only), and those from the start of the epoch whose seed moved: their blocks of stake.
         std::vector<CBlockIndex*> blocks;
-        std::map<int64_t, std::optional<uint256>> seeds;
         CBlockIndex* index{chainman->ActiveChain().Tip()};
-        for (int64_t i{0}; index && index->nHeight > 0 && i < 2 * m_params.slots_per_epoch + m_params.max_unanchored_slots; ++i, index = index->pprev) {
-            if (!index->m_ext) continue;
-            blocks.push_back(index);
-            const int64_t slot{SlotOf(index->nTime, m_params)};
-            for (int64_t epoch{EpochOf(std::max<int64_t>(0, slot - m_params.slots_per_epoch), m_params)}; epoch <= EpochOf(slot, m_params); ++epoch) {
-                if (!seeds.contains(epoch)) seeds.emplace(epoch, EpochSeed(epoch, m_params, record));
-            }
+        for (int64_t i{0}; index && index->nHeight > 0; ++i, index = index->pprev) {
+            const bool recent{i < 2 * m_params.slots_per_epoch + m_params.max_unanchored_slots};
+            if (!recent && !(changed && SlotOf(index->nTime, m_params) >= *changed * m_params.slots_per_epoch)) break;
+            if (index->m_ext) blocks.push_back(index);
         }
         for (CBlockIndex* block : blocks) {
             if (!agrees(*block)) lowest = block;
         }
-        // An epoch whose seed the record moved since the last check: the blocks of stake from its start
-        // on are connected again, even if their own leaders did not change, so that their state is the
-        // one the record gives now.
-        std::optional<int64_t> changed;
         std::vector<CBlockIndex*> failed;
         {
             LOCK(m_sets_mutex);
-            for (const auto& [epoch, seed] : seeds) {
-                const auto before{m_epoch_seeds.find(epoch)};
-                // (A seed not known at the last check, known now, is no change: no block read it before.)
-                if (before != m_epoch_seeds.end() && before->second && before->second != seed && (!changed || epoch < *changed)) changed = epoch;
-            }
-            m_epoch_seeds = seeds;
             for (auto it{m_seed_failed.begin()}; it != m_seed_failed.end();) {
                 CBlockIndex* block{chainman->m_blockman.LookupBlockIndex(*it)};
                 if (!block || !(block->nStatus & BLOCK_FAILED_VALID)) {

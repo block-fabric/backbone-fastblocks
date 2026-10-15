@@ -657,7 +657,14 @@ gives them back when the record does: the follower checks the leaders of the
 newest blocks of the active chain at each new mainchain tip. The blocks of
 stake of an epoch whose seed moved are connected again from its start, those
 whose leader did not change too: the leaders they charged for empty slots (and
-so the jailing, and the sets made after) are the new seed's. The rules of a
+so the jailing, and the sets made after) are the new seed's. Which seeds moved
+is told by the chain's state: each block of stake notes the seeds it read (of
+its epoch, and of the slots it charged; table `0x5e`, the last three epochs),
+and the check compares them with the record's. So a node that restarts, or
+whose record moved while it was down, finds the same as one that saw the reorg
+come (a copy in memory of an earlier check, as before, saw no change after a
+restart, and kept the old seed's state: review of audit 6, the check of seed
+timing; `seed_moved_while_the_node_was_down`). The rules of a
 block read the sets of anchors from its chain's state alone; the sets a node
 keeps in memory serve headers only.
 
