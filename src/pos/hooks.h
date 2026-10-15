@@ -222,8 +222,11 @@ public:
      * signer, from a peer, is spare: it signs as many as it likes, at the cost of a signature each, so it
      * is taken only on the branch of a header on top of it, or as a tip the node may need (template
      * SpareWanted), and then unchecked (template: "Spare headers"). Another leader's header of the slot
-     * (on a branch whose set, or a record whose seed, names another) is not spare. See doc/fastblocks.md,
-     * "Headers of a slot". Called with cs_main held.
+     * (on a branch whose set, or a record whose seed, names another) is not spare. A header found spare
+     * has no signature checked (CheckHeader, next; m_spare_header), and the proof against its signer is
+     * the two kept (put in the pool if it has none). A header not after the median time of the chain
+     * before it is not (time-too-old next): no leader is looked for. See doc/fastblocks.md, "Headers of
+     * a slot". Called with cs_main held.
      */
     bool HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void HeaderKept(const CBlockIndex& index) const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -429,6 +432,9 @@ private:
     //! The last header (or block) whose signature by the leader of its slot was checked, and that leader
     //! (HeaderKept notes it so, right after).
     mutable std::pair<uint256, uint256> m_checked_signer GUARDED_BY(::cs_main);
+    //! The header HeaderSpare last found spare: CheckHeader, right after, checks no signature of it (it
+    //! is refused, or taken unchecked: its block's signature is checked when connected), and clears it.
+    mutable uint256 m_spare_header GUARDED_BY(::cs_main);
 
     mutable Mutex m_sets_mutex;
     struct KnownSet {

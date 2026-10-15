@@ -139,6 +139,14 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
     // slot's epoch, which an anchor before the epoch before it made, and of the epoch's seed, which the
     // record of the mainchain gives.
     const SlotLeader leader{LeaderOf(prev, slot)};
+    // A header HeaderSpare just found spare (from a peer; its signer has two headers of the slot in the
+    // block index for good already): its signature can change nothing, so it costs none. Alone it is
+    // refused (header-spare), whatever it is; with a header on top of it, or as a tip the node may need,
+    // it is taken unchecked, and its block's signature is checked when connected (AfterBlock). It makes
+    // no proof the node has not (HeaderSpare: the two kept are it). Else a spare header sent again and
+    // again, which nothing remembers, cost signature checks each time (review 7).
+    const bool spare{m_spare_header == header.GetHash()};
+    m_spare_header.SetNull();
     switch (leader.status) {
     case LeaderStatus::INACTIVE:
         return invalid("bad-pos-inactive", "no blocks of stake in this epoch: too few validators");
@@ -171,6 +179,11 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
         break;
     }
     case LeaderStatus::OK:
+        if (spare) {
+            // (Nor kept waiting for its slot: the node keeps no more of its signer's headers of the slot.)
+            if (future) return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "header-spare", "the node keeps no more headers like this one");
+            break;
+        }
         if (!CheckBlockSig(header, leader.pubkey, Genesis())) return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
         m_checked_signer = {header.GetHash(), leader.pubkey};
         break;
@@ -178,7 +191,7 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
     if (future) return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-time-future", "the slot of the block of stake has not started");
     // A second header the leader signed for this slot is the proof that it signed twice, whatever
     // else is wrong with it.
-    if (leader.status == LeaderStatus::OK) {
+    if (leader.status == LeaderStatus::OK && !spare) {
         if (const auto proof{m_evidence.NoteSigned(header, slot, leader.pubkey)}) {
             std::string reason;
             if (const auto offence{CheckEvidence(*proof, leader.pubkey, Genesis(), m_params, reason)}) {
@@ -220,15 +233,23 @@ bool FastBlocksHooks::HeaderCheckable(const CBlockHeader& header, const CBlockIn
     if (!IsPosHeader(header)) return true;
     const int64_t time{header.nTime};
     if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) return true;
+    // Not after the median time of the chain before it: refused next (time-too-old), its leader not
+    // looked for. A slot anyone can name, far below `prev`, would otherwise cost a walk down the chain
+    // for its set, under cs_main, before the time is checked (review 7). Past it, the slot is that of
+    // the last blocks before `prev`, and the walk as short as the chain's own.
+    if (time <= prev.GetMedianTimePast()) return true;
     return LeaderOf(prev, SlotOf(time, m_params)).status != LeaderStatus::SET_UNKNOWN;
 }
 
 bool FastBlocksHooks::HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const
 {
     AssertLockHeld(::cs_main);
+    m_spare_header.SetNull();
     if (!IsPosHeader(header)) return false;
     const int64_t time{header.nTime};
     if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) return false;
+    // (Refused next, time-too-old: as HeaderCheckable.)
+    if (time <= prev.GetMedianTimePast()) return false;
     const int64_t slot{SlotOf(time, m_params)};
     const auto found{m_slot_headers.find(slot)};
     // (Fewer than that of the slot at all: none is spare, nothing more to read.)
@@ -239,14 +260,32 @@ bool FastBlocksHooks::HeaderSpare(const CBlockHeader& header, const CBlockIndex&
     const SlotLeader leader{LeaderOf(prev, slot)};
     if (leader.status != LeaderStatus::OK) return false;
     const ChainstateManager* chainman{Chainman()};
-    size_t signed_by{0};
+    std::vector<uint256> signed_by;
     for (SlotHeader& kept : found->second) {
         if (!kept.signer && chainman) {
             // (Kept checked, against the leader of its time: its signature says whether it is this one.)
             const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(kept.hash)};
             if (index && CheckBlockSig(index->GetBlockHeader(), leader.pubkey, Genesis())) kept.signer = leader.pubkey;
         }
-        if (kept.signer == leader.pubkey && ++signed_by >= MAX_SLOT_HEADERS) return true;
+        if (kept.signer != leader.pubkey) continue;
+        signed_by.push_back(kept.hash);
+        if (signed_by.size() < MAX_SLOT_HEADERS) continue;
+        // The proof that it signed twice is the two kept, whose signatures were checked: noted if the
+        // pool does not have one of the offence (after a restart, say), so that the spare header,
+        // whose own signature is not checked (CheckHeader), takes no proof away.
+        const Offence offence{.pubkey = leader.pubkey, .slot = slot};
+        if (!m_evidence.Get(offence) && chainman) {
+            const CBlockIndex* a{chainman->m_blockman.LookupBlockIndex(signed_by[0])};
+            const CBlockIndex* b{chainman->m_blockman.LookupBlockIndex(signed_by[1])};
+            DoubleProposal proof;
+            std::string reason;
+            if (a && b) proof = {.a = a->GetBlockHeader(), .b = b->GetBlockHeader()};
+            if (a && b && CheckEvidenceForm(proof, m_params, reason) && m_evidence.Add(offence, proof)) {
+                LogWarning("FastBlocks: validator %s signed two blocks for slot %d", HexStr(offence.pubkey), offence.slot);
+            }
+        }
+        m_spare_header = header.GetHash();
+        return true;
     }
     return false;
 }

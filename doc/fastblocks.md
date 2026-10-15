@@ -166,7 +166,15 @@ headers"); another leader's header of the slot (a branch whose set names
 another, or a record that moved the epoch's seed) is not, and is taken as any:
 
 - alone (a `headers` message of it alone, a block, a compact block): refused,
-  `header-spare`, not punished; the proof it makes is still noted (Evidence).
+  `header-spare`, not punished. Its signature is not checked: it can change
+  nothing (refused alone, or taken unchecked below, its block's signature checked
+  when connected), and a spare header is in no block index, so nothing remembers
+  it: sent again and again, each copy cost three signature checks (its own, and
+  the two of the proof it made again; review 7,
+  `attack7_spare_header_replayed_costs_signatures`: 500 copies, none now). Nor
+  does it wait for its slot (one to come: `header-spare` too). The proof against
+  its signer is the two headers kept, whose signatures were checked: put in the
+  pool (Evidence) when the pool has none of the offence (after a restart, say).
   But not one the node may need now (template `SpareWanted`): one that would be
   its best header (a better key: more anchors, say), or the tip an outbound peer
   announces, of a chain better than the active one. The two first headers of a
@@ -763,8 +771,12 @@ ms for 32 proofs over 200,000 blocks; review 5 of audit 6, attack 1,
 `attack5_old_slot_evidence_walks_the_chain`). The same bound holds for a block
 whose acknowledgement `CheckBlock` notes (a slot far below its parent's, which
 the header rules turn away: noted when connected otherwise). A header's own
-slot is after the median time of its parent's chain (`time-too-old`, before the
-hooks), so its leader's walk is short.
+slot is after the median time of its parent's chain (`time-too-old`), so its
+leader's walk is short: the hooks that read its leader before that check
+(`HeaderCheckable`, `HeaderSpare`) look at the time first too. (Until review 7
+they did not: a header of slot 1 on a chain of 200,000 cost a walk of the whole
+chain under `cs_main` before it was turned away, one a connection;
+`attack7_early_slot_header_walks_the_chain`: 200,001 entries, none now.)
 
 From a peer, only a proof whose form is wrong (`-kind`, `-slot`, `-same`: any node
 sees it, whatever chain it has) is the peer's fault. One whose signatures do not
