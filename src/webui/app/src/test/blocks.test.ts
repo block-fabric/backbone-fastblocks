@@ -97,7 +97,7 @@ describe('the box', () => {
     const { container } = render(BlockBox, { block: b, secs: 10, median: 60, now: 1_700_000_120, onselect });
     const face = container.querySelector('.blk-face') as HTMLElement;
     // Against the weight a block of this chain may have (chain.json blockWeight): half of a block of Chains.
-    expect(face.style.getPropertyValue('--fill')).toBe(BLOCK_WEIGHT === CHAINS_MAX_BLOCK_WEIGHT ? '50%' : `${fillPercent(b.weight, b.nTx, BLOCK_WEIGHT)}%`);
+    expect(face.style.getPropertyValue('--fill')).toBe(BLOCK_WEIGHT === CHAINS_MAX_BLOCK_WEIGHT ? '50%' : `${fillPercent(b.weight ?? 0, b.nTx, BLOCK_WEIGHT)}%`);
     expect(face.dataset.tint).toBe('mid');
     expect(container.querySelector('.interval')!.classList.contains('fast')).toBe(true);
     expect(container.querySelector('.interval')!.textContent).toBe('10s');
