@@ -194,10 +194,10 @@
     await go('peg', 'withdraw');
     await sleep(900);
     await shot('sc-workspace-peg');
-    T().savePrefs({ layout: 'sidebar' });
-    await go('bmm');
-    await sleep(900);
-    await shot('sc-compact-bmm');
+    // Home in every layout (the Compact layout is gone): the workspace's Home area.
+    await go('home');
+    await sleep(1200);
+    await shot('sc-workspace-home');
     T().savePrefs({ layout: 'dashboard', theme: 'ocean' });
     await go('home');
     await sleep(1200);
