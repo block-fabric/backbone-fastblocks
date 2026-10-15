@@ -68,7 +68,10 @@ function allowed(): Set<string> {
 function keyed(): Set<string> {
   const fn = POLICY.slice(POLICY.indexOf('bool KeyedWalletRpc'));
   const list = fn.slice(fn.indexOf('methods{'), fn.indexOf('};'));
-  return new Set([...list.matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]));
+  // And those of this chain's own pages (local.cpp).
+  const local = LOCAL.slice(LOCAL.indexOf('KeyedRpcMethods()'), LOCAL.indexOf('void RegisterHost'));
+  const own = local.slice(local.indexOf('return'));
+  return new Set([...list.matchAll(/"([a-z0-9_]+)"/g), ...own.matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]));
 }
 
 /** The methods named in a call of the RPC client, of walletRpc, or of withKeys. */

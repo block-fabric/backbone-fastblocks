@@ -135,6 +135,15 @@
       JSON.stringify({ scroll: wrap.scrollWidth, client: wrap.clientWidth, hidden: hidden.length }));
     await shot('sc-peg-deposit-400');
     wrap.style.width = '';
+    // Notices leave the form of the deposit helper usable (audit port-1 #11).
+    T().toast('success', 'One', 'A notice.');
+    T().toast('info', 'Two', 'Another notice.');
+    await sleep(1800);
+    const helper = $('#deposit-helper').getBoundingClientRect();
+    const notes = $('.toasts').getBoundingClientRect();
+    const covered = helper.left < notes.right && helper.right > notes.left && helper.top < notes.bottom && helper.bottom > notes.top;
+    await check('notices do not cover the button of the deposit helper', !covered, JSON.stringify({ helper, notes }));
+    await shot('sc-peg-deposit-notices');
     await go('home');
     await sleep(2000);
     await shot('sc-home-funded');
