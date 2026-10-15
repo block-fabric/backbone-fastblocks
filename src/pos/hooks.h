@@ -45,10 +45,12 @@ inline constexpr size_t MAX_TICKETS{1000};
 inline constexpr size_t MAX_NOTED_ACKS{20000};
 //! Tickets the mainchain has not committed to that a node takes from one peer per mainchain block, at
 //! most: counted by the peer's network group (a peer that reconnects, or comes from many addresses of
-//! one network, is one), or by peer if the node cannot tell it.
+//! one network, is one), or by peer if the node cannot tell it or the address is not routable.
 inline constexpr size_t MAX_PEER_TICKETS{8};
+//! ... from all the peers the node cannot find (gone meanwhile: anyone) together ...
+inline constexpr size_t MAX_UNKNOWN_PEER_TICKETS{4 * MAX_PEER_TICKETS};
 //! ... and from all peers together (each one taken goes whole to every peer).
-inline constexpr size_t MAX_UNCOMMITTED_TICKETS{4 * MAX_PEER_TICKETS};
+inline constexpr size_t MAX_UNCOMMITTED_TICKETS{32 * MAX_PEER_TICKETS};
 /**
  * How far ahead of the node's clock a block may be, in seconds, while blocks of stake are on (Bitcoin's
  * two hours otherwise). BMM blocks with times far ahead would push the median time past ahead, and
@@ -270,7 +272,9 @@ public:
     std::optional<AnchorTicket> GetTicket(const uint256& hash) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     /**
      * Whether a ticket the mainchain has not committed to may be taken from `peer` (and count it):
-     * MAX_PEER_TICKETS per network group of peers, and MAX_UNCOMMITTED_TICKETS in all, per mainchain block.
+     * MAX_PEER_TICKETS per network group of peers (per peer for an address that is not routable),
+     * MAX_UNKNOWN_PEER_TICKETS from peers it cannot find, and MAX_UNCOMMITTED_TICKETS in all, per
+     * mainchain block.
      */
     bool TicketAllowed(int64_t peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
     std::vector<AnchorTicket> Tickets() const EXCLUSIVE_LOCKS_REQUIRED(!m_tickets_mutex);
@@ -413,9 +417,11 @@ private:
     mutable std::deque<uint256> m_ticket_order GUARDED_BY(m_tickets_mutex);
     mutable std::set<uint256> m_own_tickets GUARDED_BY(m_tickets_mutex);
     //! Tickets taken that the mainchain had not committed to, since the mainchain block m_ticket_counts_for:
-    //! by the network group of the peers they came from (true, the group), or by peer (false, its id) ...
-    mutable std::map<std::pair<bool, uint64_t>, size_t> m_ticket_counts GUARDED_BY(m_tickets_mutex);
-    //! ... and in all.
+    //! by the network group of the peers they came from, or by peer (TICKETS_BY_*, then the group or id) ...
+    static constexpr int TICKETS_BY_GROUP{0}, TICKETS_BY_PEER{1}, TICKETS_BY_UNKNOWN_PEER{2};
+    mutable std::map<std::pair<int, uint64_t>, size_t> m_ticket_counts GUARDED_BY(m_tickets_mutex);
+    //! ... from peers the node could not find, and in all.
+    mutable size_t m_unknown_ticket_count GUARDED_BY(m_tickets_mutex){0};
     mutable size_t m_ticket_count GUARDED_BY(m_tickets_mutex){0};
     mutable uint256 m_ticket_counts_for GUARDED_BY(m_tickets_mutex);
 

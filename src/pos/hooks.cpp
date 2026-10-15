@@ -1168,11 +1168,14 @@ bool FastBlocksHooks::TicketAllowed(int64_t peer) const
     const ChainstateManager* chainman{Chainman()};
     const uint256 main_tip{chainman && chainman->m_mainchain ? chainman->m_mainchain->TipHash() : uint256{}};
     // By the peer's network group, not its id: a peer that connects again has a new id, and would have
-    // a new count each time (and each ticket it sends goes to every peer). Its group stays.
-    std::pair<bool, uint64_t> who{false, static_cast<uint64_t>(peer)};
+    // a new count each time (and each ticket it sends goes to every peer). Its group stays. By peer
+    // for an address that is not routable (local, as Tor's inbound connections are, or private), whose
+    // group many honest peers may share: the count in all bounds those. And a peer the node cannot
+    // find (gone meanwhile) counts in a small budget of its own: it may be anyone.
+    std::pair<int, uint64_t> who{TICKETS_BY_UNKNOWN_PEER, static_cast<uint64_t>(peer)};
     if (m_node && m_node->connman) {
         m_node->connman->ForNode(peer, [&](CNode* node) {
-            who = {true, node->nKeyedNetGroup};
+            who = node->addr.IsRoutable() ? std::pair<int, uint64_t>{TICKETS_BY_GROUP, node->nKeyedNetGroup} : std::pair<int, uint64_t>{TICKETS_BY_PEER, static_cast<uint64_t>(peer)};
             return true;
         });
     }
@@ -1180,15 +1183,19 @@ bool FastBlocksHooks::TicketAllowed(int64_t peer) const
     // Counted per mainchain block: all counts start again with a new one.
     if (m_ticket_counts_for != main_tip) {
         m_ticket_counts.clear();
+        m_unknown_ticket_count = 0;
         m_ticket_count = 0;
         m_ticket_counts_for = main_tip;
     }
-    // In all, too: many groups (or peers the node cannot tell the group of) are as many counts.
+    // In all, too: many groups, or peers counted by peer, are as many counts.
     if (m_ticket_count >= MAX_UNCOMMITTED_TICKETS) return false;
+    const bool unknown{who.first == TICKETS_BY_UNKNOWN_PEER};
+    if (unknown && m_unknown_ticket_count >= MAX_UNKNOWN_PEER_TICKETS) return false;
     size_t& count{m_ticket_counts[who]};
     if (count >= MAX_PEER_TICKETS) return false;
     ++count;
     ++m_ticket_count;
+    if (unknown) ++m_unknown_ticket_count;
     return true;
 }
 
@@ -1235,6 +1242,9 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
         const bool committed{chainman->m_mainchain && chainman->m_mainchain->CommittedHeight(ticket.Hash())};
         if (!committed) {
             if (!WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ticket.anchored) != nullptr)) return true;
+            // One the node has: nothing to take nor relay, and not counted (honest peers relay each
+            // new ticket to one another).
+            if (GetTicket(ticket.Hash())) return true;
             // Anyone can make tickets for a block, by the thousand, and each new one goes to every
             // peer: a few per network group of peers and mainchain block (bidders make one each),
             // a few more in all, the rest dropped (TicketAllowed). Those the mainchain committed to
