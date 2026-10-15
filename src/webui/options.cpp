@@ -151,9 +151,19 @@ struct ComScope {
 #endif
 } // namespace
 
-NodeOptions::NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal, ChooseProgramFn choose_program, ChooseFileFn choose_file)
-    : m_node(node), m_args(args), m_restart(std::move(restart)), m_journal(std::move(journal)), m_choose_program(std::move(choose_program)), m_choose_file(std::move(choose_file))
+NodeOptions::NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal, ChooseProgramFn choose_program, ChooseFileFn choose_file, ConfirmFn confirm)
+    : m_node(node), m_args(args), m_restart(std::move(restart)), m_journal(std::move(journal)), m_choose_program(std::move(choose_program)), m_choose_file(std::move(choose_file)),
+      m_confirm(std::move(confirm))
 {
+}
+
+bool NodeOptions::IsLoopbackHost(const std::string& host)
+{
+    if (host.empty() || ToLower(host) == "localhost" || host == "::1" || host == "[::1]") return true;
+    // 127.0.0.0/8, written as four numbers.
+    const auto parts{util::SplitString(host, '.')};
+    if (parts.size() != 4 || parts[0] != "127") return false;
+    return std::ranges::all_of(parts, [](const std::string& p) { return ToIntegral<uint8_t>(p).has_value(); });
 }
 
 namespace {
@@ -546,7 +556,22 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
             const auto port{ToIntegral<uint16_t>(text)};
             if (!text.empty() && (!port || *port == 0)) throw std::runtime_error("The port is a number from 1 to 65535.");
         } else if (name == "mainchainConnect") {
-            if (text.find_first_of(" \t/@") != std::string::npos) throw std::runtime_error("The address of the mainchain node is a host name or an IP address.");
+            if (text.size() > 253 || text.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]") != std::string::npos) {
+                throw std::runtime_error("The address of the mainchain node is a host name or an IP address.");
+            }
+            // The node sends the credentials of the mainchain node there, unencrypted: another machine only on the
+            // user's word, given to the desktop (audit port-1 #4).
+            if (!IsLoopbackHost(text)) {
+                Window::ConfirmDialog dialog;
+                dialog.title = strprintf("Connect to a %s node on another machine", chain::MAINCHAIN_NAME);
+                dialog.message = strprintf("Host: %s\n\nFrom its next start, this node connects to the %s node at this host and sends it "
+                                           "the user name and password (or the cookie) of that node, unencrypted (plain HTTP). Anyone "
+                                           "who can read the network between them can then use the wallet of that node.\n\n"
+                                           "Accept only if both machines are yours and the network between them is trusted.",
+                                           text, chain::MAINCHAIN_NAME);
+                dialog.accept = "Connect there";
+                if (!m_confirm || !m_confirm(dialog)) throw std::runtime_error("The address of the mainchain node was not changed: it was declined.");
+            }
         } else if (text.size() > 200 || text.find_first_of("\r\n") != std::string::npos) {
             throw std::runtime_error("This text cannot be used here.");
         }

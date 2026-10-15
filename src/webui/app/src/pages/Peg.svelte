@@ -8,6 +8,7 @@
   //  - Bundle: the bundle of withdrawals the miners of the mainchain vote on, its votes and the blocks it
   //    has left; the bundles before it, paid or failed.
   import { t } from '../lib/i18n.svelte';
+  import { stacked } from '../lib/actions';
   import SafeText from '../components/SafeText.svelte';
   import Amount from '../components/Amount.svelte';
   import AmountInput from '../components/AmountInput.svelte';
@@ -24,7 +25,7 @@
   import { rpc } from '../lib/rpc';
   import { node, prefs, toast, wallets, walletsEnabled } from '../lib/state.svelte';
   import { coinsToSats, formatAmount, satsToCoins } from '../lib/units';
-  import { bundleCanPass, bundleHistory, depositsOf, depositTarget, ownWithdrawals, peg, voteProgress, withdrawalKey, type Withdrawal } from '../lib/side';
+  import { bundleCanPass, bundleHistory, declined, depositsOf, depositTarget, ownWithdrawals, peg, voteProgress, withdrawalKey, type Withdrawal } from '../lib/side';
   import { refreshSide, side, startSide } from '../lib/sidestate.svelte';
 
   const mainName = CHAIN.mainchain?.name ?? '';
@@ -99,18 +100,7 @@
       await inform(t('Peg'), t('Enter the amount to deposit.'), 'warning');
       return;
     }
-    const r = await ask({
-      title: t('Deposit from %1', mainName),
-      message: t('The wallet of the %1 node deposits %2 to this chain, to be credited to:', mainName, formatAmount(helperAmount, prefs.unit, { withUnit: true })),
-      code: depositAddress,
-      informative: t('The coins arrive with the first block of this chain after the deposit is mined on %1. They come back only through a withdrawal.', mainName),
-      level: 'question',
-      choices: [
-        { id: 'no', label: 'Cancel' },
-        { id: 'yes', label: 'Deposit', kind: 'primary' },
-      ],
-    });
-    if (r.choice !== 'yes') return;
+    // The host asks the user on the desktop, with the amount first: the wallet of the mainchain node pays.
     depositing = true;
     try {
       const done = await peg.deposit(depositAddress, satsToCoins(helperAmount));
@@ -120,7 +110,7 @@
       void loadMainBalance();
       void refreshSide(true);
     } catch (e) {
-      await inform(t('Deposit from %1', mainName), errorText(e), 'error');
+      if (!declined(e)) await inform(t('Deposit from %1', mainName), errorText(e), 'error');
     } finally {
       depositing = false;
     }
@@ -369,7 +359,7 @@
         <p class="side-empty">{side.main.error ? side.main.error : `No deposit to this chain in the blocks of ${mainName} on record.`}</p>
       {:else}
         <div class="side-table-wrap">
-          <table class="side-table" aria-label="Deposits to this chain">
+          <table class="side-table" use:stacked aria-label="Deposits to this chain">
             <thead><tr><th>State</th><th>Mainchain block</th><th>Time</th><th class="end">Amount</th><th>Destination</th><th>Transaction</th></tr></thead>
             <tbody>
               {#each deposits.slice(0, 100) as d (`${d.txid}:${d.burnindex}`)}
@@ -430,7 +420,7 @@
         <p class="side-empty">{onlyMine ? 'This wallet has no withdrawal waiting.' : 'No withdrawal is waiting.'}</p>
       {:else}
         <div class="side-table-wrap">
-          <table class="side-table" aria-label="Withdrawals not paid yet">
+          <table class="side-table" use:stacked aria-label="Withdrawals not paid yet">
             <thead><tr><th>State</th><th class="end">Amount</th><th class="end">Mainchain fee</th><th>Block</th><th>Refund address</th><th>Transaction</th><th></th></tr></thead>
             <tbody>
               {#each shownWithdrawals as w (withdrawalKey(w))}
@@ -494,7 +484,7 @@
         <p class="side-empty">{side.main.error ? side.main.error : `No bundle of this chain in the blocks of ${mainName} on record.`}</p>
       {:else}
         <div class="side-table-wrap">
-          <table class="side-table" aria-label="Bundles">
+          <table class="side-table" use:stacked aria-label="Bundles">
             <thead><tr><th>Result</th><th>Bundle</th><th>Proposed in block</th><th>Closed in block</th><th class="end">Last score</th></tr></thead>
             <tbody>
               {#each history as h (h.hash)}

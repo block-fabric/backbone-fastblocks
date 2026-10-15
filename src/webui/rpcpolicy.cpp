@@ -46,9 +46,9 @@ const std::map<std::string, Bridge::Thread>& Methods()
         {"getwithdrawalbundle", WORKER},
         {"listwithdrawals", WORKER},
         {"refundwithdrawal", WORKER},
-        {"requestbmmblock", LONG},
-        {"setbmm", WORKER},
         {"syncmainchain", LONG},
+        // (setbmm and requestbmmblock spend the wallet of the mainchain node: host methods bmm.set and
+        // bmm.request, confirmed on the desktop; sidechainapi.cpp.)
 #else
         // Mining with the processor (the Mine page).
         {"getgenerate", WORKER},

@@ -1,6 +1,8 @@
 // The app of a sidechain (chain.json role "sidechain"): its chain in one place, the pages of the kit
 // it does not have, its own pages (Peg, Merged mining, its home, the Mainchain tab of Settings) and
 // what they ask of the node and of the mainchain node (src/webui/sidechainapi.cpp: peg.*).
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CHAIN, SIDECHAIN, chainHasPage } from '../chain/config';
@@ -77,14 +79,14 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
       return [];
     case 'getbalances':
       return { mine: { trusted: 1, untrusted_pending: 0, immature: 0 } };
-    case 'setbmm':
-      mining = (r.params as unknown[])[0] === true;
+    case 'bmm.set':
+      mining = p.mine === true;
       return { mining };
     case 'createwithdrawal':
       return { txid: 'w3'.repeat(32), vout: 0, refundaddress: ownAddress };
     case 'refundwithdrawal':
       return { txid: 'r1'.repeat(32), amount: 0.2501, refundaddress: ownAddress };
-    case 'requestbmmblock':
+    case 'bmm.request':
       return { hash: 'bc'.repeat(32), mainchainheight: 101, transactions: 1, fees: 0, amount: 0.0001, mainchaintxid: 'mt'.repeat(32) };
     case 'peg.connection':
       return { connected: true, node: '127.0.0.1:29554', slot: SLOT, walletSet: true, wallet: 'miner', auth: 'cookie', cookieFile: '/home/u/.chains/regtest/.cookie' };
@@ -270,17 +272,23 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     await waitFor(() => expect(screen.getAllByText('Connected').length).toBeGreaterThan(0));
     await fireEvent.click(screen.getByRole('button', { name: /New deposit address/ }));
     await waitFor(() => expect(document.getElementById('deposit-address')?.textContent).toContain(DEPOSIT));
-    // The mainchain wallet's balance, then the helper: confirmed in a dialog, then peg.deposit.
+    // The mainchain wallet's balance, then the helper: peg.deposit, which the host confirms on the desktop
+    // (audit port-1 #4: no dialog of the page, which a compromised page could skip).
     await waitFor(() => expect(calls.some((c) => c.method === 'peg.call' && (c.params as Record<string, unknown>).method === 'getbalances')).toBe(true));
     await fireEvent.input(screen.getByLabelText('Amount'), { target: { value: '1.25' } });
     await fireEvent.click(screen.getByRole('button', { name: /^Deposit$/ }));
-    await answer('yes');
     await waitFor(() => expect(calls.find((c) => c.method === 'peg.deposit')?.params).toEqual({ destination: DEPOSIT, amount: '1.25' }));
     // The deposits of the mainchain blocks on record: one credited, one on its way, both to this wallet.
     const table = await waitFor(() => screen.getByRole('table', { name: 'Deposits to this chain' }));
     await waitFor(() => expect(within(table).getAllByText('yours').length).toBe(2));
     expect(within(table).getByText('On its way')).toBeTruthy();
     expect(within(table).getByText('Credited')).toBeTruthy();
+    // In a narrow panel the rows are cards: every cell carries the words of its column (audit port-1 #9).
+    const cells = within(table).getAllByRole('cell');
+    expect(cells[0].dataset.label).toBe('State');
+    expect(cells[3].dataset.label).toBe('Amount');
+    const css = readFileSync(join(__dirname, '../styles/side.css'), 'utf8');
+    expect(css).toMatch(/@container \(max-width: 36rem\)[\s\S]*td\[data-label\]::before/);
   });
 
   it('Peg → Withdraw: to an address of the mainchain, confirmed; the withdrawals, the ones of the wallet taken back', async () => {
@@ -323,12 +331,14 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     await waitFor(() => expect(document.getElementById('bmm-blocks')?.textContent).toBe('3'));
     await fireEvent.input(screen.getByLabelText('Pay the fees to'), { target: { value: ownAddress } });
     await fireEvent.click(screen.getByRole('button', { name: /Start mining/ }));
-    await waitFor(() => expect(calls.find((c) => c.method === 'setbmm')?.params).toEqual([true, ownAddress]));
+    await waitFor(() => expect(calls.find((c) => c.method === 'bmm.set')?.params).toEqual({ mine: true, address: ownAddress, always: false }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Stop mining' }) as HTMLButtonElement).disabled).toBe(false));
     await fireEvent.click(screen.getByRole('button', { name: 'Stop mining' }));
-    await waitFor(() => expect(calls.filter((c) => c.method === 'setbmm').at(-1)?.params).toEqual([false]));
+    await waitFor(() => expect(calls.filter((c) => c.method === 'bmm.set').at(-1)?.params).toEqual({ mine: false }));
     await fireEvent.click(screen.getByRole('button', { name: /Mine one block/ }));
-    await waitFor(() => expect(calls.find((c) => c.method === 'requestbmmblock')?.params).toEqual([ownAddress, '0.0001']));
+    await waitFor(() => expect(calls.find((c) => c.method === 'bmm.request')?.params).toEqual({ address: ownAddress, amount: '0.0001' }));
+    // Nothing that spends the mainchain wallet is an RPC call of the page.
+    expect(calls.some((c) => c.method === 'setbmm' || c.method === 'requestbmmblock' || c.method === 'createsidechaindeposit')).toBe(false);
     await waitFor(() => expect(document.getElementById('bmm-once-result')?.textContent).toContain('Asked for block'));
     // The blocks of the mainchain on record, and whether the blocks they committed to are in this chain.
     await waitFor(() => expect(screen.getAllByText('In this chain').length).toBeGreaterThan(0));

@@ -18,6 +18,7 @@
 #include <chainparams.h>
 #include <webui/appconfig.h>
 #include <webui/bridge.h>
+#include <webui/chainconfig.h>
 #include <webui/console.h>
 #include <webui/guard.h>
 #include <webui/nodeapi.h>
@@ -351,6 +352,46 @@ BOOST_AUTO_TEST_CASE(node_api)
     BOOST_CHECK(!api.Call("peers.disconnect", Obj({{"id", 7}})).get_bool());
     BOOST_CHECK_THROW(api.Call("bans.unban", Obj({{"address", "not an address"}})), webui::HostError);
 }
+
+#if WEBUI_SIDECHAIN
+BOOST_AUTO_TEST_CASE(mainchain_host_on_another_machine_asks_the_desktop)
+{
+    // Audit port-1 #4: the node sends the credentials of the mainchain node to the host of mainchainConnect,
+    // unencrypted. A host that is not this machine waits for the desktop; declined, nothing changes.
+    auto node{interfaces::MakeNode(m_node)};
+    std::vector<webui::Window::ConfirmDialog> asked;
+    bool answer{false};
+    webui::NodeOptions options{*node, *m_node.args, [](std::optional<bool>) { return false; }, {}, {}, {}, [&](const webui::Window::ConfirmDialog& d) {
+        asked.push_back(d);
+        return answer;
+    }};
+    for (const std::string local : {"127.0.0.1", "127.1.2.3", "localhost", "::1", ""}) {
+        options.Set("mainchainConnect", local);
+        BOOST_CHECK_EQUAL(options.Get()["mainchainConnect"].get_str(), local);
+    }
+    BOOST_CHECK(asked.empty());
+    BOOST_CHECK_EXCEPTION(options.Set("mainchainConnect", "evil.example"), std::runtime_error, [](const std::runtime_error& e) {
+        return std::string{e.what()}.find("declined") != std::string::npos;
+    });
+    BOOST_CHECK_EQUAL(options.Get()["mainchainConnect"].get_str(), "");
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK(asked[0].message.starts_with("Host: evil.example\n\n"));
+    BOOST_CHECK(asked[0].message.find("unencrypted") != std::string::npos);
+    answer = true;
+    options.Set("mainchainConnect", "192.168.1.20");
+    BOOST_CHECK_EQUAL(options.Get()["mainchainConnect"].get_str(), "192.168.1.20");
+    BOOST_CHECK_EQUAL(asked.size(), 2U);
+    // Text that is no host is refused before any dialog.
+    for (const std::string bad : {"a b", "x@y", "h/p", "Host: x\nevil", "\xe2\x80\xae" "abc"}) {
+        BOOST_CHECK_THROW(options.Set("mainchainConnect", bad), std::runtime_error);
+    }
+    BOOST_CHECK_EQUAL(asked.size(), 2U);
+    // Without a desktop to ask, another machine is refused.
+    webui::NodeOptions blind{*node, *m_node.args, [](std::optional<bool>) { return false; }};
+    BOOST_CHECK_THROW(blind.Set("mainchainConnect", "10.0.0.1"), std::runtime_error);
+    options.Set("mainchainConnect", "");
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(node_options)
 {

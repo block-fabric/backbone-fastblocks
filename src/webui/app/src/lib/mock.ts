@@ -85,6 +85,8 @@ export function installMock(options: MockOptions = {}): void {
       }
     },
     'peg.deposit': () => ({ txid: 'de'.repeat(32), total: 9.25 }),
+    'bmm.set': (p: Record<string, unknown>) => ({ mining: p.mine === true }),
+    'bmm.request': () => ({ hash: 'bc'.repeat(32), mainchainheight: 101, transactions: 1, fees: 0, amount: 0.0001, mainchaintxid: 'ab'.repeat(32) }),
   };
 
   /** Records as the host sends them (RecordJson): a salary, some spending, mined coins. */

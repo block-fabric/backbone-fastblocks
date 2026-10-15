@@ -58,7 +58,7 @@ BOOST_AUTO_TEST_CASE(mainchain_methods_read_only)
 
 BOOST_AUTO_TEST_CASE(page_input_refused_before_the_node)
 {
-    webui::SidechainApi api{NoNode};
+    webui::SidechainApi api{NoNode, [](const webui::Window::ConfirmDialog&) { return true; }};
     // A method not on the list.
     BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("peg.call", Obj({{"method", "sendtoaddress"}, {"params", UniValue{UniValue::VARR}}})); }), webui::BRIDGE_INVALID_REQUEST);
     BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("peg.call", Obj({{"method", "getblockcount"}, {"params", "x"}})); }), webui::BRIDGE_INVALID_REQUEST);
@@ -82,21 +82,65 @@ BOOST_AUTO_TEST_CASE(page_input_refused_before_the_node)
     BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("peg.deposit", Obj({{"destination", good}, {"amount", "1.5"}})); }), webui::BRIDGE_HOST_ERROR);
 }
 
+BOOST_AUTO_TEST_CASE(mainchain_wallet_spends_ask_the_desktop)
+{
+    // Audit port-1 #4: what spends the wallet of the mainchain node is checked by the host, then confirmed on the
+    // desktop; the offers of merged mining are capped.
+    std::vector<webui::Window::ConfirmDialog> asked;
+    bool answer{false};
+    int reached{0};
+    const auto node{[&]() -> interfaces::Node& {
+        ++reached;
+        throw webui::HostError("no node in this test");
+    }};
+    webui::SidechainApi api{node, [&](const webui::Window::ConfirmDialog& d) {
+        asked.push_back(d);
+        return answer;
+    }};
+    const std::string own{EncodeDestination(WitnessV0KeyHash{uint160{}})};
+    // Refused before any dialog: no address of this chain, no offer, an offer over the cap.
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", true}, {"address", "nope"}})); }), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", "yes"}})); }), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", true}, {"address", own}, {"always", true}, {"amount", "0"}})); }), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", true}, {"address", own}, {"always", true}, {"amount", "0.01000001"}})); }), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.request", Obj({{"address", own}, {"amount", "5"}})); }), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK(asked.empty());
+    BOOST_CHECK_EQUAL(reached, 0);
+    // Declined on the desktop: the node is not reached.
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", true}, {"address", own}, {"always", true}, {"amount", "0.0001"}})); }), webui::BRIDGE_CANCELLED);
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK(asked[0].message.starts_with("Offer: 0.0001 coins of "));
+    BOOST_CHECK(asked[0].message.find("every block") != std::string::npos);
+    BOOST_CHECK(asked[0].message.ends_with(own));
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", true}, {"address", own}})); }), webui::BRIDGE_CANCELLED);
+    BOOST_CHECK(asked[1].message.starts_with("Offer: 99% of the fees"));
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.request", Obj({{"address", own}, {"amount", "0.01"}})); }), webui::BRIDGE_CANCELLED);
+    BOOST_CHECK(asked[2].message.starts_with("Offer: 0.01 coins of "));
+    BOOST_CHECK_EQUAL(reached, 0);
+    // Accepted, the node is asked; turning mining off needs no word.
+    answer = true;
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.request", Obj({{"address", own}, {"amount", "0.01"}})); }), webui::BRIDGE_HOST_ERROR);
+    BOOST_CHECK_EQUAL(reached, 1);
+    asked.clear();
+    BOOST_CHECK_EQUAL(CodeOf([&] { api.Call("bmm.set", Obj({{"mine", false}})); }), webui::BRIDGE_HOST_ERROR);
+    BOOST_CHECK(asked.empty());
+    BOOST_CHECK_EQUAL(webui::SidechainApi::MAX_BMM_OFFER, 1'000'000);
+}
+
 BOOST_AUTO_TEST_CASE(page_rpc_policy_of_the_chain)
 {
 #if WEBUI_SIDECHAIN
     // A sidechain: its peg and merged mining; none of the drivechain methods of the mainchain, no solo mining.
-    for (const char* m : {"getmainchaininfo", "getbmminfo", "setbmm", "requestbmmblock", "listwithdrawals", "getwithdrawalbundle", "getdepositaddress", "createwithdrawal", "refundwithdrawal"}) {
+    for (const char* m : {"getmainchaininfo", "getbmminfo", "listwithdrawals", "getwithdrawalbundle", "getdepositaddress", "createwithdrawal", "refundwithdrawal"}) {
         BOOST_CHECK_MESSAGE(webui::PageRpcPolicy(m).has_value(), m);
     }
-    for (const char* m : {"acksidechain", "createsidechainproposal", "setwithdrawalvote", "createsidechaindeposit", "setgenerate", "getgenerate"}) {
+    // What spends the wallet of the mainchain node is a host method, confirmed on the desktop (bmm.set, bmm.request).
+    for (const char* m : {"acksidechain", "createsidechainproposal", "setwithdrawalvote", "createsidechaindeposit", "setgenerate", "getgenerate", "setbmm", "requestbmmblock"}) {
         BOOST_CHECK_MESSAGE(!webui::PageRpcPolicy(m).has_value(), m);
     }
     BOOST_CHECK(webui::KeyedWalletRpc("createwithdrawal"));
     BOOST_CHECK(webui::KeyedWalletRpc("refundwithdrawal"));
     BOOST_CHECK(!webui::KeyedWalletRpc("createsidechaindeposit"));
-    // Mining one block waits for the mainchain node: apart from the quick calls.
-    BOOST_CHECK(webui::PageRpcPolicy("requestbmmblock") == webui::Bridge::Thread::LONG);
 #else
     BOOST_CHECK(webui::PageRpcPolicy("acksidechain").has_value());
     BOOST_CHECK(!webui::PageRpcPolicy("setbmm").has_value());

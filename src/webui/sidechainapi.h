@@ -5,7 +5,9 @@
 #ifndef BITCOIN_WEBUI_SIDECHAINAPI_H
 #define BITCOIN_WEBUI_SIDECHAINAPI_H
 
+#include <consensus/amount.h>
 #include <univalue.h>
+#include <webui/guard.h>
 
 #include <functional>
 #include <set>
@@ -30,6 +32,14 @@ class Bridge;
  *   peg.deposit {destination, amount}  the deposit helper: the wallet of the mainchain node deposits `amount`
  *                                   (coins of the mainchain, text) to this sidechain, to `destination`, a
  *                                   deposit address of this sidechain (its slot, a valid address of this chain)
+ *   bmm.set {mine, address?, always?, amount?}  merged mining on (setbmm: the address of the fees; with
+ *                                   `always`, `amount` offered for every block of the mainchain) or off
+ *   bmm.request {address, amount}   one block mined by hand (requestbmmblock), `amount` offered for it
+ *
+ * What spends the wallet of the mainchain node (a deposit, merged mining turned on, a block asked for) waits for
+ * the user's word, given to the desktop (Window::Confirm), with the amount the host parsed first; an offer for
+ * merged mining is at most MAX_BMM_OFFER (audit port-1 #4). setbmm and requestbmmblock are not methods the
+ * page calls itself (rpcpolicy.cpp).
  *
  * The page never names the mainchain node or its credentials: the node's own connection is used.
  */
@@ -38,7 +48,10 @@ class SidechainApi
 public:
     using NodeFn = std::function<interfaces::Node&()>;
 
-    explicit SidechainApi(NodeFn node);
+    SidechainApi(NodeFn node, guard::ConfirmFn confirm);
+
+    /** The most an offer of merged mining may be, for one block of the mainchain (0.01 coins). */
+    static constexpr CAmount MAX_BMM_OFFER{1'000'000};
 
     void Register(Bridge& bridge);
 
@@ -51,6 +64,7 @@ public:
 
 private:
     NodeFn m_node;
+    guard::ConfirmFn m_confirm;
 };
 
 } // namespace webui

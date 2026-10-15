@@ -5,6 +5,7 @@
   // offer), one block by hand (requestbmmblock), what happened (the requests and their results, the
   // candidates kept), the blocks of the mainchain that committed to this chain, and the connection.
   import { t } from '../lib/i18n.svelte';
+  import { stacked } from '../lib/actions';
   import SafeText from '../components/SafeText.svelte';
   import Amount from '../components/Amount.svelte';
   import AmountInput from '../components/AmountInput.svelte';
@@ -16,7 +17,7 @@
   import { rpc } from '../lib/rpc';
   import { node, prefs, savePrefs, toast, wallets, walletsEnabled } from '../lib/state.svelte';
   import { coinsToSats, formatAmount, satsToCoins } from '../lib/units';
-  import { bmmBlocks, bmmShare, type BmmRequest } from '../lib/side';
+  import { bmmBlocks, bmmHost, bmmShare, declined, type BmmRequest } from '../lib/side';
   import { noteManualRequest, refreshSide, side, startSide, type BmmLogEntry } from '../lib/sidestate.svelte';
 
   const mainName = CHAIN.mainchain?.name ?? '';
@@ -76,17 +77,16 @@
       if (on) {
         const to = await feeAddress();
         if (!to) return;
-        const params: unknown[] = [true, to];
-        if (always) params.push(true, satsToCoins(alwaysOffer ?? 10_000n));
-        await rpc.raw('setbmm', params);
+        // The host checks the offer and asks the user on the desktop (the wallet of the mainchain node pays).
+        await bmmHost.set(true, to, always, satsToCoins(alwaysOffer ?? 10_000n));
         savePrefs({ miningAddress: to });
         toast('success', t('Merged mining on'), always ? t('A block is asked for with every block of %1.', mainName) : t('A block is asked for whenever there are fees to pay for it.'));
       } else {
-        await rpc.raw('setbmm', [false]);
+        await bmmHost.set(false);
         toast('info', t('Merged mining off'), t('No more blocks are asked for.'));
       }
     } catch (e) {
-      await inform(t('Merged mining'), errorText(e), 'warning');
+      if (!declined(e)) await inform(t('Merged mining'), errorText(e), 'warning');
     } finally {
       busy = false;
       void refreshSide(true);
@@ -103,11 +103,11 @@
     if (!to) return;
     busy = true;
     try {
-      lastManual = await rpc.raw<BmmRequest>('requestbmmblock', [to, satsToCoins(onceOffer)]);
+      lastManual = await bmmHost.request(to, satsToCoins(onceOffer));
       noteManualRequest(lastManual.fees, lastManual.amount);
       toast('success', t('Block asked for'), t('It is mined if the next block of %1 takes the offer.', mainName));
     } catch (e) {
-      await inform(t('Merged mining'), errorText(e), 'warning');
+      if (!declined(e)) await inform(t('Merged mining'), errorText(e), 'warning');
     } finally {
       busy = false;
       void refreshSide(true);
@@ -238,7 +238,7 @@
       </div>
       {#if rows.length}
         <div class="side-table-wrap">
-          <table class="side-table" aria-label="Commitments of the blocks of {mainName}">
+          <table class="side-table" use:stacked aria-label="Commitments of the blocks of {mainName}">
             <thead><tr><th>Block of {mainName}</th><th>Time</th><th>Block of this chain</th><th>Result</th></tr></thead>
             <tbody>
               {#each rows as r (r.hash)}

@@ -5,8 +5,10 @@
 #include <webui/sidechainapi.h>
 
 #include <webui/bridge.h>
+#include <webui/chainconfig.h>
 
 #include <chainparams.h>
+#include <core_io.h>
 #include <drivechain/sidechain.h>
 #include <interfaces/node.h>
 #include <key_io.h>
@@ -32,7 +34,25 @@ std::string ParamStr(const UniValue& params, const std::string& key)
     return value.get_str();
 }
 
-const std::vector<std::string> METHODS{"peg.connection", "peg.call", "peg.deposit"};
+const std::vector<std::string> METHODS{"peg.connection", "peg.call", "peg.deposit", "bmm.set", "bmm.request"};
+
+/** An amount of coins of the mainchain the page gives as text: positive. */
+CAmount ParseOffer(const UniValue& params, const std::string& key, const std::string& what)
+{
+    const UniValue& value{Param(params, key)};
+    const std::string text{value.isStr() ? util::TrimString(value.get_str()) : value.isNum() ? value.getValStr() : std::string{}};
+    const auto amount{ParseMoney(text)};
+    if (!amount || *amount <= 0) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s is a positive number of coins, like 0.0001", what));
+    return *amount;
+}
+
+/** An address of this chain the page gives (the fees of merged mining). */
+std::string ParseOwnAddress(const UniValue& params)
+{
+    const std::string address{util::TrimString(ParamStr(params, "address"))};
+    if (!IsValidDestinationString(address)) throw HostError(BRIDGE_INVALID_REQUEST, "This is not an address of this chain.");
+    return address;
+}
 } // namespace
 
 const std::set<std::string>& SidechainApi::MainchainMethods()
@@ -52,7 +72,7 @@ const std::set<std::string>& SidechainApi::MainchainWalletMethods()
     return methods;
 }
 
-SidechainApi::SidechainApi(NodeFn node) : m_node(std::move(node)) {}
+SidechainApi::SidechainApi(NodeFn node, guard::ConfirmFn confirm) : m_node(std::move(node)), m_confirm(std::move(confirm)) {}
 
 void SidechainApi::Register(Bridge& bridge)
 {
@@ -60,6 +80,7 @@ void SidechainApi::Register(Bridge& bridge)
         // Calls to the mainchain node go over the network, and may wait for it: apart from the quick calls.
         bridge.RegisterHost(method, [this, method](const UniValue& params) { return Call(method, params); },
                             method == "peg.connection" ? Bridge::Thread::WORKER : Bridge::Thread::LONG);
+        // (bmm.* and peg.deposit wait for a dialog of the desktop: on the long lane too.)
     }
 }
 
@@ -115,11 +136,78 @@ UniValue SidechainApi::Call(const std::string& method, const UniValue& params)
         const std::string amount_text{util::TrimString(ParamStr(params, "amount"))};
         const auto amount{ParseMoney(amount_text)};
         if (!amount || *amount <= 0) throw HostError(BRIDGE_INVALID_REQUEST, "The amount is a positive number of coins, like 1.5");
+        // The wallet of the mainchain node pays: on the user's word, given to the desktop, the amount first.
+        const auto& options{follower().Client().GetOptions()};
+        Window::ConfirmDialog dialog;
+        dialog.title = strprintf("Deposit from the wallet of %s", chain::MAINCHAIN_NAME);
+        dialog.message = strprintf("Amount: %s coins of %s, and the fee of the transaction\n\n"
+                                   "The wallet of the %s node at %s:%u pays it to this sidechain (slot %u), to be credited to:\n%s\n\n"
+                                   "Accept only if you asked for this deposit.",
+                                   FormatMoney(*amount), chain::MAINCHAIN_NAME, chain::MAINCHAIN_NAME, guard::OneLine(options.host, 64), options.port, slot, deposit_address.address);
+        dialog.accept = "Deposit";
+        if (!m_confirm || !m_confirm(dialog)) throw HostError(BRIDGE_CANCELLED, "The deposit was declined.");
         UniValue args{UniValue::VARR};
         args.push_back(static_cast<int64_t>(slot));
         args.push_back(destination);
         args.push_back(FormatMoney(*amount));
         return call_main("createsidechaindeposit", args, /*wallet=*/true);
+    }
+    // Merged mining: what the wallet of the mainchain node offers its miners, checked here, then confirmed on the desktop.
+    const auto run_own{[&](const std::string& m, const UniValue& args) {
+        try {
+            return m_node().executeRpc(m, args, "/");
+        } catch (const UniValue& error) {
+            const UniValue& message{error.find_value("message")};
+            throw HostError(message.isStr() ? message.get_str() : error.write());
+        }
+    }};
+    if (method == "bmm.set") {
+        const UniValue& mine{Param(params, "mine")};
+        if (!mine.isBool()) throw HostError(BRIDGE_INVALID_REQUEST, "mine: true or false");
+        UniValue args{UniValue::VARR};
+        args.push_back(mine.get_bool());
+        if (!mine.get_bool()) return run_own("setbmm", args);
+        const std::string address{ParseOwnAddress(params)};
+        const bool always{Param(params, "always").isBool() && Param(params, "always").get_bool()};
+        Window::ConfirmDialog dialog;
+        dialog.title = "Turn merged mining on";
+        if (always) {
+            const CAmount offer{ParseOffer(params, "amount", "The offer")};
+            if (offer > MAX_BMM_OFFER) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The offer is at most %s for a block.", FormatMoney(MAX_BMM_OFFER)));
+            dialog.message = strprintf("Offer: %s coins of %s for every block of %s, with or without fees for it\n\n"
+                                       "The wallet of the %s node pays this to its miners for each block of this chain they mine, "
+                                       "from now on, until merged mining is turned off. The fees of the blocks go to:\n%s",
+                                       FormatMoney(offer), chain::MAINCHAIN_NAME, chain::MAINCHAIN_NAME, chain::MAINCHAIN_NAME, address);
+            args.push_back(address);
+            args.push_back(true);
+            args.push_back(ValueFromAmount(offer));
+        } else {
+            dialog.message = strprintf("Offer: 99%% of the fees of each block of this chain\n\n"
+                                       "The wallet of the %s node pays this to its miners for each block of this chain they mine, "
+                                       "from now on, until merged mining is turned off. The fees of the blocks go to:\n%s",
+                                       chain::MAINCHAIN_NAME, address);
+            args.push_back(address);
+        }
+        dialog.accept = "Mine";
+        if (!m_confirm || !m_confirm(dialog)) throw HostError(BRIDGE_CANCELLED, "Merged mining was not turned on: it was declined.");
+        return run_own("setbmm", args);
+    }
+    if (method == "bmm.request") {
+        const std::string address{ParseOwnAddress(params)};
+        const CAmount offer{ParseOffer(params, "amount", "The offer")};
+        if (offer > MAX_BMM_OFFER) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("The offer is at most %s for a block.", FormatMoney(MAX_BMM_OFFER)));
+        Window::ConfirmDialog dialog;
+        dialog.title = "Mine one block of this chain";
+        dialog.message = strprintf("Offer: %s coins of %s, for one block\n\n"
+                                   "The wallet of the %s node offers this to its miners to commit to a block of this chain. "
+                                   "The fees of the block go to:\n%s",
+                                   FormatMoney(offer), chain::MAINCHAIN_NAME, chain::MAINCHAIN_NAME, address);
+        dialog.accept = "Offer";
+        if (!m_confirm || !m_confirm(dialog)) throw HostError(BRIDGE_CANCELLED, "No block was asked for: it was declined.");
+        UniValue args{UniValue::VARR};
+        args.push_back(address);
+        args.push_back(ValueFromAmount(offer));
+        return run_own("requestbmmblock", args);
     }
     throw HostError(BRIDGE_METHOD_NOT_FOUND, "No method " + method);
 }

@@ -3,7 +3,7 @@
 // says of this sidechain (its bundles and their votes, the deposits, the blocks that committed to it),
 // and how the pages put them together. The calls to the mainchain node go through the host
 // (src/webui/sidechainapi.cpp: peg.*), on the node's own connection to it.
-import { request } from './bridge';
+import { ErrorCode, request } from './bridge';
 import { rpc } from './rpc';
 import { coinsToSats } from './units';
 
@@ -130,6 +130,24 @@ export const peg = {
   /** The deposit helper: the wallet of the mainchain node deposits `amount` (coins, text) to `destination`. */
   deposit: (destination: string, amount: string) => request<{ txid: string; total: number }>('host', 'peg.deposit', { destination, amount }),
 };
+
+/**
+ * Merged mining, through the host: what the wallet of the mainchain node offers is checked there and confirmed in a
+ * dialog of the desktop (setbmm and requestbmmblock are not methods the page calls itself). A decline rejects with
+ * ErrorCode.CANCELLED.
+ */
+export const bmmHost = {
+  /** On (the address of the fees; with `always`, `amount` offered for every block of the mainchain) or off. */
+  set: (mine: boolean, address?: string, always?: boolean, amount?: string) =>
+    request<{ mining: boolean }>('host', 'bmm.set', mine ? { mine, address, always: !!always, ...(always ? { amount } : {}) } : { mine }),
+  /** One block by hand. */
+  request: (address: string, amount: string) => request<BmmRequest>('host', 'bmm.request', { address, amount }),
+};
+
+/** Whether an error is the user's "no" (a confirmation of the desktop declined) or a cancelled call. */
+export function declined(e: unknown): boolean {
+  return !!e && typeof e === 'object' && (e as { code?: number }).code === ErrorCode.CANCELLED;
+}
 
 // --- The history of the mainchain blocks that concern this sidechain ---
 

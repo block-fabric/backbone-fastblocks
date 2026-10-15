@@ -4,7 +4,9 @@
 // to an address of the mainchain wallet, its bundle voted on and paid. Pictures of each step, of every
 // page of the sidechain, in the layouts and looks.
 (async () => {
-  const { rpc, sleep, log, T, waitFor, check, snapshot, text, finish } = E2E;
+  const { host, rpc, sleep, log, T, waitFor, check, snapshot, text, finish } = E2E;
+  /** The confirmations of the desktop answered so far (test.confirmAnswer queues the answers). */
+  const confirmed = () => host('test.confirmed');
   const SLOT = window.__E2E_SLOT;
   const MAIN = window.__E2E_MAINCHAIN;
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -77,8 +79,20 @@
     await shot('sc-peg-deposit-address');
     set($('#deposit-amount'), '5');
     await sleep(200);
+    // The wallet of the mainchain node pays: the host asks the desktop, the amount first (audit port-1 #4).
+    // Declined first: nothing is sent.
+    let asked = (await confirmed()).length;
+    await host('test.confirmAnswer', { yes: false });
     $('#deposit-helper').click();
-    await answerDialog(`Deposit from ${MAIN}`, 'Deposit');
+    await waitFor('the deposit asked on the desktop', async () => (await confirmed()).length > asked, 30000);
+    await sleep(1500);
+    await check('a deposit declined on the desktop sends nothing, and no error shows', !text('.peg').includes('On its way') && !$$('dialog[open]').some((d) => /Deposit from/.test(d.textContent)));
+    asked = (await confirmed()).length;
+    await host('test.confirmAnswer', { yes: true });
+    $('#deposit-helper').click();
+    await waitFor('the deposit asked on the desktop', async () => (await confirmed()).length > asked, 30000);
+    const depositAsked = (await confirmed()).at(-1);
+    await check('the deposit is confirmed on the desktop, its amount first', depositAsked.title === `Deposit from the wallet of ${MAIN}` && depositAsked.message.startsWith(`Amount: 5.00 coins of ${MAIN}`) && depositAsked.message.includes(deposit.slice(deposit.indexOf('_') + 1, deposit.lastIndexOf('_'))), JSON.stringify(depositAsked));
     await waitFor('the deposit on its way', () => text('.peg').includes('On its way'), 60000);
     await check('the deposit is on its way', true);
     await shot('sc-peg-deposit-on-its-way');
@@ -88,7 +102,12 @@
     await waitFor('the merged mining page', () => $('#bmm-start'));
     $('#bmm-always').click();
     await sleep(150);
+    asked = (await confirmed()).length;
+    await host('test.confirmAnswer', { yes: true });
     await click('Start mining');
+    await waitFor('merged mining asked on the desktop', async () => (await confirmed()).length > asked, 30000);
+    const bmmAsked = (await confirmed()).at(-1);
+    await check('merged mining is confirmed on the desktop, its offer first', bmmAsked.title === 'Turn merged mining on' && bmmAsked.message.startsWith(`Offer: 0.0001 coins of ${MAIN} for every block of ${MAIN}`), JSON.stringify(bmmAsked));
     await waitFor('mining on', () => text('.bmm').includes('Mining'), 30000);
     const bmm = await rpc('getbmminfo');
     await check('merged mining on, always', bmm.mining === true && bmm.always === true, JSON.stringify(bmm));
@@ -105,6 +124,17 @@
     await go('peg', 'deposit');
     await waitFor('the deposit credited in the list', () => text('.peg').includes('Credited'), 60000);
     await shot('sc-peg-deposit-credited');
+    // A narrow panel (a window of 480 px): the table is a list of cards, no column behind a scroll (audit port-1 #9).
+    const wrap = $('.side-table-wrap');
+    wrap.style.width = '400px';
+    await sleep(300);
+    const cells = $$('td', wrap);
+    const hidden = cells.filter((td) => td.getBoundingClientRect().right > wrap.getBoundingClientRect().right + 1);
+    await check('at 400 px the deposits are cards, every cell in view under the words of its column',
+      wrap.scrollWidth <= wrap.clientWidth + 1 && hidden.length === 0 && getComputedStyle($('thead', wrap)).display === 'none' && cells.some((td) => td.dataset.label === 'Amount'),
+      JSON.stringify({ scroll: wrap.scrollWidth, client: wrap.clientWidth, hidden: hidden.length }));
+    await shot('sc-peg-deposit-400');
+    wrap.style.width = '';
     await go('home');
     await sleep(2000);
     await shot('sc-home-funded');
@@ -165,11 +195,28 @@
     await shot('sc-home-ocean');
     T().savePrefs({ theme: 'midnight' });
 
-    // Merged mining off again.
+    // Merged mining off again (no word of the desktop needed to stop paying).
     await go('bmm');
+    asked = (await confirmed()).length;
     await click('Stop mining');
     await waitFor('mining off', async () => (await rpc('getbmminfo')).mining === false, 30000);
-    await check('merged mining off', true);
+    await check('merged mining off, without asking', (await confirmed()).length === asked);
+    // One block by hand, declined on the desktop: nothing is asked of the mainchain.
+    await host('test.confirmAnswer', { yes: false });
+    const requestsBefore = (await rpc('getbmminfo')).requests ?? null;
+    await click('Mine one block');
+    await waitFor('one block asked on the desktop', async () => (await confirmed()).length > asked, 30000);
+    await sleep(800);
+    const onceAsked = (await confirmed()).at(-1);
+    await check('one block by hand is confirmed on the desktop; declined, no error shows', onceAsked.title === 'Mine one block of this chain' && !$$('dialog[open]').some((d) => /Merged mining/.test(d.textContent)) && JSON.stringify((await rpc('getbmminfo')).requests ?? null) === JSON.stringify(requestsBefore), JSON.stringify(onceAsked));
+    // The page cannot spend the mainchain wallet with an RPC call of its own.
+    const direct = await E2E.asPage('setbmm', [false], true).then(() => null, (e) => e);
+    await check('setbmm is not a method the page calls', direct && direct.code === -32601, JSON.stringify(direct));
+    // Another machine as the mainchain node: on the desktop's word only (its credentials go there unencrypted).
+    await host('test.confirmAnswer', { yes: false });
+    const remote = await host('options.set', { name: 'mainchainConnect', value: 'mainchain.example' }).then(() => null, (e) => e);
+    const remoteAsked = (await confirmed()).at(-1);
+    await check('a mainchain node on another machine is confirmed on the desktop; declined, not set', remote && /declined/.test(remote.message) && remoteAsked.message.startsWith('Host: mainchain.example'), JSON.stringify([remote, remoteAsked]));
     await finish();
   } catch (e) {
     await finish(e);

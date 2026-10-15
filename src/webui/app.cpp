@@ -1101,7 +1101,7 @@ void App::RegisterHostMethods()
 
 #if WEBUI_SIDECHAIN
     // The pages of a sidechain: its mainchain node, through the node's own connection to it.
-    m_sidechain_api = std::make_unique<SidechainApi>(need_node);
+    m_sidechain_api = std::make_unique<SidechainApi>(need_node, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); });
     m_sidechain_api->Register(b);
 #else
     // The nodes of sidechains run from here (the Sidechain Nodes window).
@@ -1172,7 +1172,7 @@ void App::RegisterHostMethods()
             dialog.title = title;
             if (!current.empty()) dialog.start_dir = fs::PathToString(fs::PathFromString(current).parent_path());
             return Choose(dialog);
-        }};
+        }, [this](const Window::ConfirmDialog& dialog) { return Confirm(dialog); }};
     }};
     const auto with_pending{[this](UniValue out) {
         // The changes waiting for Apply (the restart flag they may have set is not one).

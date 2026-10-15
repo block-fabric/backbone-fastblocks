@@ -7,6 +7,7 @@
 
 #include <sync.h>
 #include <univalue.h>
+#include <webui/guard.h>
 
 #include <functional>
 #include <optional>
@@ -48,7 +49,19 @@ public:
     /** Have the user choose a file for a setting that names one (title, the file set now): the file chooser of the desktop. */
     using ChooseFileFn = std::function<std::optional<std::string>(const std::string& title, const std::string& current)>;
 
-    NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal = {}, ChooseProgramFn choose_program = {}, ChooseFileFn choose_file = {});
+    /**
+     * A confirmation of the desktop, for a setting that sends something where the page says (a sidechain: the
+     * credentials of the mainchain node to a host that is not this machine). Without one, such a setting is refused.
+     */
+    using ConfirmFn = guard::ConfirmFn;
+
+    NodeOptions(interfaces::Node& node, ArgsManager& args, RestartFlag restart, Journal journal = {}, ChooseProgramFn choose_program = {}, ChooseFileFn choose_file = {}, ConfirmFn confirm = {});
+
+    /**
+     * Whether the mainchain node is on this machine: a loopback address or localhost (empty: the default, 127.0.0.1).
+     * Its credentials go to it unencrypted (plain HTTP).
+     */
+    static bool IsLoopbackHost(const std::string& host);
 
     /**
      * The settings that name a file the node reads (a sidechain: the cookie file and the password file of the
@@ -99,6 +112,7 @@ private:
     Journal m_journal;
     ChooseProgramFn m_choose_program;
     ChooseFileFn m_choose_file;
+    ConfirmFn m_confirm;
 };
 
 class AppConfig;
