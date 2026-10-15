@@ -4955,4 +4955,113 @@ BOOST_FIXTURE_TEST_CASE(slot_spare_header_taken_on_a_branch, FastBlocksSetup)
     }
 }
 
+namespace {
+/** A `headers` message of these headers (each a block without transactions: an extended one, no sections). */
+CSerializedNetMsg HeadersMessage(const std::vector<CBlockHeader>& headers)
+{
+    DataStream s{};
+    WriteCompactSize(s, headers.size());
+    for (const CBlockHeader& header : headers) {
+        s << header;
+        WriteCompactSize(s, 0);
+        if (header.IsExtended()) WriteCompactSize(s, 0);
+    }
+    CSerializedNetMsg msg;
+    msg.m_type = NetMsgType::HEADERS;
+    msg.data.assign(UCharCast(s.data()), UCharCast(s.data()) + s.size());
+    return msg;
+}
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(slot_junk_headers_then_the_announced_block, FastBlocksSetup)
+{
+    // Review of 960f12f34e (audit 6, item 14). The leader of a slot signs two junk headers of it (or
+    // anyone relays them): the two places of its slot are taken. The block the network builds on, on
+    // another branch (a sibling), is announced alone, as tips are: from an outbound peer it is taken
+    // (unchecked, the peer's) and its block fetched at once, not once a block on top of it exists.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    StartPos();
+    for (int i{1}; i <= 3; ++i) Take(PosBlock(i));
+    const CBlock honest{PosBlock(4)};
+    const int64_t slot{pos::SlotOf(honest.nTime, Pos())};
+    const CKey& leader{Leader(slot)};
+    const auto junk{[&](uint8_t n) {
+        CBlock block{honest};
+        block.hashMerkleRoot = uint256{n};
+        BOOST_REQUIRE(pos::Producer::Sign(block, leader, Genesis()));
+        return static_cast<CBlockHeader>(block);
+    }};
+    BOOST_REQUIRE_EQUAL(HeaderReason({junk(1)}, /*source=*/5), "");
+    BOOST_REQUIRE_EQUAL(HeaderReason({junk(2)}, /*source=*/5), "");
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 1U);
+    // A third junk header alone, from an inbound peer: spare (no better than the best header, junk 1).
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceAdded(40, /*inbound=*/true));
+    BOOST_CHECK_EQUAL(HeaderReason({junk(3)}, /*source=*/40), "header-spare");
+
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(99999s);
+    AttackPeer peer{101, connman, ConnectionType::OUTBOUND_FULL_RELAY};
+    peer.Send(connman, HeadersMessage({honest}));
+    m_node.peerman->SendMessages(peer.node);
+    const CBlockIndex* index{Index(honest.GetHash())};
+    BOOST_CHECK_MESSAGE(index, "the honest block's header, announced alone after two junk headers of its slot, is refused");
+    CNodeStateStats stats;
+    BOOST_REQUIRE(m_node.peerman->GetNodeStateStats(peer.node.GetId(), stats));
+    BOOST_CHECK_MESSAGE(std::ranges::find(stats.vHeightInFlight, Tip()->nHeight + 1) != stats.vHeightInFlight.end(), "its block is not asked for");
+    // The block comes: the tip.
+    peer.Send(connman, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(honest)));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(Tip()->GetBlockHash() == honest.GetHash());
+    BOOST_CHECK(!WITH_LOCK(::cs_main, return Assert(Index(honest.GetHash()))->m_unchecked));
+    m_node.peerman->FinalizeNode(peer.node);
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(40));
+}
+
+BOOST_FIXTURE_TEST_CASE(slot_headers_counted_by_signer, SeedSetup)
+{
+    // Review of 960f12f34e (audit 6, item 14). Two headers of a slot are kept for good per signer: once
+    // its leader signed two (the proof), a further one of that leader is spare, but a header of another
+    // leader of the slot (the record moved the epoch's seed, say) is taken, checked, for good.
+    StartPos();
+    const int64_t epoch{pos::EpochOf(base_slot, Pos()) + 1};
+    const int i{static_cast<int>(epoch * Pos().slots_per_epoch - base_slot)};
+    Slot(i);
+    Mock(GetTime() + 1);
+    Main();
+    Take(PosBlock(i));
+    const CBlock model{PosBlock(i + 1)};
+    const int64_t slot{pos::SlotOf(model.nTime, Pos())};
+    const uint256 first_leader{XOnly(Leader(slot))};
+    const auto header{[&](uint8_t n, const CKey& signer) {
+        CBlock block{model};
+        block.hashMerkleRoot = uint256{n};
+        BOOST_REQUIRE(pos::Producer::Sign(block, signer, Genesis()));
+        return static_cast<CBlockHeader>(block);
+    }};
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceAdded(40, /*inbound=*/true));
+    BOOST_REQUIRE_EQUAL(HeaderReason({header(1, Leader(slot))}, /*source=*/40), "");
+    BOOST_REQUIRE_EQUAL(HeaderReason({header(2, Leader(slot))}, /*source=*/40), "");
+    BOOST_CHECK_EQUAL(HeaderReason({header(3, Leader(slot))}, /*source=*/40), "header-spare");
+    // The record moves the seed of the slot's epoch, until the slot has another leader.
+    const auto seed_height{pos::SeedHeight(epoch, Pos(), Record())};
+    BOOST_REQUIRE(seed_height && *seed_height > 0);
+    const auto replaced{Record().Truncate(*seed_height - 1)};
+    bool moved{false};
+    for (uint64_t k{1}; k <= 64 && !moved; ++k) {
+        Record().Truncate(*seed_height - 1);
+        for (sidechain::MainBlock main : replaced) {
+            main.prev_hash = Record().TipHash();
+            main.hash = ArithToUint256(UintToArith256(main.hash) + k);
+            BOOST_REQUIRE(Record().Append(main));
+        }
+        moved = XOnly(Leader(slot)) != first_leader;
+    }
+    BOOST_REQUIRE(moved);
+    // The new leader's header of the slot, alone, from the inbound peer: taken for good.
+    const CBlockHeader other{header(4, Leader(slot))};
+    BOOST_CHECK_EQUAL(HeaderReason({other}, /*source=*/40), "");
+    BOOST_CHECK(Index(other.GetHash()) && !WITH_LOCK(::cs_main, return Index(other.GetHash())->m_unchecked));
+    WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(40));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

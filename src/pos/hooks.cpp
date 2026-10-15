@@ -164,6 +164,7 @@ bool FastBlocksHooks::CheckHeader(const CBlockHeader& header, const CBlockIndex&
     }
     case LeaderStatus::OK:
         if (!CheckBlockSig(header, leader.pubkey, Genesis())) return invalid("bad-pos-sig", "a block of stake is signed by the leader of its slot");
+        m_checked_signer = {header.GetHash(), leader.pubkey};
         break;
     }
     if (future) return state.Invalid(BlockValidationResult::BLOCK_TIME_FUTURE, "pos-time-future", "the slot of the block of stake has not started");
@@ -220,8 +221,26 @@ bool FastBlocksHooks::HeaderSpare(const CBlockHeader& header, const CBlockIndex&
     if (!IsPosHeader(header)) return false;
     const int64_t time{header.nTime};
     if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) return false;
-    const auto found{m_slot_headers.find(SlotOf(time, m_params))};
-    return found != m_slot_headers.end() && !found->second.back().IsNull();
+    const int64_t slot{SlotOf(time, m_params)};
+    const auto found{m_slot_headers.find(slot)};
+    // (Fewer than that of the slot at all: none is spare, nothing more to read.)
+    if (found == m_slot_headers.end() || found->second.size() < MAX_SLOT_HEADERS) return false;
+    // By its signer: the leader of the slot on its branch (as CheckHeader checks next). A signer that
+    // signed two of the slot kept already, the proof that it signed twice, has nothing more to give;
+    // another leader of the slot (another branch's set, or the record's seed moved) has its own two.
+    const SlotLeader leader{LeaderOf(prev, slot)};
+    if (leader.status != LeaderStatus::OK) return false;
+    const ChainstateManager* chainman{Chainman()};
+    size_t signed_by{0};
+    for (SlotHeader& kept : found->second) {
+        if (!kept.signer && chainman) {
+            // (Kept checked, against the leader of its time: its signature says whether it is this one.)
+            const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(kept.hash)};
+            if (index && CheckBlockSig(index->GetBlockHeader(), leader.pubkey, Genesis())) kept.signer = leader.pubkey;
+        }
+        if (kept.signer == leader.pubkey && ++signed_by >= MAX_SLOT_HEADERS) return true;
+    }
+    return false;
 }
 
 void FastBlocksHooks::HeaderKept(const CBlockIndex& index) const
@@ -230,16 +249,18 @@ void FastBlocksHooks::HeaderKept(const CBlockIndex& index) const
     if (!index.m_ext) return;
     const int64_t time{index.nTime};
     if (time <= m_params.genesis_time || (time - m_params.genesis_time) % m_params.slot_seconds != 0) return;
-    // The first MAX_SLOT_HEADERS of the slot, each once (an entry may be told of twice). Past those, the
-    // slot's further ones are those of connected blocks (or the node's own): no need to count them.
+    // Each once (an entry may be told of twice), with its signer if its signature was just checked
+    // (CheckHeader, AfterBlock); else found when HeaderSpare asks. Bounded: two a signer of the slot
+    // (HeaderSpare), and those of blocks connected.
     const uint256 hash{index.GetBlockHash()};
-    for (uint256& kept : m_slot_headers[SlotOf(time, m_params)]) {
-        if (kept == hash) return;
-        if (kept.IsNull()) {
-            kept = hash;
-            return;
-        }
+    const std::optional<uint256> signer{m_checked_signer.first == hash ? std::optional<uint256>{m_checked_signer.second} : std::nullopt};
+    std::vector<SlotHeader>& kept{m_slot_headers[SlotOf(time, m_params)]};
+    for (SlotHeader& entry : kept) {
+        if (entry.hash != hash) continue;
+        if (!entry.signer) entry.signer = signer;
+        return;
     }
+    kept.push_back({.hash = hash, .signer = signer});
 }
 
 sidechain::ChainHooks::UncheckedBudget FastBlocksHooks::UncheckedLimits() const
@@ -718,6 +739,7 @@ bool FastBlocksHooks::AfterBlock(sidechain::State& state, const CBlock& block, i
         case LeaderStatus::OK: break;
         }
         if (!CheckBlockSig(block, leader.pubkey, Genesis())) return Fail(reject_reason, "bad-pos-sig");
+        m_checked_signer = {block.GetHash(), leader.pubkey};
         // A banned leader leads no more: from the block after the one that punished it, its slots
         // stay empty (the sets made before its ban still name it; the state of the chain below the
         // block says it is banned, so every node agrees). Its slots are not given to others: who
