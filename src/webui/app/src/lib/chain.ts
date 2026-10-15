@@ -85,6 +85,14 @@ export interface DrivechainState {
   bundles: Bundle[];
 }
 
+/**
+ * The active sidechains and the bundles of one, for the detail panel of a sidechain (the mainchain's: a sidechain
+ * has no sidechains of its own, and its node does not take these methods).
+ */
+export async function loadSidechainDetail<S, B>(slot: number): Promise<[S[], B[]]> {
+  return Promise.all([rpc.raw<S[]>('listactivesidechains'), rpc.raw<B[]>('listwithdrawalbundles', [slot])]);
+}
+
 /** Everything the sidechain page shows, fetched at once (SidechainPage::refresh). */
 export async function loadDrivechain(): Promise<DrivechainState> {
   const [info, sidechains, proposals, bundles] = await Promise.all([

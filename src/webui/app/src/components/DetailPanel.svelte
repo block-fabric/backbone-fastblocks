@@ -10,6 +10,8 @@
   import { formatBytes, formatCount, formatTime, niceTimeOffset, shortHash } from '../lib/format';
   import { go, goTo } from '../lib/nav.svelte';
   import { rpc } from '../lib/rpc';
+  import { loadSidechainDetail } from '../lib/chain';
+  import { SIDECHAIN } from '../chain/config';
   import { coinsToSats } from '../lib/units';
 
   interface Block {
@@ -91,8 +93,11 @@
           if (!peer) error = 'This peer is not connected any more.';
         })
         .catch(fail);
+    } else if (SIDECHAIN) {
+      // A sidechain has no sidechains of its own (nothing shows one here).
+      error = 'This sidechain is not active.';
     } else {
-      Promise.all([rpc.raw<Sidechain[]>('listactivesidechains'), rpc.raw<Bundle[]>('listwithdrawalbundles', [it.slot])])
+      loadSidechainDetail<Sidechain, Bundle>(it.slot)
         .then(([list, bundles]) => {
           const info = list.find((s) => s.slot === it.slot);
           if (info) sidechain = { info, bundles };
