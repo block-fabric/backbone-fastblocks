@@ -1,7 +1,7 @@
 // The hooks a chain made from the template fills with its own (audit port-2 #7): its icons
 // (chain/icons.ts), its cards on the home (chain/LocalCards.svelte), what it sends beside its coin
 // (chain/LocalSend.svelte), Alt+6 and on for its pages (chain/local.ts `shortcut`), the weight of its
-// blocks (chain.json blockWeight). Here with a pretend chain of the template's: one page with Alt+6
+// blocks (app.info.blockWeight, from the node). Here with a pretend chain of the template's: one page with Alt+6
 // that needs a wallet, one icon.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,11 +44,15 @@ describe('the hooks of a chain of its own', () => {
     expect(src('chain/LocalSend.svelte')).toMatch(/active = \$bindable\(false\)/);
   });
 
-  it("blocks are drawn against the chain's weight", async () => {
-    const { BLOCK_WEIGHT, fillPercent } = await import('../lib/blocks');
-    const chain = JSON.parse(src('chain/chain.json')) as { blockWeight?: number };
-    expect(BLOCK_WEIGHT).toBe(chain.blockWeight ?? 800_000);
-    expect(fillPercent(BLOCK_WEIGHT / 2, 10, BLOCK_WEIGHT)).toBe(50);
-    expect(src('components/BlockBox.svelte')).toMatch(/fillPercent\(block\.weight \?\? 0, block\.nTx, BLOCK_WEIGHT\)/);
+  it('blocks are drawn against the weight the node says for its network (app.info.blockWeight)', async () => {
+    const { render } = await import('@testing-library/svelte');
+    const BlockBox = (await import('../components/BlockBox.svelte')).default;
+    const { app } = await import('../lib/state.svelte');
+    const block = { height: 5, hash: 'ab'.repeat(32), time: 1_700_000_000, nTx: 10, weight: 3_000_000, subsidy: null, fees: null, feeRate: null, tag: '', bmm: [] };
+    app.info = { blockWeight: 6_000_000 } as never;
+    const { container } = render(BlockBox, { block, secs: 60, median: 60, now: 1_700_000_060, onselect: () => {} });
+    expect((container.querySelector('.blk-face') as HTMLElement).style.getPropertyValue('--fill')).toBe('50%');
+    // The host says it (app.cpp, consensus.max_block_weight of the network).
+    expect(readFileSync(join(__dirname, '../../../app.cpp'), 'utf8')).toMatch(/info\.pushKV\("blockWeight", Params\(\)\.GetConsensus\(\)\.max_block_weight\)/);
   });
 });

@@ -113,6 +113,8 @@ export interface AppInfo {
   test: boolean;
   platform: string;
   blockSpacing?: number;
+  /** The weight a block of this chain and network may have (consensus.max_block_weight). */
+  blockWeight?: number;
 }
 
 export interface Dialog {

@@ -11,6 +11,7 @@
   import { BLOCK_WEIGHT, feeTint, fillPercent, intervalTone, shortInterval, type RibbonBlock } from '../lib/blocks';
   import { formatCount, niceTimeOffset } from '../lib/format';
   import { CHAIN } from '../chain/config';
+  import { app } from '../lib/state.svelte';
 
   let {
     block,
@@ -35,7 +36,8 @@
 
   const mainName = CHAIN.mainchain?.name ?? '';
 
-  const fill = $derived(fillPercent(block.weight ?? 0, block.nTx, BLOCK_WEIGHT));
+  // Against the weight a block of this chain and network may have, as the node says (app.info.blockWeight).
+  const fill = $derived(fillPercent(block.weight ?? 0, block.nTx, app.info?.blockWeight ?? BLOCK_WEIGHT));
   const tint = $derived(feeTint(block.feeRate));
   const tone = $derived(intervalTone(secs, median));
   const reward = $derived(block.subsidy === null ? null : block.subsidy + (block.fees ?? 0));

@@ -392,7 +392,7 @@ these too never conflict:
 | `src/chain/LocalCards.svelte` | Its cards on the home of the dashboard, under the kit's (views/home/SideHome.svelte) |
 | `src/chain/LocalSend.svelte` | What it sends beside its coin (an asset, a name), at the top of Send; `active` set while its own form takes the place of the kit's |
 | `chain/local.ts` `shortcut: 'Alt+6'` | Alt+6 and on open its pages (lib/keyboard.ts), never over the kit's Alt+1 to Alt+5 |
-| `chain.json` `blockWeight` | The weight its blocks may have, which the explorer draws them against; `test_<stem>-app` checks it is `consensus.max_block_weight` |
+| `chain.json` `blockWeight` | Not needed: the explorer draws blocks against the weight the node says (`app.info.blockWeight`, `consensus.max_block_weight` of the network); `blockWeight` is only the fallback before it has |
 | `src/webui/test/local_tests.cpp` | The unit tests of local.cpp, built into `test_<stem>-app` when the file is there |
 | `src/webui/test/e2e/local.cmake` | `webui_local_e2e(<name> <port> [options])` for each page script `e2e/<name>.js` of its pages: run by run_sidechain.py (`--script`, `--app-arg`, `--js-var NAME=VALUE`; `window.__E2E_DIR` is the folder of the run) against a live mainchain, as `webui_e2e_<name>` |
 
