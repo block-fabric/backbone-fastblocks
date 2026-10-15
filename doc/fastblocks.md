@@ -1014,8 +1014,11 @@ Every FastBlocks functional test checks this on every node after every step
   noted is a bounded cache (`MAX_NOTED_ACKS`, oldest out first): the blocks that
   matter are found from the chain (`BlocksCommittedBy`, given the mainchain
   height the commitment had): on the active chain, the block whose nNonce is
-  that height, from the tip down; and the blocks that failed against the record.
-  Any other block is checked against the record when it is connected.
+  that height, from the tip down to the first acknowledgement below it (not
+  stopped by a BMM block: where the record has it now is not where it had it);
+  and the blocks that failed against the record. Only a block whose nNonce is
+  that height is read. Any other block is checked against the record when it is
+  connected.
 - The slots signed are kept in `<key file>.protection`, next to the key file
   (as is the lock, `<key file>.lock`): wiping the data directory to sync again
   keeps the key, and so must keep what it signed. The `validator_protection.dat`
@@ -1589,6 +1592,46 @@ Three attacks worked; each fixed at its root (tests in `fastblocks_tests.cpp`):
   of each block it drops) and finds the blocks of the active chain and those
   that failed against the record from the chain; the noted ones are a cache.
   `attack8_acks_pushed_out_still_taken_back`.
+
+### Review 8 (2026-10-15)
+
+The security review of the attack8 fix found two issues in `BlocksCommittedBy`
+(`src/pos/hooks.cpp`), both real; and the same split at startup:
+
+- **A split.** The walk from the tip stopped at the first BMM block the record
+  committed below the height. The record is the one after the mainchain reorg:
+  a reorg that drops a ticket's commitment and commits again, lower, to a BMM
+  block above its acknowledgement stopped the walk above it, so a node that had
+  not noted the acknowledgement (restarted, or flooded: attack8) kept it on an
+  anchor the mainchain dropped while the others took it back. Acknowledgements
+  are in strict mainchain order on nNonce (the state's `bad-pos-ack-order`,
+  connect time, and the header's), which the block hash covers: the walk stops
+  only at an acknowledgement below the height. It visits the blocks above the
+  last one: each BMM block among them is a commitment of its own, with at most
+  `max_unanchored_slots` blocks of stake after each anchor. A commitment to a
+  BMM block of ours needs no walk (acknowledgements name tickets).
+  `review8_ack_below_a_bmm_block_committed_lower_taken_back`.
+- **A denial of service.** Every call read from disk, under `cs_main`, each
+  acknowledgement of the active chain at or above the height (a mainchain reorg
+  of N blocks: N^2/2 reads) and each block failed against the record, which are
+  never forgotten and cost no commitment (a leader makes two of each slot it
+  leads, acknowledging at the height of any commitment on record a ticket nobody
+  committed). It is called for each commitment the mainchain makes or drops, and
+  for each ticket a producer may acknowledge, each slot (`NextAck`); with the
+  noted acknowledgements pushed out (attack8), each one a read. Only a block
+  whose nNonce is the height can rest on the commitment (`bad-pos-ack-height`):
+  only those are read, the others are passed over from the block index. (The
+  failures are still all looked up in memory; `NextAck` counts only one at the
+  height, whatever this node noted.)
+  `review8_blocks_committed_by_reads_only_the_candidates`.
+- **At startup** (`Follower::CheckActiveChain`, for a node that stopped between
+  learning of a change of the mainchain and acting on it) only blocks without a
+  commitment at the top went: in the reorg above, the block committed lower was
+  checked again as moved and connected again on its parent, which has no
+  commitment, where a running node took back both. The lowest block without a
+  commitment within `MOVED_CHECK_DEPTH` of the record's tip goes, with all
+  above it. `feature_sidechain_record.py` ("the block on it committed to again
+  below it").
 
 ## Deviations from the design (phase 5)
 
