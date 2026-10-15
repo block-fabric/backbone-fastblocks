@@ -27,12 +27,15 @@
   import { coinsToSats, formatAmount, satsToCoins } from '../lib/units';
   import { bundleCanPass, bundleHistory, declined, depositsOf, depositTarget, ownWithdrawals, peg, voteProgress, withdrawalKey, type Withdrawal } from '../lib/side';
   import { refreshSide, side, startSide } from '../lib/sidestate.svelte';
+  import Bmm from './Bmm.svelte';
 
   const mainName = CHAIN.mainchain?.name ?? '';
   const TABS = [
     { id: 'deposit', label: 'Deposit' },
     { id: 'withdraw', label: 'Withdraw' },
     { id: 'bundle', label: 'Bundle' },
+    // Merged mining is a tab of Drivechains (user decision, 2026-10-15); go('bmm') leads here.
+    { id: 'bmm', label: 'Merged mining' },
   ];
   const tab = $derived(TABS.some((x) => x.id === nav.tab) ? nav.tab : 'deposit');
 
@@ -306,7 +309,9 @@
     {/each}
   </div>
 
-  {#if tab === 'deposit'}
+  {#if tab === 'bmm'}
+    <Bmm embedded />
+  {:else if tab === 'deposit'}
     <div class="side-cols">
       <section class="panel">
         <div class="panel-head"><h2>Deposit address</h2></div>
