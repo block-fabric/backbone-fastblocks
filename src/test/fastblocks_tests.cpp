@@ -5162,6 +5162,64 @@ BOOST_FIXTURE_TEST_CASE(slot_headers_counted_by_signer, SeedSetup)
     WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(40));
 }
 
+BOOST_FIXTURE_TEST_CASE(evidence_built_as_validated_across_pruning, FastBlocksSetup)
+{
+    // Review of audit 6 (the check of evidence once a peg step prunes validator sets). A block of
+    // stake with an acknowledgement takes a peg step before its proofs are checked (AfterBlock): the
+    // anchors count one more, and the step may prune the set of an old anchor. The producer chooses
+    // its proofs before the step (ChainEvidence on the tip's state, with that one more anchor). At
+    // every anchor, up to and past the end of a proof's window, both agree: a proof the producer
+    // would carry makes a valid block; one it leaves out, an invalid one (bad-pos-evidence-old).
+    StartPos();
+    // A slot of an epoch whose set the first anchor made (not the genesis set: never pruned).
+    int i{static_cast<int>((pos::EpochOf(base_slot, Pos()) + 2) * Pos().slots_per_epoch - base_slot)};
+    Take(PosBlock(i - 1));
+    const auto [a, b]{TwoBlocks(i)};
+    const pos::Offence offence{.pubkey = XOnly(Leader(pos::SlotOf(a.nTime, Pos()))), .slot = pos::SlotOf(a.nTime, Pos())};
+    Take(a);
+    const pos::DoubleProposal proof{.a = a, .b = b};
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof, why), why);
+    const auto set_of_proof{[&] {
+        LOCK(::cs_main);
+        return Hooks().LeaderOf(*Tip(), offence.slot, &Chain().SideCache(), Hooks().EvidenceWithin());
+    }};
+    BOOST_REQUIRE(set_of_proof().status == pos::FastBlocksHooks::LeaderStatus::OK);
+    BOOST_REQUIRE_GT(set_of_proof().set_anchors, 0U);
+    bool left_out{false};
+    size_t carried{0};
+    // (On, past the window, until a peg step prunes the proof's set.)
+    for (int anchor{0}; anchor < 8 * Pos().evidence_window_anchors && set_of_proof().status != pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN; ++anchor) {
+        i += 3;
+        const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+        const int64_t slot{Slot(i)};
+        bool chosen;
+        {
+            LOCK(::cs_main);
+            const sidechain::StoreView& view{Chain().SideCache()};
+            const auto evidence{Hooks().ChainEvidence(*Tip(), slot, view, pos::GetFastState(view).anchors + 1, pos::MAX_SECTION_EVIDENCE)};
+            // (The pool has others: each block checked here and the one taken are two of a slot.)
+            chosen = std::any_of(evidence.begin(), evidence.end(), [&](const auto& e) { return e.first == offence; });
+        }
+        const std::string reason{Check(WithEvidence(i, {proof}, ack))};
+        BOOST_CHECK_MESSAGE(chosen == reason.empty(), "at anchor " << anchor << ": the producer would " << (chosen ? "" : "not ") << "carry the proof, and the block is " << (reason.empty() ? "valid" : reason));
+        if (!chosen) {
+            BOOST_CHECK_EQUAL(reason, "bad-pos-evidence-old");
+            left_out = true;
+        } else {
+            BOOST_CHECK(!left_out);
+            ++carried;
+        }
+        // The anchor, without the proof (its offender stays unpunished, the window runs on).
+        Take(PosBlock(i, ack));
+    }
+    BOOST_TEST_MESSAGE("the proof could be carried at " << carried << " anchors, then was out of its window");
+    BOOST_CHECK(left_out);
+    BOOST_CHECK_GT(carried, 0U);
+    // Its set pruned by a peg step at last.
+    BOOST_CHECK(set_of_proof().status == pos::FastBlocksHooks::LeaderStatus::SET_UNKNOWN);
+}
+
 BOOST_FIXTURE_TEST_CASE(evidence_true_proof_among_a_flood, FastBlocksSetup)
 {
     // Review of 81aeb47467 (audit 6, item 11). The pool is full of costly but useless proofs (1000,
