@@ -348,6 +348,8 @@ BOOST_AUTO_TEST_CASE(MempoolHealthWithdrawals)
 {
     // A withdrawal the miner adds to its block itself never was in the mempool: it does not
     // make a mempool that had every other transaction of the block look unrepresentative.
+    // A sidechain has no sidechains of its own, so no escrow outputs: nothing to leave out.
+    if (m_node.chainman->GetConsensus().drivechain.max_sidechains == 0) return;
     const int64_t block_weight{m_node.chainman->GetConsensus().max_block_tx_weight};
     m_node.mempool->SetLoadTried(true);
     MemPoolFeeRateEstimator estimator{MempoolPolicyEstimatorPath(*m_node.args), *m_node.mempool, *m_node.chainman};
