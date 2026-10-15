@@ -1,0 +1,348 @@
+/* The pages of FastBlocks (Staking, Finality & BMM, Slashing & jail, its cards, the kinds of the explorer):
+   shared pieces, in the colour tokens of themes.css only, so that every theme (and the Advanced theme's own)
+   draws them. */
+
+/* The kind of a block: PoS (a block of stake), BMM (one that records a BMM commitment), PoW (merged mined). Told
+   apart by their mark as well as their colour. */
+.badge.fb-kind-pos,
+.badge.fb-kind-bmm,
+.badge.fb-kind-pow {
+  gap: 0.35rem;
+  font-variant-numeric: tabular-nums;
+}
+.badge.fb-kind-pos::before,
+.badge.fb-kind-bmm::before,
+.badge.fb-kind-pow::before {
+  content: '';
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: none;
+  border: 1.5px solid currentColor;
+}
+.badge.fb-kind-pos {
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+}
+.badge.fb-kind-pos::before {
+  border-radius: 50%;
+  background: currentColor;
+}
+.badge.fb-kind-bmm {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.badge.fb-kind-bmm::before {
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--warning-soft);
+  background: currentColor;
+}
+.badge.fb-kind-pow {
+  background: transparent;
+  color: var(--text-muted);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.badge.fb-kind-pow::before {
+  transform: rotate(45deg) scale(0.85);
+}
+
+/* Finality: soft (blocks of stake only), BMM-confirmed, final. */
+.badge.fb-soft {
+  background: var(--raised);
+  color: var(--text-muted);
+}
+.badge.fb-anchored {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.badge.fb-final {
+  background: var(--accent-soft);
+  color: var(--positive);
+}
+
+.fb-page .fb-head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.9rem;
+}
+.fb-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+}
+.fb-key .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fb-key .mono.whole {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.fb-mine {
+  font-size: 0.72rem;
+}
+
+/* A row of what a panel says, as label | value lines, the values to the end. */
+.fb-pairs {
+  display: grid;
+  grid-template-columns: minmax(min-content, 1fr) minmax(0, auto);
+  gap: 0.45rem 1rem;
+  margin: 0;
+}
+.fb-pairs dt {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.fb-pairs dd {
+  margin: 0;
+  min-width: 0;
+  text-align: right;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The share of a stake: a thin bar under its figure. */
+.fb-share {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 6rem;
+}
+.fb-share .bar {
+  position: relative;
+  height: 0.3rem;
+  border-radius: 999px;
+  background: var(--raised);
+  overflow: hidden;
+}
+.fb-share .bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+/* The timeline of the slots to come: a cell per slot, this node's lit. */
+.fb-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(0.55rem, 1fr));
+  gap: 3px;
+  margin: 0.2rem 0 0.4rem;
+}
+.fb-slots span {
+  height: 1.3rem;
+  border-radius: 3px;
+  background: var(--raised);
+}
+.fb-slots span.mine {
+  background: var(--accent);
+}
+.fb-slots span.empty {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.fb-slots span.now {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.fb-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.fb-legend i {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.35rem;
+  border-radius: 2px;
+  vertical-align: -0.05rem;
+  background: var(--raised);
+}
+.fb-legend i.mine {
+  background: var(--accent);
+}
+.fb-legend i.empty {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+/* A list of the slots to come, with their countdown. */
+.fb-next {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fb-next li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.2rem 0.8rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.fb-next li:last-child {
+  border-bottom: 0;
+}
+.fb-next .when {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The bars of the wallet's coins by finality. */
+.fb-finality {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.fb-finality .stack {
+  display: flex;
+  height: 0.6rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--raised);
+}
+.fb-finality .stack span {
+  height: 100%;
+}
+.fb-finality .soft {
+  background: var(--line-strong);
+}
+.fb-finality .anchored {
+  background: var(--warning);
+}
+.fb-finality .final {
+  background: var(--positive);
+}
+.fb-finality dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin: 0;
+}
+.fb-finality dt {
+  display: contents;
+}
+.fb-finality dt i {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 50%;
+}
+.fb-finality dt span {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.fb-finality dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 600;
+}
+
+/* A form's actions: the kind of change, as a segmented choice. */
+.fb-segments {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+}
+.fb-segments button {
+  padding: 0.35rem 0.75rem;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.fb-segments button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+}
+.fb-segments button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* The bar over a list: its title, the data points read, the page. */
+.fb-listbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.8rem;
+}
+.fb-listbar h2 {
+  margin-right: auto;
+}
+.fb-listbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.86rem;
+}
+.fb-listbar select {
+  width: auto;
+}
+.fb-listbar :global(.pager) {
+  padding: 0;
+}
+
+.fb-error {
+  color: var(--negative);
+}
+.fb-small {
+  font-size: 0.82rem;
+}
+.fb-empty {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  color: var(--text-muted);
+}
+.fb-hash {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+.fb-hash:hover {
+  text-decoration: underline;
+}
+
+/* Facts of a panel side by side, each its words over its value; under one another when narrow. */
+.fb-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(10.5rem, 100%), 1fr));
+  gap: 0.8rem 1.2rem;
+}
+.fb-facts > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.fb-facts > div > span:first-child {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+.fb-facts strong {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
