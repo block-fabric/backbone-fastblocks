@@ -11,14 +11,19 @@ folder of the Windows user, and runs there, through the interop of WSL:
   - the page scripts of the Linux end-to-end tests (smoke.js, layouts.js, titlebar.js, walletcard.js), each on
     regtest with a data directory of its own and ports of its own, with -webuitestscript: the
     window, the title bar, the bridge, the single instance (a second start hands a payment URI to
-    the first one through the named pipe), and the pictures of the pages, copied back to --shots.
+    the first one through the named pipe), and the pictures of the pages, copied back to --shots;
+  - for the app of a sidechain (chain.json role "sidechain"), sidechain.js instead: the app on Windows
+    following a regtest mainchain node run here in WSL (chainsd of --mainchain-bin, reached through the
+    localhost of Windows), a deposit, merged mining, a withdrawal and its bundle paid (run_sidechain.py).
 
 Nothing outside that folder is touched: the app settings file and the data of WebView2 are in it,
 the chains: URI scheme is not registered (-webuitestscript), and only the processes started from
 the folder are ever stopped. The folder is removed at the end unless --keep.
 
-    run_windows.py --app build_win/bin/chains-app.exe [--unit build_win/bin/test_chains-app.exe] \\
-        --shots <dir> [--scripts smoke,layouts,titlebar,walletcard]
+    run_windows.py --app build_win/bin/<stem>-app.exe [--unit build_win/bin/test_<stem>-app.exe] \\
+        --shots <dir> [--scripts smoke,layouts,titlebar,walletcard | sidechain] [--mainchain-bin <dir>]
+
+The folder is named after the program (<stem>-app-test), so that the tests of two chains never share one.
 """
 
 import argparse
@@ -34,7 +39,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from run_smoke import script  # noqa: E402
 
-PORTS = {"smoke": 39470, "layouts": 39490, "titlebar": 39510, "walletcard": 39550}
+PORTS = {"smoke": 39470, "layouts": 39490, "titlebar": 39510, "walletcard": 39550, "sidechain": 39570}
+CHAIN = json.loads((HERE.parents[1] / "app/src/chain/chain.json").read_text())
+SIDECHAIN = CHAIN["role"] == "sidechain"
 
 
 def win(cmd):
@@ -157,7 +164,8 @@ def main():
     parser.add_argument("--app", required=True, type=Path)
     parser.add_argument("--unit", type=Path, help="test_chains-app.exe, to run its tests on Windows first")
     parser.add_argument("--shots", required=True, type=Path, help="folder for the pictures (on the Linux side)")
-    parser.add_argument("--scripts", default="smoke,layouts,titlebar,walletcard")
+    parser.add_argument("--scripts", default="sidechain" if SIDECHAIN else "smoke,layouts,titlebar,walletcard")
+    parser.add_argument("--mainchain-bin", type=Path, default=os.environ.get("MAINCHAIN_BIN_DIR"), help="folder of chainsd, for sidechain.js (default: $MAINCHAIN_BIN_DIR)")
     parser.add_argument("--keep", action="store_true", help="keep the folder on Windows")
     args = parser.parse_args()
 
@@ -165,7 +173,8 @@ def main():
     if not temp_win or "%" in temp_win:
         print("No Windows here (cmd.exe)", file=sys.stderr)
         return 2
-    folder_win = temp_win + "\\chains-app-test"
+    stem = args.app.name.removesuffix(".exe").removesuffix("-app")
+    folder_win = temp_win + f"\\{stem}-app-test"
     folder = Path(to_wsl(folder_win))
     stop_ours(folder_win)
     if folder.exists():
@@ -174,12 +183,12 @@ def main():
     args.shots.mkdir(parents=True, exist_ok=True)
     failures = []
     try:
-        exe = folder / "chains-app.exe"
+        exe = folder / f"{stem}-app.exe"
         shutil.copy2(args.app, exe)
 
         if args.unit:
-            print("== test_chains-app", flush=True)
-            unit = folder / "test_chains-app.exe"
+            print(f"== test_{stem}-app", flush=True)
+            unit = folder / f"test_{stem}-app.exe"
             shutil.copy2(args.unit, unit)
             started = time.time()
             proc = subprocess.run([str(unit), "--log_level=test_suite", "--", f"-testdatadir={folder_win}\\unit"], capture_output=True, text=True, cwd="/mnt/c", timeout=900)
@@ -188,7 +197,7 @@ def main():
             print("  " + "\n  ".join(tail) + f"\n  exit {proc.returncode} in {time.time() - started:.0f} s", flush=True)
             shutil.copy2(folder / "unit.log", args.shots / "unit.log")
             if proc.returncode != 0:
-                failures.append(f"test_chains-app: exit {proc.returncode}")
+                failures.append(f"test_{stem}-app: exit {proc.returncode}")
 
         for name in [s for s in args.scripts.split(",") if s]:
             print(f"== {name}", flush=True)
@@ -196,25 +205,45 @@ def main():
             base = folder / name
             datadir = base / "datadir"
             datadir.mkdir(parents=True)
-            (base / f"{name}.js").write_text(script(f"{name}.js"))
+            mainchain = None
+            extra = []
+            if name == "sidechain":
+                # The mainchain, here in WSL; the app on Windows reaches it through the localhost of Windows.
+                from run_sidechain import Miner, Rpc, SLOT, ACTIVATION_PERIOD, PASSWORD, USER, start_mainchain  # noqa: E402
+                main_proc, main = start_mainchain(args.mainchain_bin / "chainsd", base, port + 10)
+                main("createwallet", "miner")
+                wallet = Rpc(port + 10, "miner")
+                coinbase = wallet("getnewaddress")
+                wallet("generatetoaddress", 110, coinbase)
+                main("createsidechainproposal", SLOT, "E2E sidechain", "The sidechain of the end-to-end test", "11" * 32, "22" * 20)
+                wallet("generatetoaddress", ACTIVATION_PERIOD + 1, coinbase)
+                miner = Miner(wallet, coinbase, 1.0)
+                miner.start()
+                mainchain = (main_proc, main, miner, wallet)
+                (base / "mainchain.password").write_text(PASSWORD + "\n")
+                extra = [f"-sidechainslot={SLOT}", f"-mainchainrpcport={port + 10}", f"-mainchainrpcuser={USER}",
+                         f"-mainchainrpcpasswordfile={to_win(base / 'mainchain.password')}", "-mainchainrpcwallet=miner"]
+                (base / f"{name}.js").write_text(script(f"{name}.js", f"window.__E2E_SLOT = {SLOT};\nwindow.__E2E_MAINCHAIN = {json.dumps(CHAIN['mainchain']['name'])};\n"))
+            else:
+                (base / f"{name}.js").write_text(script(f"{name}.js"))
             # The data of WebView2 in the folder too (read by the runtime from the environment).
             env_dir = to_win(base / "webview2")
             os.environ["WEBVIEW2_USER_DATA_FOLDER"] = env_dir
             os.environ["WSLENV"] = "WEBVIEW2_USER_DATA_FOLDER/w"
             common = ["-regtest", f"-port={port}", f"-rpcport={port + 1}", "-listen=0", "-dnsseed=0", "-fixedseeds=0", "-fallbackfee=0.0002", "-webuiregisteruri=0",
-                      f"-datadir={to_win(datadir)}", f"-webuiconfig={to_win(base / 'chains-app.json')}"]
+                      f"-datadir={to_win(datadir)}", f"-webuiconfig={to_win(base / 'app.json')}"] + extra
             run = Run(exe, common + [f"-webuitestshots={to_win(base / 'shots')}", f"-webuitestscript={to_win(base / (name + '.js'))}"], base / "app.log", datadir)
             if name == "smoke":
                 ready = run.wait_event("READY_FOR_URI", 300)
                 if ready:
-                    pid_file = datadir / "regtest" / "chainsd.pid"
+                    pid_file = datadir / "regtest" / f"{CHAIN['bin']}d.pid"
                     if pid_file.exists():
                         frame = base / "shots" / "window-frame.png"
                         frame.parent.mkdir(parents=True, exist_ok=True)
                         if not capture_window(pid_file.read_text().strip(), to_win(frame)):
                             failures.append("no picture of the window")
                     address = ready.split(" ")[1]
-                    uri = f"chains:{address}?amount=1.5&label=Smoke%20test"
+                    uri = f"{CHAIN['uriScheme']}:{address}?amount=1.5&label=Smoke%20test"
                     second = subprocess.run([str(exe)] + common + [uri], capture_output=True, text=True, cwd="/mnt/c", timeout=120)
                     out = (second.stdout + second.stderr).strip()
                     print(f"  second start: exit {second.returncode}: {out}", flush=True)
@@ -222,7 +251,7 @@ def main():
                         failures.append(f"second start with a URI: exit {second.returncode}, {out[-300:]}")
                 else:
                     failures.append("the smoke script never got to the URI step")
-            code = run.wait(1200)
+            code = run.wait(1800 if name == "sidechain" else 1200)
             if code is None:
                 failures.append(f"{name}: did not stop")
                 stop_ours(folder_win)
@@ -242,6 +271,28 @@ def main():
                     failures.append(f"{name}: missing pictures: {missing}")
                 print(f"  {result['passed']} checks passed, {count} pictures", flush=True)
             shutil.copy2(datadir / "regtest" / "debug.log", args.shots / f"{name}-debug.log") if (datadir / "regtest" / "debug.log").exists() else None
+            if mainchain:
+                main_proc, main, miner, wallet = mainchain
+                paid = run.events.get("WITHDRAWN")
+                if paid:
+                    address, amount = paid.split(" ")[1:3]
+                    for _ in range(120):
+                        if float(wallet("getreceivedbyaddress", address, 1)) >= float(amount):
+                            break
+                        time.sleep(1)
+                    received = wallet("getreceivedbyaddress", address, 1)
+                    print(f"  {address} received {received} on the mainchain", flush=True)
+                    if float(received) != float(amount):
+                        failures.append(f"sidechain: the mainchain paid {received}, not {amount}")
+                else:
+                    failures.append("sidechain: no withdrawal")
+                miner.stop.set()
+                miner.join(timeout=30)
+                try:
+                    main("stop")
+                    main_proc.wait(timeout=120)
+                except Exception:  # noqa: BLE001
+                    main_proc.kill()
     finally:
         stop_ours(folder_win)
         if not args.keep:
