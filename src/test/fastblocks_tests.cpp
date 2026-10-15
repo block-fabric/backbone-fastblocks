@@ -10,6 +10,7 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <addresstype.h>
+#include <blockencodings.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <coins.h>
@@ -23,6 +24,9 @@
 #include <key_io.h>
 #include <logging.h>
 #include <net.h>
+#include <net_processing.h>
+#include <netmessagemaker.h>
+#include <protocol.h>
 #include <node/miner.h>
 #include <pos/evidence.h>
 #include <pos/finality.h>
@@ -41,6 +45,7 @@
 #include <script/signingprovider.h>
 #include <sidechain/mainchain.h>
 #include <sidechain/state.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <txmempool.h>
 #include <uint256.h>
@@ -4650,6 +4655,162 @@ BOOST_FIXTURE_TEST_CASE(attack5_old_slot_evidence_walks_the_chain, FastBlocksSet
                               << " us (cs_main held, no peer blamed; a peer's burst is " << pos::EVIDENCE_CHECKS_BURST << ")");
     BOOST_CHECK_MESSAGE(old_us < 10 * recent_us + 20000, "attack works: a proof of an old slot costs a walk of the whole chain under cs_main, unblamed, "
                                                          << old_us / PROOFS << " us each against " << recent_us / PROOFS << " us");
+}
+
+BOOST_FIXTURE_TEST_CASE(attack5_mempool_staking_recheck_per_block, FastBlocksSetup)
+{
+    // ATTACK (anyone with coins, fees at the relay minimum). Every block connected (ConnectTip) runs
+    // RemoveStaleDrivechainTxs under cs_main and the mempool's lock, which applies the staking rules
+    // again to every bond and unbond in the mempool (ChainHooks::HasTxRules): an ECDSA key recovery
+    // (the owner's signature) and a BIP340 check (the proof of possession) per bond, per block, whether
+    // the block touched it or not. Bonds of a satoshi to a key of the attacker's own are valid (no
+    // minimum for a bond), so the mempool can be filled with them at the relay fee; the work per block
+    // is then the mempool's size, not the block's. Here N such bonds: the cost of one block's recheck,
+    // and what a mempool of the default 300 MB of them would cost each block.
+    StartPos();
+    constexpr int N{2000};
+    constexpr CAmount EACH{30000};
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    std::vector<CTxOut> outs(N, CTxOut{EACH, script});
+    outs.emplace_back(spent.nValue - N * EACH - 200000, script);
+    const CMutableTransaction split{Spend(coin, spent, outs)};
+    Accept(split);
+    Take(PosBlock(1));
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), 0U);
+    CKey validator;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    for (int i{0}; i < N; ++i) {
+        const COutPoint in{split.GetHash(), static_cast<uint32_t>(i)};
+        Accept(Spend(in, outs[i], {BondOut(validator, 1, Owner(key), &key, in), CTxOut{EACH - 1 - TX_FEE, script}}));
+    }
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), static_cast<size_t>(N));
+    const size_t usage{WITH_LOCK(m_node.mempool->cs, return m_node.mempool->DynamicMemoryUsage())};
+    int64_t best_us{std::numeric_limits<int64_t>::max()};
+    for (int run{0}; run < 3; ++run) {
+        LOCK2(::cs_main, m_node.mempool->cs);
+        const auto start{std::chrono::steady_clock::now()};
+        Chain().RemoveStaleDrivechainTxs();
+        best_us = std::min<int64_t>(best_us, Ticks<std::chrono::microseconds>(std::chrono::steady_clock::now() - start));
+    }
+    BOOST_REQUIRE_EQUAL(m_node.mempool->size(), static_cast<size_t>(N));
+    // A mempool of the default size (-maxmempool 300 MB) of such bonds.
+    const double full{300.0 * 1000 * 1000 / (static_cast<double>(usage) / N)};
+    const double full_seconds{static_cast<double>(best_us) / N * full / 1e6};
+    BOOST_TEST_MESSAGE("recheck of " << N << " bonds in the mempool at each block: " << best_us << " us under cs_main; a full mempool (" << static_cast<int64_t>(full)
+                                     << " bonds) would take " << full_seconds << " s each block");
+    BOOST_CHECK_MESSAGE(full_seconds < 1.0, "attack works: each block rechecks the signatures of every bond in the mempool under cs_main: " << full_seconds
+                                                                                    << " s a block with a full mempool (slots are 30 s on main)");
+}
+
+namespace {
+/** A peer of the node's (PeerManager), whose messages the test sends. */
+struct AttackPeer {
+    CNode node;
+    AttackPeer(NodeId id, ConnmanTestMsg& connman, ConnectionType type) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+        : node{id, /*sock=*/nullptr, CAddress{CService{CNetAddr{in_addr{htonl(0x0a000001 + static_cast<uint32_t>(id))}}, 8333}, NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0, CAddress{}, /*addrNameIn=*/"", type,
+               /*inbound_onion=*/false, /*network_key=*/0}
+    {
+        connman.Handshake(node, /*successfully_connected=*/true, ServiceFlags(NODE_NETWORK | NODE_WITNESS), ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                          PROTOCOL_VERSION, /*relay_txs=*/false);
+    }
+    void Send(ConnmanTestMsg& connman, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+    {
+        connman.FlushSendBuffer(node);
+        (void)connman.ReceiveMsgFrom(node, std::move(msg));
+        node.fPauseSend = false;
+        while (connman.ProcessMessagesOnce(node)) {}
+        connman.FlushSendBuffer(node);
+    }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(attack5_compact_block_forged_extension_unpunished, FastBlocksSetup)
+{
+    // ATTACK (any inbound peer). A compact block whose header the node has, with another signature
+    // (the block hash does not cover it), is checked against the leader (CheckOtherExtension: the
+    // leader found, a BIP340 check) under cs_main before anything else is done with it, even for a
+    // block of the active chain the node has whole, and the peer is not punished ("BIP 152 lets peers
+    // relay compact blocks before they validate them"). So a peer has the node check a signature for
+    // every 200 bytes it sends, for ever: a tip's header with random signatures. Against the same
+    // compact block with the right signature (no check) as the measure.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    StartPos();
+    for (int i{1}; i <= 5; ++i) Take(PosBlock(i));
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    connman.SetPeerConnectTimeout(99999s);
+    AttackPeer attacker{100, connman, ConnectionType::INBOUND};
+    // (Any peer may announce compact blocks: version 2, low bandwidth.)
+    attacker.Send(connman, NetMsg::Make(NetMsgType::SENDCMPCT, /*high_bandwidth=*/false, /*version=*/uint64_t{2}));
+    CBlock tip_block;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(Chainman().m_blockman.ReadBlock(tip_block, *Chain().m_chain.Tip()));
+    }
+    constexpr int MESSAGES{3000};
+    const auto flood{[&](bool forged) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        const auto start{std::chrono::steady_clock::now()};
+        for (int i{0}; i < MESSAGES; ++i) {
+            CBlock copy{tip_block};
+            if (forged) {
+                copy.ext.sig[0] = static_cast<unsigned char>(i);
+                copy.ext.sig[1] = static_cast<unsigned char>(i >> 8);
+                copy.ext.sig[2] ^= 0x5a;
+            }
+            const CBlockHeaderAndShortTxIDs cmpct{copy, static_cast<uint64_t>(i)};
+            attacker.Send(connman, NetMsg::Make(NetMsgType::CMPCTBLOCK, cmpct));
+        }
+        m_node.peerman->SendMessages(attacker.node);
+        return Ticks<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+    }};
+    const auto honest_us{flood(false)};
+    const auto forged_us{flood(true)};
+    const bool disconnected{attacker.node.fDisconnect};
+    BOOST_TEST_MESSAGE(MESSAGES << " compact blocks of the tip: " << honest_us << " us with its signature, " << forged_us << " us with forged ones; peer disconnected: " << disconnected);
+    BOOST_CHECK_MESSAGE(disconnected || forged_us < 2 * honest_us, "attack works: a compact block of a known header with a forged signature costs a signature check under cs_main, unpunished: "
+                                                                       << (forged_us - honest_us) / MESSAGES << " us more each");
+    m_node.peerman->FinalizeNode(attacker.node);
+}
+
+BOOST_FIXTURE_TEST_CASE(attack5_ticket_cap_reset_by_reconnecting, FastBlocksSetup)
+{
+    // ATTACK (one inbound attacker that reconnects). Tickets nobody committed to are taken MAX_PEER_TICKETS
+    // a peer per mainchain block, counted by peer id: a new connection is a new peer, with a new
+    // count. Each one taken is new, so it is sent whole (no inv) to every other peer (RelayTicket), and
+    // pushes the oldest out of the pool (1000). So one attacker that reconnects sends the node's peers
+    // as many tickets as it likes, each of its messages multiplied by the number of peers, and pushes
+    // honest tickets not committed yet out (a bidder's ticket for the next mainchain block).
+    StartPos();
+    Take(PosBlock(1));
+    const auto ticket{[&](uint32_t i) {
+        std::vector<unsigned char> hash(20, 0);
+        hash[0] = static_cast<unsigned char>(i);
+        hash[1] = static_cast<unsigned char>(i >> 8);
+        hash[2] = 0xa5;
+        return Ticket(Tip()->GetBlockHash(), GetScriptForDestination(WitnessV0KeyHash{uint160{hash}}));
+    }};
+    const auto send{[&](int64_t peer, const pos::AnchorTicket& t) {
+        DataStream stream{};
+        stream << t;
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(peer, pos::MSG_TICKET, stream, misbehaving));
+        BOOST_CHECK_EQUAL(misbehaving, "");
+        return Hooks().GetTicket(t.Hash()).has_value();
+    }};
+    // An honest bidder's ticket for the next mainchain block, relayed by an honest peer.
+    const pos::AnchorTicket honest{Ticket(Tip()->GetBlockHash(), script)};
+    BOOST_REQUIRE(send(1, honest));
+    // Within one mainchain block, the attacker connects 150 times (peer ids 1000 on), 8 tickets each.
+    size_t taken{0};
+    uint32_t n{0};
+    for (int64_t connection{0}; connection < 150; ++connection) {
+        for (size_t i{0}; i < pos::MAX_PEER_TICKETS; ++i) taken += send(1000 + connection, ticket(n++));
+    }
+    const bool honest_kept{Hooks().GetTicket(honest.Hash()).has_value()};
+    BOOST_TEST_MESSAGE("tickets taken (and relayed to every peer) from one attacker in one mainchain block: " << taken << "; the honest ticket kept: " << honest_kept);
+    BOOST_CHECK_MESSAGE(taken <= 4 * pos::MAX_PEER_TICKETS && honest_kept, "attack works: reconnecting resets the cap of tickets a peer per mainchain block: "
+                                                                               << taken << " taken and relayed, honest ticket pushed out: " << !honest_kept);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
