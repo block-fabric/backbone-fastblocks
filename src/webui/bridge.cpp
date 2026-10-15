@@ -316,7 +316,9 @@ void Bridge::Run(const std::shared_ptr<Request>& request, const UniValue& body)
             policy = m_rpc_policy;
         }
         if (test_rpc) {
-            thread = Thread::LONG;
+            // The lane the policy gives a method of the pages; any other one on the long lane.
+            const std::optional<Thread> lane{policy ? policy(method) : std::nullopt};
+            thread = lane.value_or(Thread::LONG) == Thread::WORKER ? Thread::WORKER : Thread::LONG;
         } else if (policy) {
             const std::optional<Thread> lane{policy(method)};
             if (!lane) {

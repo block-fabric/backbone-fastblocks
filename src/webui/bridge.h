@@ -126,10 +126,10 @@ public:
     void SetRpcPolicy(RpcPolicy policy) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
-     * Take requests of the kind "testrpc": any RPC method, past the policy, on the long lane. Only for a test
-     * script (-webuitestscript, in a build with WEBUI_TEST_HOOKS), which drives the node itself as the console
-     * would; the calls of the pages ("rpc") keep to the policy all the same, so that the tests run the policy
-     * that ships. Refused unless opened.
+     * Take requests of the kind "testrpc": any RPC method, past the policy (on the lane the policy gives a
+     * method of the pages, any other one on the long lane). Only for a test script (-webuitestscript, in a build
+     * with WEBUI_TEST_HOOKS), which drives the node itself as the console would; the calls of the pages ("rpc")
+     * keep to the policy all the same, so that the tests run the policy that ships. Refused unless opened.
      */
     void OpenTestRpc() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
