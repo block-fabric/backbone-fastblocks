@@ -12,7 +12,8 @@ export interface RibbonBlock {
   hash: string;
   time: number;
   nTx: number;
-  weight: number;
+  /** null until read (the explorer reads the blocks of the boxes it details). */
+  weight: number | null;
   /** Subsidy and fees (sats); null until known. */
   subsidy: number | null;
   fees: number | null;

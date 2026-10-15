@@ -232,6 +232,8 @@ export const host = {
   hashes: (text: string, hex: boolean) => request<Hashes>('host', 'tools.hashes', { text, hex }),
   merkle: (txids: string[]) => request<{ levels?: string[][]; error?: string }>('host', 'tools.merkle', { txids }),
   decode: (text: string) => request<Decoded>('host', 'tools.decode', { text }),
+  /** The latest blocks from the block index, newest first (0: all): [height, hash, time, transactions, difficulty]. */
+  explorerBlocks: (count: number) => request<[number, string, number, number, number][]>('host', 'explorer.blocks', { count }),
   hashFile: (path: string) => request<{ sha256: string; size: number }>('host', 'timestamp.hashFile', { path }),
   searchStamp: (payload: string, from: string, count: number, options?: CallOptions) =>
     request<{ searched: number; next: string | null; found: Stamp[] }>('host', 'timestamp.search', { payload, from, count }, options),
