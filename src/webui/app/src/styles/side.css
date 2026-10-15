@@ -123,6 +123,46 @@
 /* Tables of the pages: rows, a pill for the state of each. */
 .side-table-wrap {
   overflow-x: auto;
+  container-type: inline-size;
+}
+/* In a narrow panel (a window of 480 px), a table is a list of cards: every cell under the words of its column
+   (use:stacked), none hidden behind a scroll (audit port-1 #9). */
+@container (max-width: 36rem) {
+  table.side-table,
+  table.side-table tbody,
+  table.side-table tr,
+  table.side-table td {
+    display: block;
+  }
+  table.side-table thead {
+    display: none;
+  }
+  table.side-table tr {
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  table.side-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.2rem 0.8rem;
+    border: 0;
+    text-align: right;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  table.side-table td[data-label]::before {
+    content: attr(data-label);
+    flex: none;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-align: left;
+  }
+  table.side-table td.cut {
+    max-width: none;
+    white-space: normal;
+  }
 }
 table.side-table {
   width: 100%;
