@@ -757,9 +757,17 @@ by being pushed out, so that floor only rises.
 
 | Message | Content | Rule |
 |---|---|---|
-| `fbticket` | A ticket | Kept and relayed if the mainchain committed to it, or if it names a block the node knows: of those, 8 a peer per mainchain block at most (anyone can make them by the thousand) |
+| `fbticket` | A ticket | Kept and relayed if the mainchain committed to it, or if it names a block the node knows: of those, per mainchain block, 8 at most from the peers of one network group (a peer that connects again, with a new id, is the same group; by peer if the node cannot tell its group), and 32 at most from all (anyone can make them by the thousand, and each one taken goes whole to every peer: one attacker that reconnected 150 times in a mainchain block had 1200 taken and an honest one pushed out, review 5 of audit 6, attack 3). A bidder's ticket dropped comes when the mainchain commits to it (catching up, below) |
 | `fbgettickets` | Up to 16 h* | The node sends the tickets it has; more than 16 is misbehaving |
-| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) the node takes (new, and not older than its full pool); a peer that sends one whose form is wrong misbehaves (not one whose signatures do not check against the leader this node finds: that depends on its chain); past 64 proofs checked at once, 2 a second, a peer's proofs are dropped unchecked, not blamed |
+| `fbevidence` | Two headers | Kept and relayed if it is a proof (above) the node takes (new, and not older than its full pool); a peer that sends one whose form is wrong misbehaves (not one whose signatures do not check against the leader this node finds: that depends on its chain); past 64 proofs checked at once, 2 a second, a peer's proofs are dropped unchecked, not blamed; the set of an old slot is not looked for further down than the window (Evidence) |
+
+A compact block for a header the node has, with another signature, is not
+reconstructed, and not checked either (template): checking it against the
+slot's leader cost a signature check under `cs_main` for every 200 bytes a peer
+sends, of the tip's header say, unpunished (review 5 of audit 6, attack 4,
+`attack5_compact_block_forged_extension_unpunished`). The block comes whole, and
+`AcceptBlock` judges its signature then (a mutated block, whose sender is
+punished, or the same block).
 
 **Catching up.** Headers and blocks come as usual and are checked in full
 (leader signatures included); an acknowledgement waits until the node's own

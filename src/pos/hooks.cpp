@@ -10,6 +10,7 @@
 #include <consensus/validation.h>
 #include <kernel/chainparams.h>
 #include <logging.h>
+#include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
 #include <pos/finality.h>
@@ -1166,15 +1167,28 @@ bool FastBlocksHooks::TicketAllowed(int64_t peer) const
 {
     const ChainstateManager* chainman{Chainman()};
     const uint256 main_tip{chainman && chainman->m_mainchain ? chainman->m_mainchain->TipHash() : uint256{}};
+    // By the peer's network group, not its id: a peer that connects again has a new id, and would have
+    // a new count each time (and each ticket it sends goes to every peer). Its group stays.
+    std::pair<bool, uint64_t> who{false, static_cast<uint64_t>(peer)};
+    if (m_node && m_node->connman) {
+        m_node->connman->ForNode(peer, [&](CNode* node) {
+            who = {true, node->nKeyedNetGroup};
+            return true;
+        });
+    }
     LOCK(m_tickets_mutex);
     // Counted per mainchain block: all counts start again with a new one.
     if (m_ticket_counts_for != main_tip) {
         m_ticket_counts.clear();
+        m_ticket_count = 0;
         m_ticket_counts_for = main_tip;
     }
-    size_t& count{m_ticket_counts[peer]};
+    // In all, too: many groups (or peers the node cannot tell the group of) are as many counts.
+    if (m_ticket_count >= MAX_UNCOMMITTED_TICKETS) return false;
+    size_t& count{m_ticket_counts[who]};
     if (count >= MAX_PEER_TICKETS) return false;
     ++count;
+    ++m_ticket_count;
     return true;
 }
 
@@ -1222,8 +1236,10 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
         if (!committed) {
             if (!WITH_LOCK(::cs_main, return chainman->m_blockman.LookupBlockIndex(ticket.anchored) != nullptr)) return true;
             // Anyone can make tickets for a block, by the thousand, and each new one goes to every
-            // peer: a few per peer and mainchain block (bidders make one each), the rest dropped.
-            // Those the mainchain committed to cost a commitment each, and are always taken.
+            // peer: a few per network group of peers and mainchain block (bidders make one each),
+            // a few more in all, the rest dropped (TicketAllowed). Those the mainchain committed to
+            // cost a commitment each, and are always taken: a bidder's ticket the node dropped comes
+            // when it counts (AskMissingTickets).
             if (!TicketAllowed(peer)) {
                 LogDebug(BCLog::NET, "FastBlocks: anchor ticket from peer=%d dropped: too many for this mainchain block\n", peer);
                 return true;
