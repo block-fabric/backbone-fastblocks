@@ -44,6 +44,31 @@ describe('#11: notices leave a form the user works in', () => {
     expect(stack.classList.contains('top')).toBe(false);
   });
 
+  it('go to the top corner when they would cover more fields and buttons at the bottom than at the top', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
+    const button = document.createElement('button');
+    const plain = document.createElement('div');
+    document.body.append(button, plain);
+    const doc = document as unknown as { elementsFromPoint?: (x: number, y: number) => Element[] };
+    const before = doc.elementsFromPoint;
+    try {
+      // A Deposit button under the bottom corner; nothing to use under the top one.
+      doc.elementsFromPoint = (_x: number, y: number) => [y > 400 ? button : plain];
+      const view = render(Toasts);
+      toast('success', 'Merged mining on', 'A block is asked for with every block of Chains.');
+      flushSync();
+      expect(view.container.querySelector('.toasts')!.classList.contains('top')).toBe(true);
+      // Something under both: they stay at the bottom.
+      doc.elementsFromPoint = () => [button];
+      toast('info', 'Another');
+      flushSync();
+      expect(view.container.querySelector('.toasts')!.classList.contains('top')).toBe(false);
+    } finally {
+      doc.elementsFromPoint = before;
+    }
+  });
+
   it('stay in the bottom corner when the form is elsewhere', () => {
     Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true });
     Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
