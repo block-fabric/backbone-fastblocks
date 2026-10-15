@@ -7,7 +7,7 @@
     contrib/sidechain/rename.py <Name> <stem>        for example: Thunder thunder
 
 <Name> is what users see. <stem> names the programs (<stem>d, <stem>-cli,
-<stem>-qt, ...), the data directory (~/.<stem>) and the configuration file
+<stem>-app, ...), the data directory (~/.<stem>) and the configuration file
 (<stem>.conf). The name is set in CMakeLists.txt; this also brings the tests
 along, which know the programs and files by name.
 
@@ -38,14 +38,14 @@ def main():
     o, n = re.escape(old_stem), stem
     patterns = [
         (rf"\b{o}d\b", f"{n}d"),
-        (rf"\b{o}-(cli|qt|util|wallet|tx|chainstate|node|gui)\b", rf"{n}-\1"),
+        (rf"\b{o}-(cli|app|util|wallet|tx|chainstate|node)\b", rf"{n}-\1"),
         (rf"\b{o}\.conf\b", f"{n}.conf"),
         (rf'"\.{o}"', f'".{n}"'),
         (rf'"{o}": "BITCOIN_BIN"', f'"{n}": "BITCOIN_BIN"'),
         (rf'/ "{re.escape(old_name)}"', f'/ "{name}"'),
         (rf'Application Support/{re.escape(old_name)}"', f'Application Support/{name}"'),
     ]
-    files = subprocess.run(["git", "grep", "-lI", "-e", old_stem, "-e", old_name, "--", "test", "src/test", "src/qt/test", "src/wallet/test"],
+    files = subprocess.run(["git", "grep", "-lI", "-e", old_stem, "-e", old_name, "--", "test", "src/test", "src/wallet/test", "src/webui/test"],
                            capture_output=True, text=True, check=False).stdout.split()
     changed = 0
     for path in files:
