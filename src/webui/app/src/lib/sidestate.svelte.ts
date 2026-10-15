@@ -1,6 +1,7 @@
 // The state of the peg and of merged mining, kept up to date while the app runs (the Peg and Merged
 // mining pages and the cards of the home read it): the node's view every few seconds, the mainchain's
 // when its tip moves. Merged mining keeps a log of what happened since the app started.
+import { every } from './poll';
 import { rpc } from './rpc';
 import { node } from './state.svelte';
 import {
@@ -55,7 +56,7 @@ export const POLL_MS = 3000;
 const MAIN_POLL_MS = 30_000;
 const LOG_MAX = 300;
 
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: (() => void) | null = null;
 let running = false;
 let lastTip = '';
 let lastMainAsk = 0;
@@ -141,12 +142,13 @@ export async function refreshSide(force = false): Promise<void> {
 export function startSide(): void {
   if (timer !== null) return;
   void refreshSide();
-  timer = setInterval(() => void refreshSide(), POLL_MS);
+  // Resting while the window is hidden, as the timers of the pages (lib/poll.ts).
+  timer = every(POLL_MS, () => void refreshSide());
 }
 
 /** Stop following (the tests). */
 export function stopSide(): void {
-  if (timer !== null) clearInterval(timer);
+  timer?.();
   timer = null;
   eventLog = null;
   lastTip = '';

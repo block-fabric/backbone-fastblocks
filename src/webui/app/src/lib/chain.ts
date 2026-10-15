@@ -195,3 +195,17 @@ export function proposalErrors(form: { slot: number; title: string; hash1: strin
   if (form.hash2.trim() && !HEX40.test(form.hash2.trim())) errors.push('The build commit hash is 40 hexadecimal characters.');
   return errors;
 }
+
+/**
+ * Blind merged mining in the blocks from..from+count-1 of this chain: the sidechains (slots) each block
+ * committed to, by height (the badges of the explorer's ribbon).
+ */
+export async function bmmCommitments(from: number, count: number): Promise<Record<number, number[]>> {
+  const sidechains = await rpc.raw<{ slot: number }[]>('listactivesidechains', []);
+  const at: Record<number, number[]> = {};
+  for (const sc of sidechains) {
+    const events = await rpc.raw<{ height: number; bmm?: string }[]>('getsidechainevents', [sc.slot, from, count]);
+    for (const e of events) if (e.bmm) (at[e.height] ??= []).push(sc.slot);
+  }
+  return at;
+}

@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import BlockBox from '../components/BlockBox.svelte';
 import BlockRibbon from '../components/BlockRibbon.svelte';
 import { setTransport } from '../lib/bridge';
+import { CHAIN } from '../chain/config';
+import { formatCount } from '../lib/format';
 import {
   CHAINS_MAX_BLOCK_WEIGHT,
   coinbaseTag,
@@ -105,6 +107,13 @@ describe('the box', () => {
     expect(button.getAttribute('aria-pressed')).toBe('false');
     await fireEvent.click(button);
     expect(onselect).toHaveBeenCalledWith('ab'.repeat(32));
+  });
+
+  it('a sidechain: the block of the mainchain that merged mined it, in place of the BMM badges', () => {
+    const main = CHAIN.mainchain?.name ?? '';
+    const { container } = render(BlockBox, { block: block({ main: { height: 1234, hash: 'cd'.repeat(32) } }), secs: 60, median: 60, now: 1_700_000_060, onselect: () => undefined });
+    expect([...container.querySelectorAll('.bmm .badge')].map((b) => b.textContent)).toEqual([`${main} ${formatCount(1234)}`]);
+    expect(screen.getByRole('button', { name: /Block 120/ }).getAttribute('aria-label')).toContain(`committed to by block ${formatCount(1234)} of ${main}`);
   });
 
   it('an empty block, a slow one, a block without its stats yet', () => {

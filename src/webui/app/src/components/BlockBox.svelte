@@ -1,7 +1,7 @@
 <script lang="ts">
   // One block of the ribbon, drawn as a box: a lid and a side (two skewed faces, no 3D), and its face —
   // the height, the reward (subsidy and fees), the miner's tag of its coinbase, the sidechains it merged
-  // mined, the time since the block before it (coloured against the recent pace of the chain) and how long
+  // mined (a sidechain: the block of the mainchain that merged mined it), the time since the block before it (coloured against the recent pace of the chain) and how long
   // ago. A fill rises from the floor of the face: its weight against the most a block of Chains may have,
   // tinted by the fee rate it paid. After the ribbon of the user's pool site (epool.cash).
   import { t } from '../lib/i18n.svelte';
@@ -10,6 +10,7 @@
   import { css } from '../lib/actions';
   import { feeTint, fillPercent, intervalTone, shortInterval, type RibbonBlock } from '../lib/blocks';
   import { formatCount, niceTimeOffset } from '../lib/format';
+  import { CHAIN } from '../chain/config';
 
   let {
     block,
@@ -32,6 +33,8 @@
     onselect: (hash: string) => void;
   } = $props();
 
+  const mainName = CHAIN.mainchain?.name ?? '';
+
   const fill = $derived(fillPercent(block.weight, block.nTx));
   const tint = $derived(feeTint(block.feeRate));
   const tone = $derived(intervalTone(secs, median));
@@ -39,7 +42,8 @@
   const ago = $derived(niceTimeOffset(Math.max(0, now - block.time)));
   const label = $derived(
     `${t('Block')} ${formatCount(block.height)}: ${formatCount(block.nTx)} ${t('transactions')}, ${Math.round(fill)}% ${t('full')}, ${ago} ${t('ago')}` +
-      (block.bmm.length ? `, ${t('merged mined by')} ${block.bmm.length} ${t('sidechains')}` : ''),
+      (block.bmm.length ? `, ${t('merged mined by')} ${block.bmm.length} ${t('sidechains')}` : '') +
+      (block.main ? `, ${t('committed to by block')} ${formatCount(block.main.height)} ${t('of')} ${mainName}` : ''),
   );
 </script>
 
@@ -55,7 +59,10 @@
       <span class="tag" class:untagged={!block.tag}>{#if block.tag}<SafeText text={block.tag} title={block.tag} />{:else}{block.tag === null ? '…' : t('no tag')}{/if}</span>
       <span class="txs faint">{formatCount(block.nTx)} tx · {formatCount(Math.round(block.weight / 1000))} kWU</span>
     </span>
-    {#if block.bmm.length}
+    {#if block.main}
+      <!-- A sidechain: the block of the mainchain that merged mined it (every block of a sidechain is). -->
+      <span class="bmm" aria-hidden="true"><span class="badge accent" title="{t('Merged mined: committed to by block')} {formatCount(block.main.height)} {t('of')} {mainName}">{mainName} {formatCount(block.main.height)}</span></span>
+    {:else if block.bmm.length}
       <span class="bmm" aria-hidden="true">
         {#each block.bmm.slice(0, 4) as slot (slot)}<span class="badge accent" title="{t('Merged mined: sidechain')} {slot}">BMM {slot}</span>{/each}
         {#if block.bmm.length > 4}<span class="badge">+{block.bmm.length - 4}</span>{/if}

@@ -20,6 +20,7 @@
   import { host, rpc } from '../../lib/rpc';
   import { app, node, noWalletText, prefs, toast, wallets, walletsEnabled } from '../../lib/state.svelte';
   import { syncStatus } from '../../lib/sync';
+  import { every } from '../../lib/poll';
   import { coinsToSats, formatAmount } from '../../lib/units';
   import { openQuick } from '../../lib/quick.svelte';
   import { balanceHistory } from '../../lib/wallet';
@@ -75,10 +76,7 @@
     return [0, ...marks.map((m) => (n += m.bmm ? 1 : 0))];
   });
 
-  $effect(() => {
-    const timer = setInterval(() => (now = Math.floor(Date.now() / 1000)), 5000);
-    return () => clearInterval(timer);
-  });
+  $effect(() => every(5000, () => (now = Math.floor(Date.now() / 1000))));
 
   // --- The wallet ---
   const balances = $derived(wallets.current !== null ? wallets.balances[wallets.current] : undefined);
@@ -130,9 +128,7 @@
         .raw<Peer[]>('getpeerinfo')
         .then((list) => (peers = list))
         .catch(() => undefined);
-    load();
-    const timer = setInterval(load, 15000);
-    return () => clearInterval(timer);
+    return every(15000, load, { now: true });
   });
 
   async function toggleNetwork() {

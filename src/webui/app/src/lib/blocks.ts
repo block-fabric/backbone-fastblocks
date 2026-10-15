@@ -20,8 +20,13 @@ export interface RibbonBlock {
   feeRate: number | null;
   /** The text of the coinbase (the miner's tag), printable runs only; '' when it has none. */
   tag: string | null;
-  /** The sidechains (slots) whose block this block committed to (blind merged mining). */
+  /** The sidechains (slots) whose block this block committed to (blind merged mining). A mainchain only. */
   bmm: number[];
+  /**
+   * A sidechain: the block of the mainchain that committed to this one (blind merged mining), when the
+   * events of the mainchain the app follows have it; null when not known (older, or not followed yet).
+   */
+  main?: { height: number; hash: string } | null;
 }
 
 /** The block being mined (the outline at the head of the ribbon). */

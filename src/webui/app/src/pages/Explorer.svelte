@@ -23,6 +23,9 @@
   import type { Column } from '../lib/table';
   import { explorerQuery } from '../lib/tools';
   import { coinsToSats } from '../lib/units';
+  import { SIDECHAIN } from '../chain/config';
+  import { bmmCommitments } from '../lib/chain';
+  import { side, startSide } from '../lib/sidestate.svelte';
 
   /** Most waiting transactions listed (MAX_MEMPOOL_ROWS). */
   const MAX_MEMPOOL_ROWS = 1000;
@@ -180,16 +183,13 @@
       // A block whose stats cannot be read (pruned) is drawn without them.
       for (const row of latest) await extraOf(row).catch(() => undefined);
       extrasVersion++;
+      // A sidechain has no sidechains: its boxes show the block of the mainchain that merged mined each
+      // (mainOf, from the events the app follows).
+      if (SIDECHAIN) return;
       // Blind merged mining: the sidechains each block committed to.
       const from = latest[latest.length - 1].height;
       const count = latest[0].height - from + 1;
-      const sidechains = await rpc.raw<{ slot: number }[]>('listactivesidechains', []);
-      const at: Record<number, number[]> = {};
-      for (const sc of sidechains) {
-        const events = await rpc.raw<{ height: number; bmm?: string }[]>('getsidechainevents', [sc.slot, from, count]);
-        for (const e of events) if (e.bmm) (at[e.height] ??= []).push(sc.slot);
-      }
-      bmmAt = at;
+      bmmAt = await bmmCommitments(from, count);
     } catch {
       // Again at the next block.
     }
@@ -202,11 +202,32 @@
     void refreshRibbon(blocks);
   }
 
+  // A sidechain: the block of the mainchain that committed to each block of this chain (lib/sidestate.svelte.ts
+  // follows the events of the mainchain while the app runs).
+  if (SIDECHAIN) startSide();
+  const mainOf = $derived.by(() => {
+    const at = new Map<string, { height: number; hash: string }>();
+    if (SIDECHAIN) for (const e of side.main.events) if (e.bmm) at.set(e.bmm, { height: e.height, hash: e.hash });
+    return at;
+  });
+
   const ribbon = $derived.by((): RibbonBlock[] => {
     void extrasVersion;
     return blocks.map((b) => {
       const x = extras.get(b.hash);
-      return { height: b.height, hash: b.hash, time: b.time, nTx: b.nTx, weight: b.weight, subsidy: x?.subsidy ?? null, fees: x?.fees ?? null, feeRate: x?.feeRate ?? null, tag: x ? x.tag : null, bmm: bmmAt[b.height] ?? [] };
+      return {
+        height: b.height,
+        hash: b.hash,
+        time: b.time,
+        nTx: b.nTx,
+        weight: b.weight,
+        subsidy: x?.subsidy ?? null,
+        fees: x?.fees ?? null,
+        feeRate: x?.feeRate ?? null,
+        tag: x ? x.tag : null,
+        bmm: bmmAt[b.height] ?? [],
+        ...(SIDECHAIN ? { main: mainOf.get(b.hash) ?? null } : {}),
+      };
     });
   });
 
