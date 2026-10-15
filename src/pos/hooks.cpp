@@ -1220,17 +1220,20 @@ bool FastBlocksHooks::TicketAllowed(int64_t peer) const
     const ChainstateManager* chainman{Chainman()};
     const uint256 main_tip{chainman && chainman->m_mainchain ? chainman->m_mainchain->TipHash() : uint256{}};
     // By the peer's network group, not its id: a peer that connects again has a new id, and would have
-    // a new count each time (and each ticket it sends goes to every peer). Its group stays. By peer
-    // for an address that is not routable (local, as Tor's inbound connections are, or private), whose
-    // group many honest peers may share: the count in all bounds those. And a peer the node cannot
-    // find (gone meanwhile) counts in a small budget of its own: it may be anyone.
+    // a new count each time (and each ticket it sends goes to every peer). Its group stays. All peers
+    // whose addresses are not routable (local, as Tor's inbound connections are, or private) are one
+    // group, as Bitcoin Core counts onion and local addresses: by peer, a reconnection over Tor would
+    // be a new budget (audit 6 review, item 13). And a peer the node cannot find (gone meanwhile) is
+    // counted by its id, all such peers within a small budget together: it may be anyone.
     std::pair<int, uint64_t> who{TICKETS_BY_UNKNOWN_PEER, static_cast<uint64_t>(peer)};
     if (m_node && m_node->connman) {
         m_node->connman->ForNode(peer, [&](CNode* node) {
-            who = node->addr.IsRoutable() ? std::pair<int, uint64_t>{TICKETS_BY_GROUP, node->nKeyedNetGroup} : std::pair<int, uint64_t>{TICKETS_BY_PEER, static_cast<uint64_t>(peer)};
+            who = node->addr.IsRoutable() ? std::pair<int, uint64_t>{TICKETS_BY_GROUP, node->nKeyedNetGroup} : std::pair<int, uint64_t>{TICKETS_BY_NONROUTABLE, 0};
             return true;
         });
     }
+    const bool unknown{who.first == TICKETS_BY_UNKNOWN_PEER};
+    const size_t limit{who.first == TICKETS_BY_NONROUTABLE ? MAX_NONROUTABLE_TICKETS : MAX_PEER_TICKETS};
     LOCK(m_tickets_mutex);
     // Counted per mainchain block: all counts start again with a new one.
     if (m_ticket_counts_for != main_tip) {
@@ -1239,13 +1242,13 @@ bool FastBlocksHooks::TicketAllowed(int64_t peer) const
         m_ticket_count = 0;
         m_ticket_counts_for = main_tip;
     }
-    // In all, too: many groups, or peers counted by peer, are as many counts.
-    if (m_ticket_count >= MAX_UNCOMMITTED_TICKETS) return false;
-    const bool unknown{who.first == TICKETS_BY_UNKNOWN_PEER};
-    if (unknown && m_unknown_ticket_count >= MAX_UNKNOWN_PEER_TICKETS) return false;
-    size_t& count{m_ticket_counts[who]};
-    if (count >= MAX_PEER_TICKETS) return false;
-    ++count;
+    const auto found{m_ticket_counts.find(who)};
+    const size_t count{found == m_ticket_counts.end() ? 0 : found->second};
+    if (count >= limit || (unknown && m_unknown_ticket_count >= MAX_UNKNOWN_PEER_TICKETS)) return false;
+    // In all, too, first come; past that, a group's first one (its share: a few groups that came first
+    // do not crowd an honest bidder's relayed ticket out, audit 6 review, item 12), up to a bound.
+    if (m_ticket_count >= MAX_UNCOMMITTED_TICKETS && (count > 0 || m_ticket_count >= MAX_UNCOMMITTED_TICKETS_SHARED)) return false;
+    ++m_ticket_counts[who];
     ++m_ticket_count;
     if (unknown) ++m_unknown_ticket_count;
     return true;
@@ -1298,8 +1301,9 @@ bool FastBlocksHooks::ProcessMessage(int64_t peer, const std::string& msg_type, 
             // new ticket to one another).
             if (GetTicket(ticket.Hash())) return true;
             // Anyone can make tickets for a block, by the thousand, and each new one goes to every
-            // peer: a few per network group of peers and mainchain block (bidders make one each),
-            // a few more in all, the rest dropped (TicketAllowed). Those the mainchain committed to
+            // peer: a few per network group of peers and mainchain block (bidders make one each; all
+            // peers on addresses that are not routable are one group), a few more in all, and a
+            // group's first one past that, the rest dropped (TicketAllowed). Those the mainchain committed to
             // cost a commitment each, and are always taken: a bidder's ticket the node dropped comes
             // when it counts (AskMissingTickets).
             if (!TicketAllowed(peer)) {

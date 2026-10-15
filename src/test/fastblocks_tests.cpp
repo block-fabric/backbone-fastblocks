@@ -5143,4 +5143,133 @@ BOOST_FIXTURE_TEST_CASE(evidence_true_proof_among_a_flood, FastBlocksSetup)
     BOOST_CHECK_EQUAL(checked.size(), expected);
 }
 
+namespace {
+/** Peers in the node's connman (not its PeerManager), for what reads their address and network group. */
+struct ConnmanPeers {
+    ConnmanTestMsg& connman;
+    explicit ConnmanPeers(ConnmanTestMsg& c) : connman{c} {}
+    ~ConnmanPeers() { connman.ClearTestNodes(); }
+    NodeId Add(NodeId id, uint32_t ipv4, uint64_t netgroup, bool inbound_onion = false)
+    {
+        CNode* node{new CNode{id, /*sock=*/nullptr, CAddress{CService{CNetAddr{in_addr{htonl(ipv4)}}, 8333}, NODE_NETWORK}, netgroup, /*nLocalHostNonceIn=*/0, CAddress{},
+                              /*addrNameIn=*/"", ConnectionType::INBOUND, inbound_onion, /*network_key=*/0}};
+        node->fSuccessfullyConnected = true;
+        connman.AddTestNode(*node);
+        return id;
+    }
+};
+
+/** A ticket for `anchored` paying a key of its own (`n` makes it another). */
+pos::AnchorTicket NumberedTicket(const uint256& anchored, uint32_t n)
+{
+    std::vector<unsigned char> hash(20, 0);
+    hash[0] = static_cast<unsigned char>(n);
+    hash[1] = static_cast<unsigned char>(n >> 8);
+    hash[2] = 0x5c;
+    pos::AnchorTicket ticket;
+    ticket.anchored = anchored;
+    ticket.payee = GetScriptForDestination(WitnessV0KeyHash{uint160{hash}});
+    return ticket;
+}
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(tickets_reconnect_flood_over_tor_bounded, FastBlocksSetup)
+{
+    // Review of 803bb68cc0 (audit 6, item 13). Peers on addresses that are not routable (Tor's inbound
+    // connections are local; private ones too) share one budget of tickets nobody committed to, per
+    // mainchain block: an attacker that reconnects over Tor 150 times in a mainchain block has
+    // MAX_NONROUTABLE_TICKETS taken (and relayed), not a fresh MAX_PEER_TICKETS each time. A ticket the
+    // node has costs nothing (honest peers relay each new one to one another).
+    StartPos();
+    Take(PosBlock(1));
+    Hooks().StartServices(m_node);
+    {
+        ConnmanPeers peers{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+        const auto send{[&](int64_t peer, const pos::AnchorTicket& t) {
+            DataStream stream{};
+            stream << t;
+            std::string misbehaving;
+            BOOST_CHECK(Hooks().ProcessMessage(peer, pos::MSG_TICKET, stream, misbehaving));
+            BOOST_CHECK_EQUAL(misbehaving, "");
+            return Hooks().GetTicket(t.Hash()).has_value();
+        }};
+        size_t taken{0};
+        uint32_t n{0};
+        std::vector<pos::AnchorTicket> sent;
+        for (int64_t connection{0}; connection < 150; ++connection) {
+            // Over Tor (local, inbound onion), or from a private address: a new id each time.
+            const NodeId id{peers.Add(1000 + connection, connection % 2 ? 0x7f000001 : 0x0a000001 + static_cast<uint32_t>(connection), /*netgroup=*/connection, /*inbound_onion=*/connection % 2 == 1)};
+            for (size_t i{0}; i < pos::MAX_PEER_TICKETS; ++i) {
+                sent.push_back(NumberedTicket(Tip()->GetBlockHash(), n++));
+                taken += send(id, sent.back());
+            }
+        }
+        BOOST_TEST_MESSAGE("tickets taken (and relayed to every peer) from 150 connections over Tor or local addresses in one mainchain block: " << taken);
+        BOOST_CHECK_MESSAGE(taken <= pos::MAX_NONROUTABLE_TICKETS, "attack works: reconnecting over Tor gives a new budget of tickets each time: " << taken << " taken");
+        // An honest local peer relays the ones the node has: nothing counted, nothing new.
+        const NodeId honest{peers.Add(5000, 0x7f000001, 0)};
+        for (size_t i{0}; i < pos::MAX_NONROUTABLE_TICKETS; ++i) BOOST_CHECK(send(honest, sent[i]));
+        // A new mainchain block: the budget again, shared.
+        Main();
+        size_t again{0};
+        for (size_t i{0}; i < 2 * pos::MAX_NONROUTABLE_TICKETS; ++i) again += send(i % 2 ? honest : 1000, NumberedTicket(Tip()->GetBlockHash(), n++));
+        BOOST_CHECK_EQUAL(again, pos::MAX_NONROUTABLE_TICKETS);
+    }
+    Hooks().StopServices(m_node);
+}
+
+BOOST_FIXTURE_TEST_CASE(tickets_honest_relay_under_a_flood, FastBlocksSetup)
+{
+    // Review of 4e7951b31a and 803bb68cc0 (audit 6, items 12 and 13). In one mainchain block, a flood of
+    // tickets nobody committed to: 150 reconnections over Tor, and 32 network groups 8 each. Then an
+    // honest bidder's ticket, relayed by a peer of another group: taken and relayed (the cap in all is
+    // first come, but past it a group's first ticket is its share), and acknowledged by the first block
+    // of stake after the mainchain commits to it: no wait for a fetch of the ticket (AskMissingTickets).
+    StartPos();
+    Take(PosBlock(1));
+    Hooks().StartServices(m_node);
+    std::optional<int> latency;
+    {
+        ConnmanPeers peers{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+        const auto send{[&](int64_t peer, const pos::AnchorTicket& t) {
+            DataStream stream{};
+            stream << t;
+            std::string misbehaving;
+            BOOST_CHECK(Hooks().ProcessMessage(peer, pos::MSG_TICKET, stream, misbehaving));
+            return Hooks().GetTicket(t.Hash()).has_value();
+        }};
+        size_t taken{0};
+        uint32_t n{0};
+        for (int64_t connection{0}; connection < 150; ++connection) {
+            const NodeId id{peers.Add(1000 + connection, 0x7f000001, /*netgroup=*/0, /*inbound_onion=*/true)};
+            for (size_t i{0}; i < pos::MAX_PEER_TICKETS; ++i) taken += send(id, NumberedTicket(Tip()->GetBlockHash(), n++));
+        }
+        for (uint32_t group{0}; group < 32; ++group) {
+            // 1.<group>.0.1: a routable address, a network group of its own.
+            const NodeId id{peers.Add(2000 + group, 0x01000001 + (group << 16), /*netgroup=*/100 + group)};
+            for (size_t i{0}; i < pos::MAX_PEER_TICKETS; ++i) taken += send(id, NumberedTicket(Tip()->GetBlockHash(), n++));
+        }
+        const NodeId relay{peers.Add(3000, 0x02020001, /*netgroup=*/999)};
+        const pos::AnchorTicket honest{Ticket(Tip()->GetBlockHash(), script)};
+        const bool relayed{send(relay, honest)};
+        BOOST_TEST_MESSAGE("tickets of the flood taken: " << taken << "; the honest one: " << relayed);
+        BOOST_CHECK(taken <= pos::MAX_UNCOMMITTED_TICKETS_SHARED);
+        BOOST_CHECK_MESSAGE(relayed, "an honest ticket relayed under a flood is dropped");
+        // The mainchain commits to it: the slots until a block of stake acknowledges it.
+        Commit(honest.Hash());
+        for (int i{2}; i <= 12 && !latency; ++i) {
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(producer->Produce(Slot(i), error), error);
+            CBlock made;
+            BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(made, *Tip())));
+            pos::PosSections sections;
+            BOOST_REQUIRE(pos::PosSections::Decode(made.vSections, sections));
+            if (sections.ack && sections.ack->ticket.Hash() == honest.Hash()) latency = i - 1;
+        }
+    }
+    Hooks().StopServices(m_node);
+    BOOST_TEST_MESSAGE("acknowledgement of the honest ticket, slots after its commitment: " << (latency ? std::to_string(*latency) : "none in 11"));
+    BOOST_CHECK(latency == 1);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

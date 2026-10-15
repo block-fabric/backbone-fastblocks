@@ -14,8 +14,9 @@ with peers of the test framework:
   - a validator restarted (the sets it read forgotten, the state's pruned) gets about 70 unsigned
     headers from deep in the chain, acknowledging every commitment after the fork: refused, no new
     chain tip, no reorg; and thousands of unsigned siblings of a deep block, then of its tip;
-  - tickets: a peer's tickets nobody committed to, 8 per mainchain block at most; asking for 17
-    tickets at once is misbehaving;
+  - tickets: tickets nobody committed to from peers on local addresses (all of them here; Tor's
+    inbound ones are local too), 32 per mainchain block at most from all of them together, a ticket
+    the node has costing nothing; asking for 17 tickets at once is misbehaving;
   - a proof that a leader signed twice, sent 200 times: kept once, the peer ignored.
 """
 
@@ -331,8 +332,10 @@ class FastBlocksP2PTest(SidechainTest):
             peer.wait_for_disconnect()
         assert header_hash(rival) not in {t["hash"] for t in n2.getchaintips()}
 
-        self.log.info("Tickets nobody committed to: 8 a peer per mainchain block")
+        self.log.info("Tickets nobody committed to: 32 a mainchain block from all peers on local addresses together")
         n0.setbmm(False)
+        # (A mainchain block without the merged miner's ticket: the count starts again, the test's alone.)
+        self.mine_main()
         anchored = n1.getbestblockhash()
 
         def sent_tickets(tag, count):
@@ -343,19 +346,24 @@ class FastBlocksP2PTest(SidechainTest):
             return sum(ticket_hash(t) in hashes for t in tickets)
 
         first = n1.add_p2p_connection(FastBlocksPeer())
-        batch = sent_tickets(1, 12)
+        batch = sent_tickets(1, 20)
         for ticket in batch:
             first.send_without_ping(MsgTicket(ticket))
         first.sync_with_ping()
-        assert_equal(known(batch), 8)
-        # Another peer has its own 8.
+        assert_equal(known(batch), 20)
+        # Another peer on a local address (or the first one connecting again) shares the budget: 12 more.
         second = n1.add_p2p_connection(FastBlocksPeer())
-        other = sent_tickets(2, 12)
+        other = sent_tickets(2, 20)
         for ticket in other:
             second.send_without_ping(MsgTicket(ticket))
         second.sync_with_ping()
-        assert_equal(known(other), 8)
-        # The first peer, again in the same mainchain block: nothing more. In the next: 8 more.
+        assert_equal(known(other), 12)
+        # An honest peer relays each ticket once, those the node has too: they cost nothing.
+        for ticket in batch:
+            second.send_without_ping(MsgTicket(ticket))
+        second.sync_with_ping()
+        assert_equal(known(batch), 20)
+        # Nothing more in this mainchain block. In the next: the budget again.
         more = sent_tickets(3, 12)
         for ticket in more[:6]:
             first.send_without_ping(MsgTicket(ticket))
