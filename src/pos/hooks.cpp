@@ -613,27 +613,40 @@ std::vector<uint256> FastBlocksHooks::BlocksCommittedBy(const uint256& commitmen
     // Those of the active chain, which the node would keep on an anchor the mainchain dropped; and those
     // that failed against the record, which it would not take back when the commitment returns. Any
     // other block is checked against the record when it is connected.
+    // Only an acknowledgement whose nNonce is `main_height` rests on the commitment (a valid one
+    // acknowledges the first commitment to its ticket, at the height its nNonce is: bad-pos-ack-height),
+    // and only such a block is read (review 8: reading every acknowledgement above the height and every
+    // block failed against the record, for each commitment the mainchain makes or drops and each
+    // ticket a producer may acknowledge, was a denial of service once a leader pushed them out of memory).
     if (chainman && main_height && *main_height > 0) {
         LOCK(::cs_main);
-        // On the active chain, the acknowledgements and BMM blocks are in the order of the mainchain
-        // (bad-pos-ack-order, bmm-order), and a block acknowledges the commitment at the height of its
-        // nNonce: from the tip down, to the first block committed below that height.
-        for (const CBlockIndex* index{chainman->ActiveChain().Tip()}; index && index->nHeight > 0; index = index->pprev) {
-            if (!index->m_ext) {
-                const auto bmm_height{chainman->m_mainchain ? chainman->m_mainchain->CommittedHeight(index->GetBlockHash()) : std::nullopt};
-                if (bmm_height && *bmm_height < *main_height) break;
-                continue;
-            }
-            if (index->nNonce == 0) continue;
+        const auto rests{[&](const CBlockIndex& index) {
+            return index.m_ext && static_cast<int64_t>(index.nNonce) == *main_height && CommitmentOf(index) == commitment;
+        }};
+        // A commitment to a BMM block of ours: that block alone rests on it (acknowledgements name tickets).
+        const CBlockIndex* own{chainman->m_blockman.LookupBlockIndex(commitment)};
+        // On the active chain, the acknowledgements are in the order of the mainchain, strictly: the
+        // state's bad-pos-ack-order, on nNonce, which the block's hash covers. From the tip down to the
+        // first one below the height. Not stopped by a BMM block: where the record has it now is not
+        // where it had it when the block was connected (review 8: a mainchain reorg that commits again,
+        // lower, to a BMM block above the acknowledgement stopped the walk above it, a split between
+        // the nodes that had it noted and the others). Visited: the blocks above the last
+        // acknowledgement below the height -- each BMM block among them a commitment of its own, and
+        // at most max_unanchored_slots blocks of stake after each anchor (bad-pos-unanchored).
+        for (const CBlockIndex* index{own ? nullptr : chainman->ActiveChain().Tip()}; index && index->nHeight > 0; index = index->pprev) {
+            if (!index->m_ext || index->nNonce == 0) continue;
             if (static_cast<int64_t>(index->nNonce) < *main_height) break;
-            if (CommitmentOf(*index) == commitment) add(index->GetBlockHash());
+            if (rests(*index)) {
+                add(index->GetBlockHash());
+                break;
+            }
         }
-        // Those that failed against the record (each cost a commitment: few), whatever height the
-        // commitment has now.
+        // Those that failed against the record, whatever chain they are on: from the block index,
+        // read only if their nNonce is the height.
         if (chainman->m_mainchain) {
             for (const uint256& hash : chainman->m_mainchain->RecordFailures()) {
                 const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(hash)};
-                if (index && index->m_ext && index->nNonce != 0 && CommitmentOf(*index) == commitment) add(hash);
+                if (index && rests(*index)) add(hash);
             }
         }
     }
@@ -1307,11 +1320,13 @@ std::optional<AnchorAck> FastBlocksHooks::NextAck(const CBlockIndex& tip, const 
         if (!Acknowledgeable(ticket, tip, fast, slot)) continue;
         // A block that acknowledged it failed when the record lost the commitment, and the follower is
         // about to give it back now that the record has it again: acknowledging it here too would only
-        // fork the chain (both branches with the same anchor; the longer wins).
+        // fork the chain (both branches with the same anchor; the longer wins). (One at the height the
+        // record has it now: one at another fails again, whatever this node noted.)
         const auto acked{BlocksCommittedBy(ticket.Hash(), *committed)};
         if (std::any_of(acked.begin() + 1, acked.end(), [&](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
                 const CBlockIndex* index{chainman->m_blockman.LookupBlockIndex(hash)};
-                return index && (index->nStatus & BLOCK_FAILED_VALID) && record.GetFailure(hash) == sidechain::Mainchain::Failure::RECORD;
+                return index && index->m_ext && static_cast<int64_t>(index->nNonce) == *committed && (index->nStatus & BLOCK_FAILED_VALID) &&
+                       record.GetFailure(hash) == sidechain::Mainchain::Failure::RECORD;
             })) {
             continue;
         }

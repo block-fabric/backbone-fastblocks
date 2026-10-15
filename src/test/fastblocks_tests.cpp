@@ -509,6 +509,43 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         Take(PosBlock(i, ack));
         return ack;
     }
+
+    //! Tickets of the floods, all different.
+    uint64_t flood_salt{0};
+    /**
+     * Push every acknowledgement noted in memory out (attack8): MAX_NOTED_ACKS + 1 blocks of slot
+     * base_slot + i on the tip, signed by its leader, each acknowledging a commitment nobody made.
+     * @return each block's commitment and hash, in the order noted (the first is out already)
+     */
+    std::vector<std::pair<uint256, uint256>> FloodNotedAcks(int i)
+    {
+        CBlock block{PosBlock(i)};
+        const CKey& leader{Leader(pos::SlotOf(block.nTime, Pos()))};
+        std::vector<std::pair<uint256, uint256>> noted;
+        for (size_t n{0}; n <= pos::MAX_NOTED_ACKS; ++n) {
+            pos::PosSections sections;
+            sections.ack = pos::AnchorAck{.ticket = Ticket(ArithToUint256(arith_uint256{++flood_salt} << 64), script), .main_height = 1000000 + static_cast<int>(n)};
+            block.vSections = sections.Encode();
+            block.nNonce = static_cast<uint32_t>(sections.ack->main_height);
+            block.ext.hashSections = pos::SectionsHash(block.vSections);
+            BOOST_REQUIRE(pos::Producer::Sign(block, leader, Genesis()));
+            BlockValidationState state;
+            BOOST_REQUIRE(Hooks().CheckBlock(block, state));
+            noted.emplace_back(sections.ack->ticket.Hash(), block.GetHash());
+        }
+        return noted;
+    }
+    /** How many of a flood's blocks are out of memory again: as many acknowledgements were read since. */
+    size_t FloodPushedOut(const std::vector<std::pair<uint256, uint256>>& flood)
+    {
+        size_t out{0};
+        // (The first went with the flood itself.)
+        for (size_t n{1}; n < flood.size(); ++n, ++out) {
+            const auto noted{Hooks().BlocksCommittedBy(flood[n].first, std::nullopt)};
+            if (std::find(noted.begin(), noted.end(), flood[n].second) != noted.end()) break;
+        }
+        return out;
+    }
 };
 
 struct NoValidatorsSetup : public FastBlocksSetup {
@@ -5715,22 +5752,7 @@ BOOST_FIXTURE_TEST_CASE(attack8_acks_pushed_out_still_taken_back, FastBlocksSetu
     }
 
     // The flood: blocks of slot 4 on the tip, signed by its leader, each acknowledging nothing on record.
-    const CBlock base{PosBlock(4)};
-    const CKey& leader{Leader(pos::SlotOf(base.nTime, Pos()))};
-    uint64_t salt{0};
-    const auto flood{[&] {
-        CBlock block{base};
-        for (size_t n{0}; n <= pos::MAX_NOTED_ACKS; ++n) {
-            pos::PosSections sections;
-            sections.ack = pos::AnchorAck{.ticket = Ticket(ArithToUint256(arith_uint256{++salt} << 64), script), .main_height = 1000000 + static_cast<int>(n)};
-            block.vSections = sections.Encode();
-            block.nNonce = static_cast<uint32_t>(sections.ack->main_height);
-            block.ext.hashSections = pos::SectionsHash(block.vSections);
-            BOOST_REQUIRE(pos::Producer::Sign(block, leader, Genesis()));
-            BlockValidationState state;
-            BOOST_REQUIRE(Hooks().CheckBlock(block, state));
-        }
-    }};
+    const auto flood{[&] { FloodNotedAcks(4); }};
     flood();
 
     // The mainchain drops the commitment; the follower takes back what rests on it.
@@ -5754,6 +5776,89 @@ BOOST_FIXTURE_TEST_CASE(attack8_acks_pushed_out_still_taken_back, FastBlocksSetu
     BlockValidationState state;
     BOOST_REQUIRE(Chain().ActivateBestChain(state));
     BOOST_CHECK(WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*Index(acked))));
+}
+
+BOOST_FIXTURE_TEST_CASE(review8_ack_below_a_bmm_block_committed_lower_taken_back, FastBlocksSetup)
+{
+    // REVIEW 8 (attack8's fix, a split). The blocks resting on a dropped commitment were looked for
+    // from the tip down, stopping at the first BMM block the record has committed below the height
+    // the commitment had. But the record is that after the mainchain reorg: a BMM block above the
+    // acknowledgement, which the reorg committed to again, lower, stops the walk above it. The node
+    // keeps a block whose anchor the mainchain dropped, if it did not note it (it restarted, or a
+    // leader pushed it out: attack8), while the nodes that noted it take it back.
+    StartPos();
+    Take(PosBlock(1));
+    const int common{Record().Height()};
+    Main();
+    const pos::AnchorAck ack{AckTip(2)};
+    BOOST_REQUIRE_EQUAL(ack.main_height, common + 2);
+    const uint256 acked{Tip()->GetBlockHash()};
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    MineBmm(bmm);
+    FloodNotedAcks(3);
+
+    // The mainchain drops its blocks above `common` and commits to the BMM block again, first.
+    const std::vector<sidechain::MainBlock> removed{Record().Truncate(common)};
+    Commit(bmm.GetHash());
+    // As the follower does (Act): what rests on each commitment dropped is taken back, then what has a
+    // commitment again is checked again.
+    for (size_t i{0}; i < removed.size(); ++i) {
+        if (!removed[i].bmm) continue;
+        for (const uint256& hash : Hooks().BlocksCommittedBy(*removed[i].bmm, common + 1 + static_cast<int>(i))) {
+            if (!Index(hash)) continue;
+            BlockValidationState state;
+            Chain().InvalidateBlock(state, hash, /*by_record=*/true);
+        }
+    }
+    {
+        LOCK(::cs_main);
+        for (const uint256& hash : Hooks().BlocksCommittedBy(bmm.GetHash(), Record().CommittedHeight(bmm.GetHash()))) {
+            if (CBlockIndex* index{Chainman().m_blockman.LookupBlockIndex(hash)}) Chain().ReconsiderRecordFailure(index);
+        }
+    }
+    BlockValidationState state;
+    Chain().ActivateBestChain(state);
+    BOOST_CHECK_MESSAGE(!WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*Index(acked))),
+                        "split: the block that acknowledged a dropped commitment stays on the chain");
+}
+
+BOOST_FIXTURE_TEST_CASE(review8_blocks_committed_by_reads_only_the_candidates, FastBlocksSetup)
+{
+    // REVIEW 8 (attack8's fix, a denial of service). Finding the blocks resting on a commitment read
+    // from disk, under cs_main, every block that failed against the record (which never go: a
+    // leader makes two of each slot it leads at no cost, acknowledging a ticket nobody committed) and
+    // every acknowledgement of the active chain above the height -- for every commitment the mainchain
+    // makes (the follower), drops (the follower), and every ticket a producer may acknowledge, each
+    // slot (NextAck). With the noted acknowledgements pushed out (attack8), each is a read. Only an
+    // acknowledgement whose nNonce is the height can rest on the commitment: only those are read.
+    StartPos();
+    Take(PosBlock(1));
+    const pos::AnchorAck first{AckTip(2)};
+    const uint256 first_block{Tip()->GetBlockHash()};
+    AckTip(3);
+    AckTip(4);
+    // Blocks that fail against the record: each acknowledges, at the height of a commitment on record,
+    // a ticket nobody committed to.
+    Commit(uint256{0xc0});
+    const int other{Record().Height()};
+    constexpr int FAILED{5};
+    for (int i{5}; i < 5 + FAILED; ++i) {
+        const CBlock failed{WithAck(PosBlock(i), pos::AnchorAck{.ticket = Ticket(uint256{static_cast<uint8_t>(i)}, script), .main_height = other})};
+        Submit(failed);
+        BOOST_REQUIRE(Record().GetFailure(failed.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+    }
+    const auto flood{FloodNotedAcks(5 + FAILED)};
+    BOOST_REQUIRE_EQUAL(FloodPushedOut(flood), 0U);
+
+    // A new commitment (the follower, for each mainchain block): no block of ours rests on it.
+    Commit(uint256{0xc1});
+    const auto returned{Hooks().BlocksCommittedBy(uint256{0xc1}, Record().Height())};
+    BOOST_CHECK_EQUAL(returned.size(), 1U);
+    BOOST_CHECK_EQUAL(FloodPushedOut(flood), 0U);
+    // The first acknowledgement's commitment dropped: it alone is read, not those above it.
+    const auto dropped{Hooks().BlocksCommittedBy(first.ticket.Hash(), first.main_height)};
+    BOOST_CHECK(std::find(dropped.begin(), dropped.end(), first_block) != dropped.end());
+    BOOST_CHECK_LE(FloodPushedOut(flood), 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
