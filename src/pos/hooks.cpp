@@ -27,8 +27,10 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <array>
 #include <ios>
+#include <tuple>
 
 namespace pos {
 
@@ -1466,17 +1468,14 @@ std::vector<std::pair<Offence, DoubleProposal>> FastBlocksHooks::ChainEvidence(c
                                                                                 size_t max, const std::set<Offence>& skip) const
 {
     AssertLockHeld(::cs_main);
-    std::vector<std::pair<Offence, DoubleProposal>> chosen;
-    std::set<uint256> offenders;
-    // Whether each validator met is banned (the pool keeps proofs by validator: read once each).
+    using Entry = std::pair<Offence, DoubleProposal>;
+    // The cheap checks, by the pool's offence (the signatures say it is the only one the proof can be):
+    // a later slot, punished already, banned (whether each validator met is: read once each).
+    std::vector<Entry> candidates;
     std::map<uint256, bool> banned;
-    size_t sig_budget{MAX_EVIDENCE_SIG_CHECKS};
-    for (const auto& [offence, proof] : m_evidence.All()) {
-        if (chosen.size() >= max) break;
-        if (skip.contains(offence) || offenders.contains(offence.pubkey)) continue;
-        // The cheap checks, by the pool's offence (the signatures say it is the only one the proof can
-        // be): a later slot, punished already, banned.
-        if (offence.slot > slot) continue;
+    for (auto& entry : m_evidence.All()) {
+        const Offence& offence{entry.first};
+        if (skip.contains(offence) || offence.slot > slot) continue;
         if (OffencePunished(view, offence.pubkey, offence.slot)) continue;
         auto is_banned{banned.find(offence.pubkey)};
         if (is_banned == banned.end()) {
@@ -1484,12 +1483,45 @@ std::vector<std::pair<Offence, DoubleProposal>> FastBlocksHooks::ChainEvidence(c
             is_banned = banned.emplace(offence.pubkey, record && record->tombstoned).first;
         }
         if (is_banned->second) continue;
-        std::string reason;
-        const auto checked{CheckChainEvidence(proof, prev, slot, view, anchors, reason, &sig_budget)};
-        if (!checked) continue;
-        offenders.insert(checked->pubkey);
-        chosen.emplace_back(*checked, proof);
+        candidates.push_back(std::move(entry));
     }
+    // By value: the oldest slot first, the nearest the end of its window (then the pool's order).
+    std::ranges::sort(candidates, [](const Entry& x, const Entry& y) { return std::tie(x.first.slot, x.first) < std::tie(y.first.slot, y.first); });
+    std::vector<Entry> chosen;
+    std::set<uint256> offenders;
+    const auto take{[&](const Entry& entry, size_t& budget, std::string& reason) {
+        const auto checked{CheckChainEvidence(entry.second, prev, slot, view, anchors, reason, &budget)};
+        if (!checked) return false;
+        offenders.insert(checked->pubkey);
+        chosen.emplace_back(*checked, entry.second);
+        return true;
+    }};
+    // Those that cost no signature check (a result kept: a good one stays while the pool keeps the
+    // proof), or fail before it (the set of their slot not known here, out of the window).
+    std::vector<const Entry*> unchecked;
+    size_t none{0};
+    for (const Entry& entry : candidates) {
+        if (chosen.size() >= max) break;
+        if (offenders.contains(entry.first.pubkey)) continue;
+        std::string reason;
+        if (!take(entry, none, reason) && reason == "pos-evidence-later") unchecked.push_back(&entry);
+    }
+    // Then the signatures of a few not checked before, round robin in the pool's order from the last
+    // one checked: each is checked within EVIDENCE_CHECK_ROUNDS blocks, however many others there are
+    // (a flood that pushes their results out keeps them unchecked, and first in no other order).
+    std::ranges::sort(unchecked, [](const Entry* x, const Entry* y) { return x->first < y->first; });
+    const auto next{m_evidence_cursor ? std::ranges::upper_bound(unchecked, *m_evidence_cursor, {}, [](const Entry* e) { return e->first; }) : unchecked.begin()};
+    std::ranges::rotate(unchecked, next);
+    size_t budget{MAX_EVIDENCE_SIG_CHECKS};
+    for (const Entry* entry : unchecked) {
+        if (chosen.size() >= max || budget == 0) break;
+        if (offenders.contains(entry->first.pubkey)) continue;
+        std::string reason;
+        take(*entry, budget, reason);
+        m_evidence_cursor = entry->first;
+    }
+    // By value, as above.
+    std::ranges::sort(chosen, [](const Entry& x, const Entry& y) { return std::tie(x.first.slot, x.first) < std::tie(y.first.slot, y.first); });
     return chosen;
 }
 

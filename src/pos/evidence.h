@@ -12,6 +12,7 @@
 #include <sync.h>
 #include <uint256.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,8 @@ inline constexpr size_t MAX_SIGNED_HEADERS{4000};
 inline constexpr size_t MAX_CHECKED_SIGNATURES{4 * MAX_EVIDENCE};
 //! Proofs whose signatures a block this node makes (of stake, or merged mined) checks, at most, beyond those checked before.
 inline constexpr size_t MAX_EVIDENCE_SIG_CHECKS{32};
+//! Blocks this node makes within which each proof of a full pool whose signatures it has not checked is checked (round robin).
+inline constexpr size_t EVIDENCE_CHECK_ROUNDS{(MAX_EVIDENCE + MAX_EVIDENCE_SIG_CHECKS - 1) / MAX_EVIDENCE_SIG_CHECKS};
 //! Proofs relayed by a peer whose signatures the node checks: at most this many at once...
 inline constexpr double EVIDENCE_CHECKS_BURST{64};
 //! ... and this many a second after.
@@ -121,9 +124,12 @@ public:
     std::optional<Offence> Known(const DoubleProposal& proof) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /**
      * Whether both headers of a proof are signed by `pubkey` (on the chain of `genesis`), checked once:
-     * the result is remembered, by proof and leader (MAX_CHECKED_SIGNATURES), so that a proof the node
-     * keeps costs no signature check at each block it makes. `checked`: set to whether the signatures
-     * were checked now (not remembered).
+     * the result is remembered, by proof and leader (MAX_CHECKED_SIGNATURES, the oldest go first), so
+     * that a proof the node keeps costs no signature check at each block it makes. A result that says a
+     * proof the pool keeps is good (against its offender) is not pushed out while the proof is kept:
+     * else a flood of checks (relayed proofs, by many peers) would push it out between its check and
+     * the block that carries it, and the proof would wait for a check again (audit 6 review, item 11).
+     * `checked`: set to whether the signatures were checked now (not remembered).
      */
     bool CheckSigs(const DoubleProposal& proof, const uint256& pubkey, const uint256& genesis, bool* checked = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Whether the result of CheckSigs for this proof and leader is remembered. */
@@ -135,6 +141,8 @@ public:
     std::vector<DoubleProposal> TakeUnrelayed() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Have the next TakeUnrelayed leave out a proof (it was relayed already). */
     void MarkRelayed(const Offence& offence) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Signatures of headers checked by CheckSigs since the pool was made (the work it did: tests). */
+    uint64_t SigChecks() const { return m_sig_checks.load(); }
 
 private:
     mutable Mutex m_mutex;
@@ -145,9 +153,13 @@ private:
     //! The first header each signer signed for each slot seen, by slot and signer.
     std::map<std::pair<int64_t, uint256>, CBlockHeader> m_signed GUARDED_BY(m_mutex);
     //! Whether both headers of a proof are signed by a key, by the proof's id and the key; oldest first in m_sigs_order.
+    //! (Those not in m_sigs_order are kept while their proof is: the good result of a proof of the pool.)
     std::map<std::pair<uint256, uint256>, bool> m_sigs GUARDED_BY(m_mutex);
     std::deque<std::pair<uint256, uint256>> m_sigs_order GUARDED_BY(m_mutex);
+    std::atomic<uint64_t> m_sig_checks{0};
     void NoteSigs(const uint256& id, const uint256& pubkey, bool valid) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** Keep the good result of a proof of the pool while it is kept (out of m_sigs_order). */
+    void PinSigs(const uint256& id, const uint256& pubkey) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
 public:
     /** What identifies a proof, in either order. */

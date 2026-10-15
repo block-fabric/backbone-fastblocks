@@ -186,9 +186,13 @@ public:
      * validator, at most `max`, those of `skip` left out. Under cs_main, with a pool of MAX_EVIDENCE
      * proofs, so the cheap checks come first, by the offence the pool keeps a proof under (its
      * signatures were checked: wherever the proof is one, it is that offence): punished already, its
-     * validator banned, a slot after the block's. Then the signatures of at most
-     * MAX_EVIDENCE_SIG_CHECKS proofs not checked before (each result is kept: the next block checks
-     * others).
+     * validator banned, a slot after the block's. Then, by value (the oldest slot first: the nearest
+     * the end of its window), those whose signatures cost nothing (a result kept: the pool keeps the
+     * good result of each of its proofs while it keeps the proof), and the set of whose slot this chain
+     * has. Then the signatures of at most MAX_EVIDENCE_SIG_CHECKS proofs not checked before, round
+     * robin (from where the last block left off, in the pool's order): each one is checked within
+     * EVIDENCE_CHECK_ROUNDS blocks, however many others a flood keeps unchecked (audit 6 review,
+     * item 11).
      */
     std::vector<std::pair<Offence, DoubleProposal>> ChainEvidence(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView& view, uint64_t anchors, size_t max,
                                                                   const std::set<Offence>& skip = {}) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
@@ -435,6 +439,8 @@ private:
     mutable std::deque<std::pair<uint256, uint256>> m_ack_order GUARDED_BY(m_acks_mutex);
 
     mutable EvidencePool m_evidence;
+    //! The last proof whose signatures ChainEvidence checked (round robin over those not checked).
+    mutable std::optional<Offence> m_evidence_cursor GUARDED_BY(::cs_main);
     //! Proofs relayed by each peer whose signatures this node checks (the rest are dropped).
     mutable EvidenceRateLimiter m_evidence_rate;
 

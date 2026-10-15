@@ -5064,4 +5064,83 @@ BOOST_FIXTURE_TEST_CASE(slot_headers_counted_by_signer, SeedSetup)
     WITH_LOCK(::cs_main, Chainman().UncheckedSourceGone(40));
 }
 
+BOOST_FIXTURE_TEST_CASE(evidence_true_proof_among_a_flood, FastBlocksSetup)
+{
+    // Review of 81aeb47467 (audit 6, item 11). The pool is full of costly but useless proofs (1000,
+    // of the right form, signed by validators that do not lead their slots here: their signatures fail
+    // against the leader), and one true proof; between blocks a flood of checks (relayed proofs, from
+    // many peers) pushes the results the node remembers out. The true one is carried, and its offender
+    // slashed, within EVIDENCE_CHECK_ROUNDS blocks; and every useless one is checked within as many.
+    StartPos();
+    const CBlock base{PosBlock(1)};
+    const auto proof_at{[&](int64_t slot, const CKey& signer, uint64_t salt) {
+        CBlock a{base};
+        a.nTime = static_cast<uint32_t>(pos::SlotTime(slot, Pos()));
+        a.hashMerkleRoot = ArithToUint256(arith_uint256{2 * salt + 1});
+        BOOST_REQUIRE(pos::Producer::Sign(a, signer, Genesis()));
+        CBlock b{a};
+        b.hashMerkleRoot = ArithToUint256(arith_uint256{2 * salt + 2});
+        BOOST_REQUIRE(pos::Producer::Sign(b, signer, Genesis()));
+        return pos::DoubleProposal{.a = a, .b = b};
+    }};
+    //! Each useless proof, its slot, and its signer.
+    std::vector<std::tuple<pos::DoubleProposal, int64_t, uint256>> junk;
+    int64_t slot{base_slot + 2};
+    for (; junk.size() < pos::MAX_EVIDENCE; ++slot) {
+        const auto leader{Hooks().ActiveLeaderOf(slot)};
+        BOOST_REQUIRE(leader.status == pos::FastBlocksHooks::LeaderStatus::OK);
+        for (const CKey& k : keys) {
+            if (XOnly(k) == leader.pubkey || junk.size() >= pos::MAX_EVIDENCE) continue;
+            const pos::DoubleProposal proof{proof_at(slot, k, junk.size())};
+            BOOST_REQUIRE(Hooks().Evidence().Add({.pubkey = XOnly(k), .slot = slot}, proof));
+            junk.emplace_back(proof, slot, XOnly(k));
+        }
+    }
+    // The true proof: the leader of a slot after them signed twice (the oldest junk one goes).
+    const int64_t offence_slot{slot};
+    const CKey& offender_key{Leader(offence_slot)};
+    const uint256 offender{XOnly(offender_key)};
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof_at(offence_slot, offender_key, 1u << 20), reason), reason);
+    BOOST_REQUIRE_EQUAL(Hooks().Evidence().Size(), pos::MAX_EVIDENCE);
+
+    uint64_t flood_key{0};
+    const auto flood{[&] {
+        // As many results as the node remembers, new ones (relayed proofs checked against leaders).
+        for (size_t n{0}; n < pos::MAX_CHECKED_SIGNATURES; ++n) Hooks().Evidence().CheckSigs(std::get<0>(junk[n % junk.size()]), ArithToUint256(arith_uint256{++flood_key}), Genesis());
+    }};
+    std::set<size_t> checked;
+    const auto note_checked{[&] {
+        for (size_t n{0}; n < junk.size(); ++n) {
+            const auto leader{Hooks().ActiveLeaderOf(std::get<1>(junk[n]))};
+            if (leader.status == pos::FastBlocksHooks::LeaderStatus::OK && Hooks().Evidence().SigsKnown(std::get<0>(junk[n]), leader.pubkey)) checked.insert(n);
+        }
+    }};
+    std::optional<size_t> slashed_at;
+    for (size_t round{1}; round <= pos::EVIDENCE_CHECK_ROUNDS && !slashed_at; ++round) {
+        flood();
+        // A merged mined block at a slot after them all.
+        Mock(pos::SlotTime(offence_slot + static_cast<int64_t>(round), Pos()));
+        MineBmm(BmmBlock(/*use_mempool=*/false));
+        note_checked();
+        if (Validator(offender) && Validator(offender)->tombstoned) slashed_at = round;
+    }
+    BOOST_TEST_MESSAGE("the offender of the true proof among " << pos::MAX_EVIDENCE << " useless ones, under a flood of checks: slashed at block " << (slashed_at ? std::to_string(*slashed_at) : "never"));
+    BOOST_CHECK_MESSAGE(slashed_at, "evidence censored: the true proof is not carried within " << pos::EVIDENCE_CHECK_ROUNDS << " blocks");
+    // Every useless one is checked within EVIDENCE_CHECK_ROUNDS blocks the node makes, whatever the flood
+    // (but those against the offender, banned now: a cheap check leaves them out).
+    checked.clear();
+    for (size_t round{1}; round <= pos::EVIDENCE_CHECK_ROUNDS; ++round) {
+        flood();
+        LOCK(::cs_main);
+        BOOST_CHECK(Hooks().MergeMinedOutputs(Chain().SideCache(), *Tip(), GetTime()).empty());
+        note_checked();
+    }
+    // (The oldest one left the pool when the true one came.)
+    const auto pooled{Hooks().Evidence().All()};
+    const size_t expected{static_cast<size_t>(std::count_if(pooled.begin(), pooled.end(), [&](const auto& p) { return p.first.pubkey != offender; }))};
+    BOOST_CHECK_EQUAL(pooled.size(), junk.size());
+    BOOST_CHECK_EQUAL(checked.size(), expected);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

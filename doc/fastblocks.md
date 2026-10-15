@@ -773,16 +773,28 @@ and the peer is not blamed for it either (`evidence_relay_rate`). A proof the
 node keeps already costs no check, and is not counted.
 
 The result of each signature check of a proof is kept, by proof and leader (the
-last 4000; a proof the pool keeps counts as checked against its offender), so
-that no proof is checked twice against one leader. The blocks a node makes (of
-stake, and merged mined) read the pool under `cs_main`: the cheap checks come
-first, by the offence a proof is kept under (its signatures were checked: on any
-chain where the proof is one, it is that offence): punished already, its
-validator banned, a slot after the block's; then the window; then the
-signatures, of 32 proofs not checked before at most per block (the next block
-checks others). With a pool of 1000 proofs against a banned validator, leaving
-them out of a merged mined block took 105 to 167 ms, and about 2 ms after
-(`evidence_pool_of_a_banned_validator`, `evidence_sig_checks_bounded`). In a
+last 4000; a proof the pool keeps counts as checked against its offender, and
+that good result stays as long as the pool keeps the proof: no flood of checks
+pushes it out), so that no proof is checked twice against one leader. The blocks
+a node makes (of stake, and merged mined) read the pool under `cs_main`: the
+cheap checks come first, by the offence a proof is kept under (its signatures
+were checked: on any chain where the proof is one, it is that offence):
+punished already, its validator banned, a slot after the block's. Then, by
+value, the oldest slot first (the nearest the end of its window), those that
+cost no signature check: a result kept, or a set of their slot this chain does
+not have, or out of the window. Then the signatures of 32 proofs not checked
+before at most per block, round robin in the pool's order from where the last
+block left off: each is checked within 32 blocks (`EVIDENCE_CHECK_ROUNDS`, a
+full pool of 1000), however many others a flood keeps unchecked. With a pool of
+1000 proofs against a banned validator, leaving them out of a merged mined block
+took 105 to 167 ms, and about 2 ms after; it checks no signature
+(`evidence_pool_of_a_banned_validator`, `evidence_sig_checks_bounded`). Before
+the pinned results and the round robin, a pool kept full of costly but useless
+proofs (signatures that fail against the leader here) and a flood of checks
+between blocks (relayed proofs, from many peers) kept a true proof from ever
+being checked, or had its good result pushed out between its check and the block
+(audit 6 review, item 11): with 1000 such proofs, its offender was never
+slashed; now at the first block (`evidence_true_proof_among_a_flood`). In a
 block's own check the signatures still come before `-known` and `-banned`: those
 read the state alone (`RecordIndependent`), and a proof is only one once its
 signatures say whose.

@@ -102,8 +102,6 @@ bool EvidencePool::Add(const Offence& offence, DoubleProposal proof)
     proof.Normalize();
     const uint256 id{ProofId(proof)};
     LOCK(m_mutex);
-    // (Kept as checked: its signatures by the offender are good.)
-    if (!m_sigs.contains({id, offence.pubkey})) NoteSigs(id, offence.pubkey, true);
     // Full: a proof of a slot not after the oldest kept would be the one pushed out at once. It is
     // not taken (nor relayed): else a proof pushed out is new again each time it comes back, and
     // nodes in a cycle relay it round for ever. Proofs are only ever pushed out, never removed, so
@@ -115,11 +113,15 @@ bool EvidencePool::Add(const Offence& offence, DoubleProposal proof)
     if (!m_proofs.emplace(offence, std::move(proof)).second) return false;
     m_known.emplace(id, offence);
     m_unrelayed.push_back(offence);
-    // Bounded: the proofs of the oldest slots go first.
+    // Kept as checked: its signatures by the offender are good, and stay known while it is kept.
+    PinSigs(id, offence.pubkey);
+    // Bounded: the proofs of the oldest slots go first (and their good results with them).
     while (m_proofs.size() > MAX_EVIDENCE) {
         const auto oldest{std::min_element(m_proofs.begin(), m_proofs.end(), [](const auto& x, const auto& y) { return x.first.slot < y.first.slot; })};
         std::erase(m_unrelayed, oldest->first);
-        m_known.erase(ProofId(oldest->second));
+        const uint256 old_id{ProofId(oldest->second)};
+        m_known.erase(old_id);
+        m_sigs.erase({old_id, oldest->first.pubkey});
         m_proofs.erase(oldest);
     }
     return true;
@@ -134,9 +136,26 @@ std::optional<Offence> EvidencePool::Known(const DoubleProposal& proof) const
     return found->second;
 }
 
+void EvidencePool::PinSigs(const uint256& id, const uint256& pubkey)
+{
+    AssertLockHeld(m_mutex);
+    const auto key{std::make_pair(id, pubkey)};
+    // (Noted before, as any result: out of the order, so that nothing pushes it out.)
+    if (const auto [it, inserted]{m_sigs.insert_or_assign(key, true)}; !inserted) {
+        if (const auto ordered{std::find(m_sigs_order.begin(), m_sigs_order.end(), key)}; ordered != m_sigs_order.end()) m_sigs_order.erase(ordered);
+    }
+}
+
 void EvidencePool::NoteSigs(const uint256& id, const uint256& pubkey, bool valid)
 {
     AssertLockHeld(m_mutex);
+    // The good result of a proof the pool keeps, against its offender: kept as long as the proof.
+    if (valid) {
+        if (const auto known{m_known.find(id)}; known != m_known.end() && known->second.pubkey == pubkey) {
+            PinSigs(id, pubkey);
+            return;
+        }
+    }
     if (!m_sigs.emplace(std::make_pair(id, pubkey), valid).second) return;
     m_sigs_order.emplace_back(id, pubkey);
     while (m_sigs_order.size() > MAX_CHECKED_SIGNATURES) {
@@ -154,7 +173,8 @@ bool EvidencePool::CheckSigs(const DoubleProposal& proof, const uint256& pubkey,
         if (const auto found{m_sigs.find({id, pubkey})}; found != m_sigs.end()) return found->second;
     }
     // (Not under the lock: the two checks are what costs.)
-    const bool valid{CheckBlockSig(proof.a, pubkey, genesis) && CheckBlockSig(proof.b, pubkey, genesis)};
+    ++m_sig_checks;
+    const bool valid{CheckBlockSig(proof.a, pubkey, genesis) && (++m_sig_checks, CheckBlockSig(proof.b, pubkey, genesis))};
     if (checked) *checked = true;
     LOCK(m_mutex);
     NoteSigs(id, pubkey, valid);
