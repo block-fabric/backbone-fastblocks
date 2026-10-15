@@ -3,6 +3,7 @@
 import { BridgeError, request } from './bridge';
 import { t } from './i18n.svelte';
 import { formatAmount, type Unit } from './units';
+import { COINBASE_ROLES } from '../chain/roles';
 
 /** Error codes of the wallet functions (walletapi.h). */
 export const WalletError = {
@@ -163,6 +164,8 @@ export interface DetailRow {
   address?: string;
   label?: string;
   own?: boolean;
+  /** Source of a coinbase: the role of its output, in the chain's words (chain/roles.ts). */
+  role?: string;
 }
 
 export interface TxDetails {
@@ -364,6 +367,8 @@ export interface TxRecord {
   abandoned: boolean;
   /** Whether the wallet trusts it, as the host said (what matters for a transaction out of a block). */
   trusted: boolean;
+  /** What an output of a coinbase pays, by the chain's words (chain/roles.ts): '' mostly. */
+  role: string;
 }
 
 /** The records as the host sends them: one array each (RecordJson in walletapi.cpp). */
@@ -392,6 +397,7 @@ export function parseRecords(raw: unknown[][]): TxRecord[] {
       coinbase: Boolean(r[15]),
       abandoned: Boolean(r[16]),
       trusted: r.length > 17 ? Boolean(r[17]) : Boolean(r[11]),
+      role: r.length > 18 && typeof r[18] === 'string' ? r[18] : '',
     };
   });
 }
@@ -461,8 +467,10 @@ export function withStatus(r: TxRecord, height: number, maturity: number): TxRec
 
 export const RECOMMENDED_CONFIRMATIONS = 6;
 
-/** TransactionTableModel::formatTxType. */
-export function typeText(type: RecordType): string {
+/** TransactionTableModel::formatTxType; an output of a coinbase with a role of the chain (chain/roles.ts) by its label. */
+export function typeText(type: RecordType, role = ''): string {
+  const own = role && type === 'mined' ? COINBASE_ROLES[role] : undefined;
+  if (own) return t(own.label);
   switch (type) {
     case 'recv':
       return t('Received with');
@@ -537,7 +545,7 @@ export function amountText(r: Pick<TxRecord, 'amount' | 'countsForBalance'>, uni
 // --- Filters (TransactionView, TransactionFilterProxy) ---
 
 export type DateFilter = 'all' | 'today' | 'week' | 'month' | 'lastMonth' | 'year' | 'range';
-export type TypeFilter = 'all' | 'received' | 'sent' | 'mined' | 'other';
+export type TypeFilter = 'all' | 'received' | 'sent' | 'mined' | 'other' | `role:${string}`;
 
 export const DATE_FILTERS: { id: DateFilter; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -549,12 +557,14 @@ export const DATE_FILTERS: { id: DateFilter; label: string }[] = [
   { id: 'range', label: 'Range…' },
 ];
 
-export const TYPE_FILTERS: { id: TypeFilter; label: string; types: RecordType[] }[] = [
+export const TYPE_FILTERS: { id: TypeFilter; label: string; types: RecordType[]; role?: string }[] = [
   { id: 'all', label: 'All', types: ['mined', 'recv', 'recvOther', 'send', 'sendOther', 'other'] },
   { id: 'received', label: 'Received with', types: ['recv', 'recvOther'] },
   { id: 'sent', label: 'Sent to', types: ['send', 'sendOther'] },
   { id: 'mined', label: 'Mined', types: ['mined'] },
   { id: 'other', label: 'Other', types: ['other'] },
+  // The roles of the chain's coinbase outputs (chain/roles.ts): FastBlocks' Staked, BMM reward, Slashing reward.
+  ...Object.entries(COINBASE_ROLES).map(([role, r]) => ({ id: `role:${role}` as TypeFilter, label: r.label, types: ['mined' as RecordType], role })),
 ];
 
 function startOfDay(d: Date): Date {
@@ -616,11 +626,14 @@ function haystack(r: TxRecord): string {
 }
 
 export function filterRecords(records: readonly TxRecord[], f: TxFilter): TxRecord[] {
-  const types = new Set(TYPE_FILTERS.find((t) => t.id === f.type)?.types ?? []);
+  const chosen = TYPE_FILTERS.find((t) => t.id === f.type);
+  const types = new Set(chosen?.types ?? []);
+  const role = chosen?.role;
   const search = f.search.trim().toLowerCase();
   return records.filter((r) => {
     if (!f.showInactive && r.status === 'conflicted') return false;
     if (!types.has(r.type)) return false;
+    if (role !== undefined && r.role !== role) return false;
     if (f.from !== undefined && r.time < f.from) return false;
     if (f.to !== undefined && r.time >= f.to) return false;
     if (search && !haystack(r).includes(search)) return false;
@@ -662,7 +675,7 @@ export function transactionsCsv(records: readonly TxRecord[], unit: Unit): strin
   const rows = records.map((r) => [
     String(r.status === 'confirmed' || r.status === 'confirming'),
     isoLocal(r.time),
-    typeText(r.type),
+    typeText(r.type, r.role),
     r.label,
     r.address,
     formatAmount(r.amount, unit, { separators: false }),
@@ -724,7 +737,7 @@ export function plainText(r: TxRecord, unit: Unit): string {
   const d = new Date(r.time * 1000);
   const pad = (x: number) => String(x).padStart(2, '0');
   let out = `${d.getMonth() + 1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)} ${pad(d.getHours())}:${pad(d.getMinutes())} ${statusText(r)}. `;
-  const type = typeText(r.type);
+  const type = typeText(r.type, r.role);
   if (type) out += `${type} `;
   if (r.address) out += `${r.label ? `(${r.label})` : '(no label)'} ${r.address} `;
   return out + amountText(r, unit, false, false);
