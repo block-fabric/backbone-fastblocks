@@ -122,8 +122,11 @@
     set(key, X1);
     set(await waitFor('the amount', () => $('#fb-bond-amount')), '1');
     await host('test.confirmAnswer', { yes: false });
+    const asked = (await host('test.confirmed')).length;
     await clickId('fb-bond-submit');
-    await sleep(1500);
+    // The desktop asked (and was told no) before anything else.
+    await waitFor('the desktop asked about the bond', async () => (await host('test.confirmed')).length > asked, 30000);
+    await sleep(500);
     await check('a bond the desktop declined is not made', (await rpc('listbonds', [], W_)).length === 0);
     await host('test.confirmAnswer', { yes: true });
     await waitFor('the form ready again', () => !$('#fb-bond-submit').disabled, 10000);

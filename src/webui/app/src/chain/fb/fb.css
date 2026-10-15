@@ -326,17 +326,6 @@
   text-decoration: underline;
 }
 
-/* The stats over a page of FastBlocks: five fit a row of a window 1180 px wide. */
-.fb-page .side-stats.five {
-  grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr));
-}
-/* Narrower, three a row: an amount and its unit stay whole in each. */
-@media (max-width: 900px) {
-  .fb-page .side-stats.five {
-    grid-template-columns: repeat(auto-fit, minmax(min(12.5rem, 100%), 1fr));
-  }
-}
-
 /* Facts of a panel side by side, each its words over its value; under one another when narrow. */
 .fb-facts {
   display: grid;

@@ -79,21 +79,16 @@
     <p class="side-note side-warn" role="status">No blocks of stake lately: merged mined blocks carry the transactions.</p>
   {/if}
 
-  <section class="side-stats five" aria-label="This node as a validator">
+  <section class="side-stats" aria-label="This node as a validator">
     <div class="panel side-stat">
       <span class="muted">This node</span>
       <strong><span class="status {tone}" id="fb-node-state">{nodeStateText(state)}</span></strong>
-      <span class="faint">{staking?.validator ? (staking.enabled ? t('staking on') : t('staking off')) : t('no validator key')}</span>
+      <span class="faint">{staking?.validator ? (staking.totalstake > 0 ? t('%1 of the slots', formatShare(share)) : t('no set known for this epoch')) : t('no validator key')}</span>
     </div>
     <div class="panel side-stat">
       <span class="muted">Bonded</span>
       <strong class="num"><Amount sats={bonded} /></strong>
-      <span class="faint">{#if unbonding > 0n}<Amount sats={unbonding} /> {t('unbonding')}{:else}{t('its keys, in the state of the chain')}{/if}</span>
-    </div>
-    <div class="panel side-stat">
-      <span class="muted">Share of the set</span>
-      <strong class="num">{formatShare(share)}</strong>
-      <span class="faint">{staking && staking.totalstake > 0 ? t('about %1 of the slots', formatShare(share)) : t('no set known for this epoch')}</span>
+      <span class="faint">{#if unbonding > 0n}<Amount sats={unbonding} /> {t('unbonding')}{:else}{t('to its keys')}{/if}</span>
     </div>
     <div class="panel side-stat">
       <span class="muted">Next slot it leads</span>

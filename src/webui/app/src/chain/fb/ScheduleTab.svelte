@@ -72,10 +72,14 @@
   let epochs = $state<ValidatorSet[]>([]);
   const sets = new Map<number, ValidatorSet>();
   let epochsLoading = $state(false);
+  /** One reading of the epochs at a time: the next refresh reads again what changed. */
+  let reading = false;
   $effect(() => {
     const n = points;
     const top = current + 1;
     void fb.version;
+    if (reading) return;
+    reading = true;
     epochsLoading = true;
     (async () => {
       const out: ValidatorSet[] = [];
@@ -90,6 +94,7 @@
       }
       if (points === n) epochs = out;
       epochsLoading = false;
+      reading = false;
     })();
   });
   let epochsPage = $state(0);
