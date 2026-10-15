@@ -97,8 +97,4 @@
   .dashboard span:nth-child(2) { left: 27%; top: 10%; width: 44%; height: 38%; }
   .dashboard span:nth-child(3) { left: 75%; top: 10%; right: 4%; height: 38%; }
   .dashboard span:nth-child(4) { left: 27%; top: 56%; right: 4%; bottom: 8%; }
-  .sidebar span:nth-child(1) { left: 0; top: 0; bottom: 0; width: 8%; }
-  .sidebar span:nth-child(2) { left: 12%; top: 8%; right: 4%; height: 14%; background: none; border: 0; border-bottom: 2px solid var(--line-strong); }
-  .sidebar span:nth-child(3) { left: 12%; top: 30%; right: 4%; bottom: 18%; }
-  .sidebar span:nth-child(4) { left: 8%; right: 0; bottom: 0; height: 10%; background: var(--surface-2); }
 </style>

@@ -1,4 +1,4 @@
-// The three layouts of the main window (doc/webui-layouts.md), driven through the page: a wallet
+// The two layouts of the main window (doc/webui-layouts.md), driven through the page: a wallet
 // with a history, two sidechains, then each layout in the light and dark themes with pictures of
 // its home, the send page, the history with a transaction in the detail panel (or its dialog),
 // the sidechains, the settings and the command palette.
@@ -35,14 +35,18 @@
       await snapshot(name);
     };
 
-    for (const layout of ['workspace', 'dashboard', 'sidebar']) {
+    for (const layout of ['workspace', 'dashboard']) {
       for (const theme of ['light', 'dark']) {
-        T().savePrefs({ theme, layout, sidebarExpanded: false });
+        T().savePrefs({ theme, layout });
         await sleep(200);
 
-        // Home: the dashboard's cards, the overview otherwise.
-        T().go(layout === 'dashboard' ? 'home' : 'overview');
-        await waitFor('the home', () => (layout === 'dashboard' ? text('.home').includes('Thunder') : text('.balances').includes('CHN')), 20000);
+        // Home, in every layout: its live cards.
+        T().go('home');
+        await waitFor('the home', () => text('.home').includes('Thunder'), 20000);
+        if (layout === 'workspace') {
+          const current = $('.workspace .areas [aria-current="true"]');
+          await check(`${layout} ${theme}: Home is the first area, and the current one`, $('.workspace .areas .area') === current && current.textContent.includes('Home'), current ? current.textContent : 'none');
+        }
         await shot(`${layout}-home-${theme}`);
 
         T().go('send');
@@ -100,7 +104,7 @@
       }
     }
 
-    // The menus of chains-qt: in the workspace's More menu, in the sidebars' Menus.
+    // The menus of chains-qt: in the workspace's More menu, in the dashboard sidebar's Menus.
     T().savePrefs({ theme: 'light', layout: 'workspace' });
     await sleep(300);
     T().go('overview');
@@ -109,10 +113,7 @@
     await waitFor('the more menu', () => $('[role="menu"]'));
     await shot('workspace-more-menu-light');
     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    T().savePrefs({ layout: 'sidebar', sidebarExpanded: true });
-    await sleep(300);
-    await shot('sidebar-expanded-light');
-    T().savePrefs({ sidebarExpanded: false, theme: 'dark' });
+    T().savePrefs({ layout: 'dashboard', theme: 'dark' });
     await sleep(300);
     $('.sidebar button[aria-label^="Menus of chains-qt"]').click();
     await waitFor('the menus', () => $('[role="menu"]'));
@@ -125,8 +126,8 @@
       await sleep(300);
       await shot(`dashboard-home-${theme}`);
     }
-    T().savePrefs({ theme: 'light', layout: 'sidebar' });
-    T().go('overview');
+    T().savePrefs({ theme: 'light', layout: 'dashboard' });
+    T().go('home');
     await finish();
   } catch (e) {
     await snapshot('layouts-failure').catch(() => undefined);

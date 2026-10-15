@@ -1,16 +1,21 @@
 <script lang="ts">
   // The sync overlay (ModalOverlay of chains-qt): while the node catches up, the blocks left, the
   // time of the last block, the progress, its speed per hour and the time left; Hide (or Escape).
+  import { every } from '../lib/poll';
   import { formatTime } from '../lib/format';
   import { nav } from '../lib/nav.svelte';
   import { app, node, walletsEnabled } from '../lib/state.svelte';
   import { MAX_BLOCK_TIME_GAP } from '../lib/sync';
   import { blocksLeft, estimate, overlay } from '../lib/syncoverlay';
 
+  // Only while it is shown: the clock of its estimate, and the watch on the other dialogs (a watch on the
+  // whole page would run at each change of it, as each row of a long table scrolled in).
+  const shown = $derived(nav.dialog === 'sync');
   let now = $state(Date.now());
   $effect(() => {
-    const timer = setInterval(() => (now = Date.now()), 1000);
-    return () => clearInterval(timer);
+    if (!shown) return;
+    now = Date.now();
+    return every(1000, () => (now = Date.now()));
   });
 
   const tip = $derived(node.tip);
@@ -23,7 +28,7 @@
   // Another dialog is open (a page asks something): the layer steps aside until it closes.
   let othersOpen = $state(false);
   $effect(() => {
-    if (typeof MutationObserver === 'undefined') return;
+    if (!shown || typeof MutationObserver === 'undefined') return;
     const look = () => (othersOpen = document.querySelectorAll('dialog[open]:not(.layer)').length > 0);
     const o = new MutationObserver(look);
     o.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['open'] });

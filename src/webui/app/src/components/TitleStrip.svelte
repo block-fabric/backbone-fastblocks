@@ -1,16 +1,14 @@
 <script lang="ts">
-  // The integrated title bar of the dashboard, of the compact sidebar and of the screens before the
+  // The integrated title bar of the dashboard and of the screens before the
   // node runs: a slim strip at the very top with the name of the app and its network, the page (and
   // the wallet), and the buttons of the window. Dragging its empty part moves the window, a double
   // click maximizes it. The workspace layout has these in its own top bar. Not shown with the title
-  // bar of the system. With `actions` (the compact layout, which has no other top bar): the
-  // notifications and the light/dark switch before the buttons of the window.
+  // bar of the system.
   import Brand from './Brand.svelte';
-  import TopActions from './TopActions.svelte';
   import WindowControls from './WindowControls.svelte';
   import { frame, titleBarDoubleClick, titleBarMouseDown } from '../lib/windowframe.svelte';
 
-  let { title = '', detail = '', actions = false }: { title?: string; detail?: string; actions?: boolean } = $props();
+  let { title = '', detail = '' }: { title?: string; detail?: string } = $props();
   let bar: HTMLElement | undefined = $state();
 </script>
 
@@ -31,7 +29,6 @@
       </span>
     {/if}
     <span class="grow"></span>
-    {#if actions}<span class="actions"><TopActions /></span>{/if}
     <WindowControls />
   </header>
 {/if}
@@ -92,21 +89,5 @@
   }
   .grow {
     flex: 1;
-  }
-  .actions {
-    display: flex;
-    padding: 0.2rem 0.3rem;
-  }
-  .actions :global(.btn.round) {
-    width: 1.85rem;
-    min-height: 1.85rem;
-  }
-  .actions :global(.btn.round .icon) {
-    width: 15px;
-    height: 15px;
-  }
-  .actions :global(.dot) {
-    top: 0.3rem;
-    right: 0.35rem;
   }
 </style>

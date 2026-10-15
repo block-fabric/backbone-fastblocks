@@ -1,7 +1,7 @@
 // Pictures of the visual refresh (doc/webui-layouts.md, "The looks"): each layout in Midnight, the
-// look of a first start — the home (the dashboard's) and the overview, Send (the side panel of the
-// dashboard, the page otherwise), the transactions, the sidechains, the settings — then the
-// dashboard in every other look, and a few states: the notifications, the expanded rail, Receive.
+// look of a first start — Home and the overview, Send (the side panel of the dashboard, the page
+// otherwise), the transactions, the sidechains, the settings — then the dashboard in every other
+// look, and a few states: the notifications, Receive.
 (async () => {
   const { rpc, sleep, T, waitFor, check, snapshot, text, finish } = E2E;
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -40,13 +40,12 @@
       await waitFor('the home', () => text('.home').includes('Thunder') && text('.home').includes('Bookshop'), 30000);
     };
 
-    for (const layout of ['dashboard', 'workspace', 'sidebar']) {
-      T().savePrefs({ theme: 'midnight', layout, sidebarExpanded: false });
+    for (const layout of ['dashboard', 'workspace']) {
+      T().savePrefs({ theme: 'midnight', layout });
       await sleep(300);
-      if (layout === 'dashboard') {
-        await home();
-        await shot(`${layout}-home-midnight`);
-      }
+      // Home, in every layout.
+      await home();
+      await shot(`${layout}-home-midnight`);
       T().go('overview');
       await waitFor('the overview', () => text('.balances').includes('CHN'), 20000);
       await shot(`${layout}-overview-midnight`);
@@ -109,13 +108,9 @@
     await waitFor('the notifications', () => $('.notices [role="dialog"]'));
     await shot('dashboard-notifications-midnight');
     $('.notices .bell').click();
-
-    // The compact rail, expanded.
-    T().savePrefs({ layout: 'sidebar', sidebarExpanded: true });
-    T().go('overview');
-    await sleep(400);
-    await shot('sidebar-expanded-midnight');
-    T().savePrefs({ sidebarExpanded: false });
+    // Back to the transactions at the top of the home (it stays drawn: no other layout in between).
+    tab('Transactions').click();
+    $('#content').scrollTop = 0;
 
     // Every other look, on the dashboard; and the light one's Send panel.
     for (const theme of ['light', 'dark', 'ocean', 'matrix', 'qdarkstyle']) {

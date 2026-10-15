@@ -9,12 +9,37 @@ import { CHAIN } from '../chain/config';
 
 export const PROOF_BEGIN = '-----BEGIN CHAINS PROOF OF FUNDS-----';
 export const PROOF_SIGNATURES = '-----SIGNATURES-----';
+/**
+ * An extension of the format of chains-qt (user decision, 2026-10-15): the coins proven, one per line
+ * ("txid:vout amount"), between the statement and the signatures. They are signed with the statement
+ * (the message signed is the statement, a newline, the coin lines joined by newlines), so the proof says
+ * exactly which coins. A proof without them is the proof of chains-qt, signed and checked as before.
+ */
+export const PROOF_COINS = '-----COINS-----';
 export const PROOF_END = '-----END CHAINS PROOF OF FUNDS-----';
 
-/** The text of a proof: the statement, then one line per address with its signature. */
-export function formatProof(statement: string, signatures: { address: string; signature: string }[]): string {
+/** A coin listed in a proof: its outpoint and its amount (satoshis). */
+export interface ProofCoin {
+  txid: string;
+  vout: number;
+  sats: bigint;
+}
+
+/** The line of a coin in a proof: "txid:vout amount", the amount in coins with 8 decimals. */
+export function proofCoinLine(c: ProofCoin): string {
+  return `${c.txid}:${c.vout} ${unitsToCoins(c.sats)}`;
+}
+
+/** What the addresses sign: the statement alone, or with the coins listed (one line each, in order). */
+export function proofMessage(statement: string, coins: readonly ProofCoin[] = []): string {
+  return coins.length ? `${statement}\n${coins.map(proofCoinLine).join('\n')}` : statement;
+}
+
+/** The text of a proof: the statement, the coins (when chosen), then one line per address with its signature. */
+export function formatProof(statement: string, signatures: { address: string; signature: string }[], coins: readonly ProofCoin[] = []): string {
   const lines = signatures.map((s) => `${s.address} ${s.signature}\n`).join('');
-  return `${PROOF_BEGIN}\n${statement}\n${PROOF_SIGNATURES}\n${lines}${PROOF_END}\n`;
+  const listed = coins.length ? `${PROOF_COINS}\n${coins.map((c) => `${proofCoinLine(c)}\n`).join('')}` : '';
+  return `${PROOF_BEGIN}\n${statement}\n${listed}${PROOF_SIGNATURES}\n${lines}${PROOF_END}\n`;
 }
 
 /** A statement as Qt makes it of the text typed: spaces simplified (QString::simplified). */
@@ -24,6 +49,10 @@ export function simplified(text: string): string {
 
 export interface ParsedProof {
   statement: string;
+  /** The coins listed (the extension of the format); empty for a proof of chains-qt. */
+  coins: ProofCoin[];
+  /** What the signatures are of (proofMessage). */
+  message: string;
   /** The signature lines: address and signature, or null for a line that has not two parts. */
   entries: ({ address: string; signature: string } | { invalid: string })[];
 }
@@ -34,13 +63,68 @@ export function parseProof(text: string): ParsedProof | null {
   const begin = lines.indexOf(PROOF_BEGIN);
   const signatures = lines.indexOf(PROOF_SIGNATURES);
   const end = lines.indexOf(PROOF_END);
-  if (begin < 0 || signatures !== begin + 2 || end <= signatures) return null;
+  const coinsAt = lines.indexOf(PROOF_COINS);
+  const withCoins = coinsAt === begin + 2 && begin >= 0;
+  if (begin < 0 || end <= signatures || (withCoins ? signatures <= coinsAt + 1 : signatures !== begin + 2)) return null;
+  const coins: ProofCoin[] = [];
+  if (withCoins) {
+    for (let i = coinsAt + 1; i < signatures; i++) {
+      const m = /^([0-9a-f]{64}):(\d{1,6}) (\d{1,8}(?:\.\d{1,8})?)$/.exec(simplified(lines[i]));
+      const sats = m ? coinsToUnits(m[3]) : null;
+      // A coin line that is not one: not a proof (what was signed cannot be known).
+      if (!m || sats === null) return null;
+      // A coin listed twice would be counted twice: not a proof.
+      if (coins.some((c) => c.txid === m[1] && c.vout === Number(m[2]))) return null;
+      coins.push({ txid: m[1], vout: Number(m[2]), sats });
+    }
+  }
   const entries: ParsedProof['entries'] = [];
   for (let i = signatures + 1; i < end; i++) {
     const parts = simplified(lines[i]).split(' ');
     entries.push(parts.length === 2 ? { address: parts[0], signature: parts[1] } : { invalid: parts[0] ?? '' });
   }
-  return { statement: lines[begin + 1], entries };
+  const statement = lines[begin + 1];
+  return { statement, coins, message: proofMessage(statement, coins), entries };
+}
+
+/** An output as gettxout gives it (null: spent, or never was). */
+export interface TxOutNow {
+  value: number;
+  scriptPubKey: { address?: string };
+}
+
+export interface CoinsCheck {
+  /** Unspent now, paid to an address that signed, of the amount listed. */
+  good: ProofCoin[];
+  /** Spent, or not on the chain (yet). */
+  spent: ProofCoin[];
+  /** Paid to an address that did not sign the proof (or to no address). */
+  unsigned: (ProofCoin & { address: string })[];
+  /** Not of the amount listed. */
+  wrongAmount: (ProofCoin & { now: bigint })[];
+  /** What the good coins hold. */
+  total: bigint;
+}
+
+/** The coins of a proof against the chain now (one gettxout answer per coin, in order) and the addresses that signed. */
+export function checkProofCoins(coins: readonly ProofCoin[], now: readonly (TxOutNow | null)[], signed: ReadonlySet<string>): CoinsCheck {
+  const out: CoinsCheck = { good: [], spent: [], unsigned: [], wrongAmount: [], total: 0n };
+  // Each coin counts once, whatever lists it again (parseProof refuses such a proof already).
+  const seen = new Set<string>();
+  coins.forEach((c, i) => {
+    const key = `${c.txid}:${c.vout}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const o = now[i];
+    if (!o) return void out.spent.push(c);
+    const address = o.scriptPubKey.address ?? '';
+    if (!signed.has(address)) return void out.unsigned.push({ ...c, address });
+    const sats = jsonCoinsToUnits(o.value);
+    if (sats !== c.sats) return void out.wrongAmount.push({ ...c, now: sats });
+    out.good.push(c);
+    out.total += c.sats;
+  });
+  return out;
 }
 
 /** The verdict of a check: valid, partly valid, or not valid, with the amount on the addresses now. */

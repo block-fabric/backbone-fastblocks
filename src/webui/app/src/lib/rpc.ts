@@ -217,7 +217,8 @@ export const host = {
   trayState: () => request<{ available: boolean; visible: boolean; windowVisible: boolean }>('host', 'tray.state', {}),
   // Options of the node (src/webui/options.cpp).
   options: () => request<NodeOptions>('host', 'options.get', {}),
-  setOption: (name: keyof NodeOptionValues, value: unknown) => request<NodeOptions>('host', 'options.set', { name, value }),
+  // A proxy, the Tor proxy or the RPC server turned on waits for a confirmation of the desktop (declined: nothing changed).
+  setOption: (name: keyof NodeOptionValues | 'proxyAddress' | 'torAddress', value: unknown) => request<NodeOptions>('host', 'options.set', { name, value }),
   // A setting that names a program (the signer): the file chooser and a confirmation of the desktop; null when cancelled.
   chooseProgramOption: (name: 'signer') => request<NodeOptions | null>('host', 'options.chooseProgram', { name }),
   // A setting that names a file the node reads (a sidechain's mainchain cookie or password file): the file chooser of the desktop; null when cancelled.
@@ -280,6 +281,8 @@ export interface NodeOptions extends NodeOptionValues {
   /** A sidechain: the defaults of the connection to the mainchain node, and what the command line or the configuration file sets of it. */
   mainchainDefaults?: { port: number; connect: string };
   mainchainIgnored?: Record<string, string>;
+  /** The user said no to the confirmation of the desktop: nothing changed. */
+  declined?: boolean;
 }
 
 export interface Hashes {

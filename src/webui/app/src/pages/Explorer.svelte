@@ -1,15 +1,21 @@
 <script lang="ts">
   // The block explorer (BlockExplorer of chains-qt): search by height, block hash or transaction id;
-  // the latest blocks and the transactions waiting in the mempool; a block with its transactions; a
-  // transaction with its inputs and outputs. The raw JSON of the node is there too.
+  // the latest blocks as a ribbon of boxes after the block being mined (components/BlockRibbon.svelte,
+  // after the user's pool site), then the latest blocks and the transactions waiting in the mempool as
+  // tables; a block with its transactions; a transaction with its inputs and outputs. The raw JSON of the
+  // node is there too.
   import { t } from '../lib/i18n.svelte';
   import Amount from '../components/Amount.svelte';
+  import BlockRibbon from '../components/BlockRibbon.svelte';
+  import { coinbaseTag, type RibbonBlock } from '../lib/blocks';
+  import { every } from '../lib/poll';
   import CopyButton from '../components/CopyButton.svelte';
   import DataTable from '../components/DataTable.svelte';
   import Icon from '../components/Icon.svelte';
   import { errorText, inform } from '../lib/dialogs.svelte';
   import { formatBytes, formatCount, formatTime, shortHash } from '../lib/format';
   import { untrack } from 'svelte';
+  import { fillHeight } from '../lib/actions';
   import { detail, showDetail } from '../lib/detail.svelte';
   import { nav } from '../lib/nav.svelte';
   import { rpc } from '../lib/rpc';
@@ -29,6 +35,8 @@
     weight: number;
     difficulty: number;
     hash: string;
+    /** The id of its coinbase (for the miner's tag). */
+    coinbase?: string;
   }
   interface MempoolRow {
     txid: string;
@@ -92,7 +100,7 @@
     const known = cache.get(hash);
     if (known) return known;
     const b = await rpc.raw<Block>('getblock', [hash, 1]);
-    const row = { height: b.height, time: b.time, nTx: b.nTx as number, size: b.size, weight: b.weight, difficulty: b.difficulty, hash, previousblockhash: b.previousblockhash };
+    const row = { height: b.height, time: b.time, nTx: b.nTx as number, size: b.size, weight: b.weight, difficulty: b.difficulty, hash, previousblockhash: b.previousblockhash, coinbase: b.tx?.[0] };
     cache.set(hash, row);
     return row;
   }
@@ -136,6 +144,94 @@
     void node.tip?.height;
     refreshMempool();
   });
+
+  // --- The ribbon: the blocks of the list ("Last N blocks") as boxes, newest first. Their details (reward,
+  //     tag, BMM) are read for the first boxes, and for more as the strip scrolls towards them. ---
+  const RIBBON_STEP = 12;
+  let detailed = $state(RIBBON_STEP);
+  interface Extra {
+    subsidy: number;
+    fees: number;
+    feeRate: number;
+    tag: string;
+  }
+  const extras = new Map<string, Extra>();
+  let extrasVersion = $state(0);
+  let bmmAt = $state.raw<Record<number, number[]>>({});
+  let fresh = $state<string | null>(null);
+  let nowSecs = $state(Math.floor(Date.now() / 1000));
+  $effect(() => every(15000, () => (nowSecs = Math.floor(Date.now() / 1000))));
+
+  async function extraOf(row: BlockRow): Promise<void> {
+    if (extras.has(row.hash)) return;
+    const stats = await rpc.raw<{ subsidy: number; totalfee: number; avgfeerate: number }>('getblockstats', [row.hash, ['subsidy', 'totalfee', 'avgfeerate']]);
+    let tag = '';
+    if (row.coinbase) {
+      const cb = await rpc.raw<{ vin: { coinbase?: string }[] }>('getrawtransaction', [row.coinbase, true, row.hash]).catch(() => null);
+      tag = coinbaseTag(cb?.vin[0]?.coinbase ?? '');
+    }
+    extras.set(row.hash, { subsidy: stats.subsidy, fees: stats.totalfee, feeRate: stats.avgfeerate, tag });
+  }
+
+  async function refreshRibbon(rows: readonly BlockRow[]) {
+    const latest = rows.slice(0, detailed);
+    if (!latest.length) return;
+    try {
+      // A block whose stats cannot be read (pruned) is drawn without them.
+      for (const row of latest) await extraOf(row).catch(() => undefined);
+      extrasVersion++;
+      // Blind merged mining: the sidechains each block committed to.
+      const from = latest[latest.length - 1].height;
+      const count = latest[0].height - from + 1;
+      const sidechains = await rpc.raw<{ slot: number }[]>('listactivesidechains', []);
+      const at: Record<number, number[]> = {};
+      for (const sc of sidechains) {
+        const events = await rpc.raw<{ height: number; bmm?: string }[]>('getsidechainevents', [sc.slot, from, count]);
+        for (const e of events) if (e.bmm) (at[e.height] ??= []).push(sc.slot);
+      }
+      bmmAt = at;
+    } catch {
+      // Again at the next block.
+    }
+  }
+
+  /** The strip neared its end: the details of the next boxes. */
+  function moreDetails() {
+    if (detailed >= blocks.length) return;
+    detailed = Math.min(blocks.length, detailed + RIBBON_STEP);
+    void refreshRibbon(blocks);
+  }
+
+  const ribbon = $derived.by((): RibbonBlock[] => {
+    void extrasVersion;
+    return blocks.map((b) => {
+      const x = extras.get(b.hash);
+      return { height: b.height, hash: b.hash, time: b.time, nTx: b.nTx, weight: b.weight, subsidy: x?.subsidy ?? null, fees: x?.fees ?? null, feeRate: x?.feeRate ?? null, tag: x ? x.tag : null, bmm: bmmAt[b.height] ?? [] };
+    });
+  });
+
+  // A new block while the page is shown: it slides in once.
+  let topSeen: string | null = null;
+  $effect(() => {
+    const top = blocks[0]?.hash ?? null;
+    if (!top) return;
+    const first = topSeen === null;
+    const changed = topSeen !== top;
+    topSeen = top;
+    untrack(() => refreshRibbon(blocks));
+    if (first || !changed) return;
+    fresh = top;
+    const timer = setTimeout(() => (fresh = null), 1500);
+    return () => clearTimeout(timer);
+  });
+
+  async function pickBlock(hash: string) {
+    selectedBlock = hash;
+    list = 'blocks';
+    if (!detail.follow && (await showBlock(hash))) {
+      document.getElementById('explorer-title')?.scrollIntoView({ block: 'nearest' });
+    }
+  }
 
   async function showBlock(hash: string): Promise<boolean> {
     try {
@@ -237,12 +333,14 @@
     <button type="button" class="btn" onclick={() => { cache.clear(); blocks = []; refreshBlocks(); refreshMempool(); }}>Refresh</button>
   </form>
 
-  <div class="tabs" role="tablist" aria-label="Lists">
+  <BlockRibbon blocks={ribbon} selected={selectedBlock} {fresh} now={nowSecs} onselect={pickBlock} onmore={moreDetails} />
+
+  <div class="tabs" role="tablist" aria-label="Lists" id="explorer-lists">
     {#each TABS as tb (tb.id)}
       <button type="button" role="tab" aria-selected={list === tb.id} onclick={() => (list = tb.id as 'blocks' | 'mempool')}>{tb.id === 'mempool' ? `${t(tb.label)} (${mempoolTotal})` : t(tb.label)}</button>
     {/each}
   </div>
-  <div class="table-box">
+  <div class="table-box" use:fillHeight>
     {#if list === 'blocks'}
       <DataTable rows={blocks} columns={blockColumns} key={(b) => b.hash} bind:selected={selectedBlock} bind:sortKey={blockSort} bind:sortDir={blockDir} label="Blocks" empty="Loading…" onactivate={(b) => showBlock(b.hash)}>
         {#snippet cell(b, column)}
@@ -382,8 +480,10 @@
   .count input {
     width: 5.5rem;
   }
+  /* The list takes the height the window has left (fillHeight), 16rem at least. */
   .table-box {
     height: 21rem;
+    min-height: 16rem;
   }
   .hint {
     margin: 0.4rem 0 1rem;

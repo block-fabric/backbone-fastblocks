@@ -74,10 +74,8 @@ export const prefs = $state({
   fontAdjust: 0,
   unit: 'CHN' as Unit,
   mask: false,
-  /** How the window is laid out: workspace tabs, dashboard, compact sidebar (lib/layout.ts). */
+  /** How the window is laid out: workspace tabs or dashboard (lib/layout.ts). */
   layout: DEFAULT_LAYOUT as LayoutId,
-  /** The compact sidebar shows the names of the pages, not only their icons. */
-  sidebarExpanded: false,
   lastWallet: null as string | null,
   /** Wallet options (OptionsModel): coin control features, PSBT controls, subtract the fee by default. */
   coinControl: false,
@@ -292,9 +290,10 @@ export function applyPrefs(raw: Record<string, unknown>): void {
   if (typeof raw.fontAdjust === 'number') prefs.fontAdjust = clampFontAdjust(raw.fontAdjust);
   if (isUnit(raw.unit)) prefs.unit = raw.unit;
   if (typeof raw.mask === 'boolean') prefs.mask = raw.mask;
-  if (isLayout(raw.layout)) prefs.layout = raw.layout;
+  // A layout no longer known (the compact sidebar 'sidebar', gone) becomes the default, the dashboard.
+  if (raw.layout !== undefined) prefs.layout = isLayout(raw.layout) ? raw.layout : DEFAULT_LAYOUT;
   if (typeof raw.lastWallet === 'string') prefs.lastWallet = raw.lastWallet;
-  for (const key of ['coinControl', 'psbtControls', 'subtractFeeDefault', 'feeMinimized', 'coinTree', 'sidebarExpanded', 'showTray', 'minimizeToTray', 'minimizeOnClose'] as const) {
+  for (const key of ['coinControl', 'psbtControls', 'subtractFeeDefault', 'feeMinimized', 'coinTree', 'showTray', 'minimizeToTray', 'minimizeOnClose'] as const) {
     if (typeof raw[key] === 'boolean') prefs[key] = raw[key];
   }
   if (raw.feeMode === 'smart' || raw.feeMode === 'custom') prefs.feeMode = raw.feeMode;

@@ -1,6 +1,6 @@
 <script lang="ts">
   // The main window once the node runs, in the layout chosen in Settings → Appearance:
-  // workspace tabs, dashboard, or compact sidebar (doc/webui-layouts.md). Whatever the
+  // workspace tabs or dashboard (doc/webui-layouts.md). Whatever the
   // layout: the same pages, the command palette (Ctrl+K), the notices of new transactions.
   import { untrack } from 'svelte';
   import CommandPalette from '../components/CommandPalette.svelte';
@@ -9,7 +9,6 @@
   import { closeDetail, detail } from '../lib/detail.svelte';
   import { go, nav, PAGES } from '../lib/nav.svelte';
   import { prefs, wallets } from '../lib/state.svelte';
-  import Compact from './layouts/Compact.svelte';
   import Dashboard from './layouts/Dashboard.svelte';
   import Workspace from './layouts/Workspace.svelte';
 
@@ -23,16 +22,14 @@
     untrack(closeDetail);
   });
 
-  // Home belongs to the dashboard, which starts on it.
+  // Every layout starts on Home (unless a page was asked for before: a payment URI opens Send).
   let started = false;
   $effect(() => {
-    const layout = prefs.layout;
     const page = nav.page;
     // Followed too: the page can be ready before the preferences are loaded (a fast start).
     const loaded = prefs.loaded;
     untrack(() => {
-      if (layout !== 'dashboard' && page === 'home') go('overview');
-      else if (layout === 'dashboard' && page === 'overview' && !started && loaded) go('home');
+      if (page === 'overview' && !started && loaded) go('home');
       if (loaded) started = true;
     });
   });
@@ -40,17 +37,15 @@
 
 <a class="skip" href="#content">Skip to the page</a>
 <div class="frame">
-  <!-- The integrated title bar: the workspace's is its top bar; the other layouts have a slim strip. -->
+  <!-- The integrated title bar: the workspace's is its top bar; the dashboard has a slim strip. -->
   {#if prefs.layout !== 'workspace'}
-    <TitleStrip title={PAGES[nav.page]?.title ?? ''} detail={wallets.current !== null ? wallets.current || 'default wallet' : ''} actions={prefs.layout === 'sidebar'} />
+    <TitleStrip title={PAGES[nav.page]?.title ?? ''} detail={wallets.current !== null ? wallets.current || 'default wallet' : ''} />
   {/if}
   <div class="layout">
     {#if prefs.layout === 'workspace'}
       <Workspace />
-    {:else if prefs.layout === 'dashboard'}
-      <Dashboard />
     {:else}
-      <Compact />
+      <Dashboard />
     {/if}
   </div>
 </div>

@@ -242,11 +242,14 @@
 
 <div class="multisig" class:page={!embedded}>
   {#if !embedded}<header class="page-head"><h1>Multisig lounge</h1></header>{/if}
+  <!-- Inside another page (Tools, Advanced transactions), its tabs are on that page's row. -->
+  {#if !embedded}
   <div class="tabs" role="tablist" aria-label="Multisig lounge">
     {#each TABS as tb (tb.id)}
       <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (setOwnTab('multisig', tb.id))}>{t(tb.label)}</button>
     {/each}
   </div>
+  {/if}
 
   {#if tab === 'keys'}
     <section class="panel">

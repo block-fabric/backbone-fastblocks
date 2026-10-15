@@ -616,57 +616,6 @@
   .auto {
     margin: 0;
   }
-  .switch {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .switch input {
-    position: absolute;
-    opacity: 0;
-    width: 1px;
-    height: 1px;
-  }
-  .track {
-    position: relative;
-    width: 2.4rem;
-    height: 1.35rem;
-    border-radius: 999px;
-    background: var(--surface-2);
-    border: 1px solid var(--line);
-    transition: background 0.15s;
-  }
-  .track::after {
-    content: '';
-    position: absolute;
-    top: 0.15rem;
-    left: 0.15rem;
-    width: 0.95rem;
-    height: 0.95rem;
-    border-radius: 50%;
-    background: var(--text-muted);
-    transition: transform 0.15s;
-  }
-  .switch input:checked + .track {
-    background: var(--accent);
-    border-color: var(--accent);
-  }
-  .switch input:checked + .track::after {
-    transform: translateX(1.05rem);
-    background: var(--on-accent);
-  }
-  .switch input:focus-visible + .track {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .track,
-    .track::after {
-      transition: none;
-    }
-  }
   .change {
     display: flex;
     flex-wrap: wrap;

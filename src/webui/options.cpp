@@ -200,6 +200,7 @@ bool NodeOptions::NamesFile(const std::string& name)
 UniValue NodeOptions::ChooseFile(const std::string& name)
 {
     if (!NamesFile(name)) throw std::runtime_error("No option naming a file: " + name);
+    const std::lock_guard changes{ChangesMutex()};
     if (m_node.isSettingIgnored(name)) throw std::runtime_error("This option is set on the command line or in the configuration file.");
     if (!m_choose_file) throw std::runtime_error("Files cannot be chosen here.");
     const std::string current{SettingToString(m_node.getPersistentSetting(name), "")};
@@ -215,6 +216,12 @@ UniValue NodeOptions::ChooseFile(const std::string& name)
     return Get();
 }
 
+std::mutex& NodeOptions::ChangesMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
 bool NodeOptions::NamesProgram(const std::string& name)
 {
     return name == "signer";
@@ -223,6 +230,7 @@ bool NodeOptions::NamesProgram(const std::string& name)
 UniValue NodeOptions::ChooseProgram(const std::string& name)
 {
     if (!NamesProgram(name)) throw std::runtime_error("No option naming a program: " + name);
+    const std::lock_guard changes{ChangesMutex()};
     if (m_node.isSettingIgnored(name)) throw std::runtime_error("This option is set on the command line or in the configuration file.");
     if (!m_choose_program) throw std::runtime_error("Programs cannot be chosen here.");
     const std::string current{SettingToString(m_node.getPersistentSetting(name), "")};
@@ -238,6 +246,8 @@ UniValue NodeOptions::ChooseProgram(const std::string& name)
 
 bool NodeOptions::ValidProxyAddress(const std::string& text)
 {
+    // No user name or password (user:pass@host): the address alone.
+    if (text.find('@') != std::string::npos) return false;
     uint16_t port{0};
     std::string hostname;
     // An address without a port: the port has a field of its own.
@@ -412,6 +422,8 @@ UniValue NodeOptions::Get()
 
 UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
 {
+    // One change at a time, from the question to the write (see ChangesMutex).
+    const std::lock_guard changes{ChangesMutex()};
     const auto setting{[&](const std::string& n) { return m_node.getPersistentSetting(n); }};
     // OptionsModel UpdateRwSetting: these numbers are written as strings, for the versions that read them so.
     const auto update{[&](const std::string& n, const common::SettingsValue& v) {
@@ -498,6 +510,45 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
     }};
     (void)set_optional_text;
 
+    // The changes that hand the traffic or the control of the node to someone else: confirmed by the user
+    // in a dialog of the desktop, which the page can neither draw nor answer, saying exactly what changes.
+    bool declined{false};
+    const auto confirmed{[&](const std::string& title, const std::string& message, const std::string& accept) {
+        if (!m_confirm) throw std::runtime_error("This change needs a confirmation of the desktop.");
+        if (m_confirm(Window::ConfirmDialog{.title = title, .message = message, .accept = accept})) return true;
+        declined = true;
+        return false;
+    }};
+    const auto proxy_ip{[&](const std::string& text) {
+        if (text.find('@') != std::string::npos) throw std::runtime_error("A proxy address cannot hold a user name or a password.");
+        if (!ValidProxyAddress(text)) throw std::runtime_error("The supplied proxy address is invalid.");
+        return text;
+    }};
+    const auto proxy_port{[&](const UniValue& v) {
+        const int64_t port{Int(v)};
+        if (port < 1 || port > 65535) throw std::runtime_error("The supplied proxy address is invalid.");
+        return strprintf("%d", port);
+    }};
+    // The question for a proxy (n: "proxy" or "onion") about to be used at this address.
+    const auto confirm_proxy{[&](const std::string& n, const std::string& address, bool already_used) {
+        const bool tor{n == "onion"};
+        const std::string title{tor ? "Tor proxy" : "Proxy"};
+        std::string message{tor ? strprintf("Reach Tor onion services through %s?", address) : strprintf("Route all connections through %s?", address)};
+        if (already_used) message += strprintf("\n\nIt is %s now.", ProxyString(true, proxy_field(n, true, ""), proxy_field(n, false, "")));
+        message += tor ? "\n\nThe SOCKS5 proxy at this address will see which onion services this node connects to, and can choose its peers there."
+                       : "\n\nThe SOCKS5 proxy at this address will see every connection of this node, the transactions it sends first and its peers, and can choose them. "
+                         "Accept only a proxy you run or trust.";
+        return confirmed(title, message, tor ? "Use this Tor proxy" : "Use this proxy");
+    }};
+    // A new address for a proxy: asked when it is in use (a proxy turned off is asked when turned on).
+    const auto set_proxy_address{[&](const std::string& n, const std::string& ip, const std::string& port) {
+        if (ip == proxy_field(n, true, "") && port == proxy_field(n, false, "")) return;
+        if (proxy_now(n, "").is_set && !confirm_proxy(n, ProxyString(true, ip, port), true)) return;
+        // Exactly the address that was asked about (the one of the request, not read again).
+        set_proxy_field(n, true, ip, "");
+        set_proxy_field(n, false, port, "");
+    }};
+
     const UniValue now{Get()};
     if (name == "dbcache") {
         const int64_t mib{Int(value)};
@@ -530,17 +581,39 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
     } else if (name == "listen") {
         set_flag("listen", Bool(value), now["listen"].get_bool());
     } else if (name == "server") {
-        set_flag("server", Bool(value), now["server"].get_bool());
+        const bool on{Bool(value)};
+        if (!on || now["server"].get_bool() ||
+            confirmed("RPC server", "Turn on the RPC server?\n\nPrograms on this computer that have the cookie or the RPC password of this node "
+                                    "(and others, if -rpcbind and -rpcallowip allow them) will be able to control the node and spend from its wallets.",
+                      "Turn on")) {
+            set_flag("server", on, now["server"].get_bool());
+        }
     } else if (name == "proxyUse" || name == "torUse") {
-        set_proxy_use(name == "proxyUse" ? "proxy" : "onion", Bool(value), "");
+        const std::string n{name == "proxyUse" ? "proxy" : "onion"};
+        const bool on{Bool(value)};
+        if (!on || proxy_now(n, "").is_set) {
+            set_proxy_use(n, on, "");
+        } else {
+            const std::string shown{ProxyString(true, proxy_field(n, true, ""), proxy_field(n, false, ""))};
+            if (confirm_proxy(n, shown, false)) {
+                // What is turned on is the address the user accepted, never another one.
+                if (ProxyString(true, proxy_field(n, true, ""), proxy_field(n, false, "")) != shown) {
+                    throw std::runtime_error("The address of the proxy changed while you were asked: nothing was changed. Try again.");
+                }
+                set_proxy_use(n, true, "");
+            }
+        }
     } else if (name == "proxyIp" || name == "torIp") {
-        const std::string ip{Str(value)};
-        if (!ValidProxyAddress(ip)) throw std::runtime_error("The supplied proxy address is invalid.");
-        set_proxy_field(name == "proxyIp" ? "proxy" : "onion", true, ip, "");
+        const std::string n{name == "proxyIp" ? "proxy" : "onion"};
+        set_proxy_address(n, proxy_ip(Str(value)), proxy_field(n, false, ""));
     } else if (name == "proxyPort" || name == "torPort") {
-        const int64_t port{Int(value)};
-        if (port < 1 || port > 65535) throw std::runtime_error("The supplied proxy address is invalid.");
-        set_proxy_field(name == "proxyPort" ? "proxy" : "onion", false, strprintf("%d", port), "");
+        const std::string n{name == "proxyPort" ? "proxy" : "onion"};
+        set_proxy_address(n, proxy_field(n, true, ""), proxy_port(value));
+    } else if (name == "proxyAddress" || name == "torAddress") {
+        // The address and the port at once: one question.
+        const std::string n{name == "proxyAddress" ? "proxy" : "onion"};
+        if (!value.isObject()) throw std::runtime_error("{ip, port} is needed");
+        set_proxy_address(n, proxy_ip(Str(value.find_value("ip"))), proxy_port(value.find_value("port")));
     } else if (name == "lang") {
         set_text("lang", Str(value));
 #if WEBUI_SIDECHAIN
@@ -583,7 +656,9 @@ UniValue NodeOptions::Set(const std::string& name, const UniValue& value)
     } else {
         throw std::runtime_error("No option " + name);
     }
-    return Get();
+    UniValue out{Get()};
+    if (declined) out.pushKV("declined", true);
+    return out;
 }
 
 OptionsJournal::OptionsJournal(AppConfig& config, ArgsManager& args, KeyFn key) : m_config(config), m_args(args), m_key(std::move(key)) {}
@@ -626,6 +701,8 @@ void OptionsJournal::Commit()
 
 size_t OptionsJournal::Undo(interfaces::Node& node, const std::function<void(bool)>& restart)
 {
+    // Not while a change of the options waits for a confirmation (NodeOptions::ChangesMutex first).
+    const std::lock_guard changes{NodeOptions::ChangesMutex()};
     LOCK(m_mutex);
     const std::string key{m_key()};
     const UniValue undo{m_config.Value(key)};

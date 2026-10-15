@@ -1,22 +1,19 @@
 <script lang="ts">
-  // Opens the command palette: a search field to look at, or an icon in narrow places.
+  // Opens the command palette: a search field to look at.
   import Icon from './Icon.svelte';
   import { openPalette } from '../lib/commands.svelte';
-
-  let { compact = false }: { compact?: boolean } = $props();
 </script>
 
 <button
   type="button"
   class="palette-button"
-  class:compact
   aria-label="Search pages and actions (Ctrl+K)"
   title="Search pages and actions (Ctrl+K)"
   aria-haspopup="dialog"
   onclick={openPalette}
 >
   <Icon name="search" size={16} />
-  {#if !compact}<span class="grow">Search…</span><kbd>Ctrl K</kbd>{/if}
+  <span class="grow">Search…</span><kbd>Ctrl K</kbd>
 </button>
 
 <style>
@@ -39,13 +36,5 @@
   .palette-button:hover {
     background: var(--raised);
     color: var(--text);
-  }
-  .palette-button.compact {
-    min-width: 0;
-    width: 2.3rem;
-    justify-content: center;
-    padding: 0;
-    border-color: transparent;
-    background: none;
   }
 </style>

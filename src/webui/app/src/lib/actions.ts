@@ -71,3 +71,30 @@ export function stacked(table: HTMLTableElement) {
     },
   };
 }
+
+/**
+ * Give an element the height its scrolling page has left below it, `reserve` pixels kept for what
+ * follows (a hint line), and `min` at least: a list that grows with the window (the block explorer).
+ * Measured when it appears, when the window (or the page around it) changes size.
+ */
+export function fillHeight(node: HTMLElement, options: { reserve?: number; min?: number } = {}) {
+  const reserve = options.reserve ?? 48;
+  const min = options.min ?? 256;
+  const scroller = (node.closest('main, .content') as HTMLElement | null) ?? document.documentElement;
+  const fit = () => {
+    const top = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    node.style.height = `${Math.max(min, Math.floor(scroller.clientHeight - top - reserve))}px`;
+  };
+  const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => fit());
+  observer?.observe(scroller);
+  window.addEventListener('resize', fit);
+  fit();
+  const later = setTimeout(fit, 300);
+  return {
+    destroy() {
+      observer?.disconnect();
+      window.removeEventListener('resize', fit);
+      clearTimeout(later);
+    },
+  };
+}

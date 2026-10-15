@@ -1,17 +1,20 @@
 <script lang="ts">
-  // Workspace tabs: four areas across the top (Wallet, Chain, Sidechains, Node), each with its
-  // sub-tabs; the actions of the old menu bar in the "More" menu and the palette; the detail panel
-  // at the right of the page; the status bar.
+  // Workspace tabs: Home and five areas across the top (Wallet, Chain, Sidechains, Tools, Node), each
+  // with its sub-tabs; the actions of the old menu bar in the "Menus" menu and the palette; the detail
+  // panel (or Home's Send/Receive side panel) at the right of the page; the status bar.
   import { t } from '../../lib/i18n.svelte';
   import Brand from '../../components/Brand.svelte';
   import DetailPanel from '../../components/DetailPanel.svelte';
   import Icon from '../../components/Icon.svelte';
   import MenuButton from '../../components/MenuButton.svelte';
   import PaletteButton from '../../components/PaletteButton.svelte';
+  import QuickPanel from '../../components/QuickPanel.svelte';
   import StatusBar from '../../components/StatusBar.svelte';
   import TopActions from '../../components/TopActions.svelte';
   import WalletPicker from '../../components/WalletPicker.svelte';
   import WindowControls from '../../components/WindowControls.svelte';
+  import { detail } from '../../lib/detail.svelte';
+  import { closeQuick } from '../../lib/quick.svelte';
   import { buildCommands, menuSections, pageAvailable, pageDisabled } from '../../lib/commands.svelte';
   import { AREAS, areaOf, isAt, placeLabel, type Area, type Place } from '../../lib/layout';
   import { go, nav, PAGES } from '../../lib/nav.svelte';
@@ -26,6 +29,15 @@
   const area = $derived(areaOf(nav.page));
   const tabs = $derived(area.tabs.filter((t) => pageAvailable(t.page)));
   const sections = $derived(menuSections(buildCommands()));
+
+  // One panel at the right, as in the dashboard: a row opened in the detail panel closes Home's
+  // Send/Receive; so does a new page.
+  $effect(() => {
+    if (detail.item) closeQuick();
+  });
+  $effect(() => {
+    if (nav.page !== 'home') closeQuick();
+  });
 
   /** The last place of each area, to come back to it. */
   const last: Partial<Record<Area['id'], Place>> = {};
@@ -56,10 +68,10 @@
     onmousedown={(e) => top && titleBarMouseDown(e, top)}
     ondblclick={(e) => top && titleBarDoubleClick(e, top)}
   >
-    <Brand onclick={() => go('overview')} />
+    <Brand onclick={() => go('home')} />
     <nav class="areas" aria-label="Areas">
       {#each AREAS as a, i (a.id)}
-        <button type="button" class="area" aria-current={area.id === a.id ? 'true' : undefined} onclick={() => enter(a)} onkeydown={(e) => areaKey(e, i)}>
+        <button type="button" class="area" aria-label={t(a.label)} title={t(a.label)} aria-current={area.id === a.id ? 'true' : undefined} onclick={() => enter(a)} onkeydown={(e) => areaKey(e, i)}>
           <Icon name={a.icon} size={18} />
           <span class="label">{t(a.label)}</span>
         </button>
@@ -97,6 +109,7 @@
       <PageView />
     </main>
     <DetailPanel />
+    <QuickPanel />
   </div>
   <StatusBar />
 </div>
@@ -120,7 +133,7 @@
     display: flex;
     align-items: center;
     gap: 0.2rem;
-    min-width: 0;
+    flex: none;
     padding: 0.22rem;
     border: 1px solid var(--line);
     border-radius: 999px;
@@ -150,6 +163,11 @@
     background: var(--accent);
     box-shadow: 0 6px 18px -8px var(--accent);
   }
+  .area[aria-current='true']:hover {
+    color: var(--on-accent);
+    background: var(--accent);
+    box-shadow: var(--glow);
+  }
   .top.titlebar {
     padding-right: 0;
     user-select: none;
@@ -170,7 +188,6 @@
     gap: 0.15rem;
     padding: 0.35rem 1.1rem 0;
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   .subtabs button {
     position: relative;
@@ -216,8 +233,27 @@
   .content[data-page='node'] :global(.page > .tabs) {
     display: none;
   }
-  .tools :global(.wallet) {
+  .tools :global(.wallet),
+  .tools :global(.palette-button) {
     flex: none;
+  }
+  /* Home and five areas take room: on a smaller window only the current area keeps its name (the
+     others their icon, named in their tooltip and for screen readers). */
+  @media (min-width: 761px) and (max-width: 1380px) {
+    .top.titlebar .area:not([aria-current='true']) .label {
+      display: none;
+    }
+    .top.titlebar .area:not([aria-current='true']) {
+      padding: 0 0.7rem;
+    }
+  }
+  @media (min-width: 761px) and (max-width: 1240px) {
+    .area:not([aria-current='true']) .label {
+      display: none;
+    }
+    .area:not([aria-current='true']) {
+      padding: 0 0.7rem;
+    }
   }
   /* The buttons of the window take room: the palette field gives it first. */
   @media (max-width: 1320px) {

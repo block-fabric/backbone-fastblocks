@@ -1,6 +1,7 @@
 <script lang="ts">
   // The network traffic tab (TrafficGraphWidget): rates in and out over a range of 5 minutes to a day,
   // the totals, and Clear.
+  import { every } from '../lib/poll';
   import { t } from '../lib/i18n.svelte';
   import { formatBytes } from '../lib/format';
   import { prefs, savePrefs } from '../lib/state.svelte';
@@ -10,8 +11,7 @@
   const H = 300;
   let now = $state(Date.now());
   $effect(() => {
-    const timer = setInterval(() => (now = Date.now()), 1000);
-    return () => clearInterval(timer);
+    return every(1000, () => (now = Date.now()));
   });
 
   const points = $derived(rates(traffic.samples, prefs.trafficRange, now, traffic.clearedAt));

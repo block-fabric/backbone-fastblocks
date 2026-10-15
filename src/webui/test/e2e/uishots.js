@@ -1,5 +1,6 @@
 // Pictures of the pages the user decisions of 2026-10-15 changed, in Midnight and Light: Receive →
-// Addresses, Send with "Choose coins" on, Tools (its tabs), Advanced transactions (its tabs).
+// Addresses, Send with "Choose coins" on, Tools (its tabs), Advanced transactions (its tabs); and Home,
+// in the workspace (its first area) and the dashboard (the compact sidebar is gone, Home in every layout).
 (async () => {
   const { rpc, sleep, T, waitFor, check, snapshot, finish } = E2E;
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -29,6 +30,18 @@
     await rpc('lockunspent', [false, [{ txid: coins[0].txid, vout: coins[0].vout }]], 'demo');
 
     for (const theme of ['midnight', 'light']) {
+      for (const layout of ['workspace', 'dashboard']) {
+        T().savePrefs({ theme, layout });
+        T().go('home');
+        await waitFor(`${layout}: Home`, () => { const h = $('.home'); return h && h.textContent.includes('CHN') && h.querySelector('table tbody tr'); }, 30000);
+        if (layout === 'workspace') {
+          const first = $('.workspace .areas .area');
+          await check(`workspace ${theme}: Home, the first area, is the one shown`, first && first.textContent.includes('Home') && first.getAttribute('aria-current') === 'true', first ? first.outerHTML.slice(0, 160) : 'none');
+        }
+        await sleep(800);
+        await snapshot(`${layout}-home-${theme}`);
+      }
+
       T().savePrefs({ theme, layout: 'dashboard' });
       T().go('receive', 'addresses');
       await waitFor('the addresses', () => { const g = $('[role="grid"][aria-label="Receiving addresses"]'); return g && g.textContent.includes('Coffee shop'); }, 30000);

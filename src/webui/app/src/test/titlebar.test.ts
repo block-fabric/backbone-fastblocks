@@ -181,10 +181,10 @@ describe('every layout', () => {
   afterEach(() => {
     wallets.list = [];
     wallets.current = null;
-    prefs.layout = 'sidebar';
+    prefs.layout = 'dashboard';
   });
 
-  for (const layout of ['workspace', 'dashboard', 'sidebar'] as const) {
+  for (const layout of ['workspace', 'dashboard'] as const) {
     it(`${layout}: has the title bar at the top, with the buttons of the window`, async () => {
       prefs.layout = layout;
       const { container, unmount } = render(Shell);

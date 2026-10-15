@@ -106,11 +106,14 @@
 
 <div class="crypto" class:page={!embedded}>
   {#if !embedded}<header class="page-head"><h1>Crypto tools</h1></header>{/if}
+  <!-- Inside another page (Tools, Advanced transactions), its tabs are on that page's row. -->
+  {#if !embedded}
   <div class="tabs" role="tablist" aria-label="Crypto tools">
     {#each TABS as tb (tb.id)}
       <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (setOwnTab('crypto', tb.id))}>{t(tb.label)}</button>
     {/each}
   </div>
+  {/if}
 
   {#if tab === 'hash'}
     <section class="panel">

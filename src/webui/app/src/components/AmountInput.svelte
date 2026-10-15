@@ -114,6 +114,6 @@
     border-left: none;
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
-    background: var(--surface-2);
+    background-color: var(--surface-2);
   }
 </style>

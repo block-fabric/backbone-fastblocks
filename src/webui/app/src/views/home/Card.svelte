@@ -45,9 +45,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    transition:
-      border-color 160ms,
-      box-shadow 200ms;
+    transition: border-color 160ms;
   }
   .card:hover {
     border-color: var(--line-strong);

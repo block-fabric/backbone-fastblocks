@@ -1,6 +1,7 @@
 <script lang="ts">
   // The peers tab of the node window: the peers (PeerTableModel) with the details of the one
   // selected, a menu to disconnect or ban it, and the banned addresses (BanTableModel) to unban.
+  import { every } from '../lib/poll';
   import SafeText from './SafeText.svelte';
   import { t } from '../lib/i18n.svelte';
   import ContextMenu, { type ContextItem } from './ContextMenu.svelte';
@@ -49,9 +50,7 @@
   }
 
   $effect(() => {
-    refresh();
-    const timer = setInterval(refresh, 2000);
-    return () => clearInterval(timer);
+    return every(2000, refresh, { now: true });
   });
   $effect(() => {
     void node.bansChanged;

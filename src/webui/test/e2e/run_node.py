@@ -32,7 +32,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_smoke import App, check_shutdown, environment, script, short_tmp  # noqa: E402
+from run_smoke import App, check_shutdown, environment, ports_taken, script, short_tmp  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
@@ -87,6 +87,8 @@ def main():
     parser.add_argument("--shots", required=True, type=Path, help="folder for the pictures")
     parser.add_argument("--port", type=int, default=29490)
     args = parser.parse_args()
+    # Stopped from outside (timeout, kill): the cleanup below still runs, and stops what was started here.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(124))
 
     for program in ["xvfb-run", "dbus-daemon"]:
         if shutil.which(program) is None:
@@ -95,6 +97,11 @@ def main():
     chainsd = args.app.resolve().parent / "chainsd"
     if not chainsd.is_file():
         print(f"no chainsd next to {args.app}", file=sys.stderr)
+        return 2
+    peer_port = args.port + 10
+    taken = ports_taken([args.port, args.port + 1, peer_port, peer_port + 1])
+    if taken:
+        print(f"ports {taken} are taken (a node left from an earlier run?): stop it, or give another --port", file=sys.stderr)
         return 2
     base = args.tmp.resolve()
     if base.exists():
@@ -131,11 +138,10 @@ def main():
     # A second node, to be a peer.
     peer_dir = base / "peer"
     peer_dir.mkdir()
-    peer_port = args.port + 10
-    subprocess.run([str(chainsd), "-regtest", f"-datadir={peer_dir}", f"-port={peer_port}", f"-rpcport={peer_port + 1}", "-bind=127.0.0.1",
-                    "-dnsseed=0", "-fixedseeds=0", "-daemonwait"], check=True, env=env, stdout=subprocess.DEVNULL)
-
+    app = None
     try:
+        subprocess.run([str(chainsd), "-regtest", f"-datadir={peer_dir}", f"-port={peer_port}", f"-rpcport={peer_port + 1}", "-bind=127.0.0.1",
+                        "-dnsseed=0", "-fixedseeds=0", "-daemonwait"], check=True, env=env, stdout=subprocess.DEVNULL, timeout=120)
         print("== node", flush=True)
         page = base / "node.js"
         page.write_text(script("node.js", f"window.__E2E_FILES = {json.dumps(str(files))};\nwindow.__E2E_BIN = {json.dumps(str(bindir))};\n"))
@@ -146,7 +152,7 @@ def main():
         code = app.wait(1800)
         result = app.result()
         if code != 0 or not result or result["failures"]:
-            failures.append(f"node run: exit {code}, {result['failures'] if result else 'no result'}")
+            failures.append(f"node run: exit {code}, {result['failures'] if result else 'no result'}; the page last said: {app.last}")
         # The app may stop before the page can say it asked for the reset: what the reset did is checked below.
         if "failed" in app.events.get("RESET", ""):
             failures.append(f"no reset of the options: {app.events.get('RESET')}")
@@ -196,6 +202,9 @@ def main():
                 failures.append(f"missing pictures: {missing}")
             print(f"  {result['passed']} checks passed, {len(result['shots'])} pictures in {args.shots}", flush=True)
     finally:
+        # Even when the runner is interrupted, or a check above throws: nothing started here is left running.
+        if app is not None:
+            app.stop()
         try:
             rpc(peer_dir, peer_port + 1, "stop")
         except Exception as e:  # noqa: BLE001

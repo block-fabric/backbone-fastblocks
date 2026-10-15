@@ -14,7 +14,7 @@
     menusButton.click();
     await check('C1 the other menus are there', menus.includes('Chains') && menus.includes('Tools'), menus.join(', '));
     await check('C1 no wallet menus', !menus.includes('Your wallet') && !menus.includes('Banking'), menus.join(', '));
-    // The dashboard starts on its home: its balance card says why; then the overview.
+    // Every layout starts on Home: its balance card says why; then the overview.
     await check('C1 the home says why', T().nav.page !== 'home' || text('.content').includes('-disablewallet'), text('.content').slice(0, 120));
     T().go('overview');
     await sleep(400);

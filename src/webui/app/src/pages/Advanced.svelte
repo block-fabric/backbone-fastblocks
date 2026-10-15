@@ -3,7 +3,9 @@
   // (PSBT) and the multisig lounge are the tabs of one page, with the wallet. Their old page ids lead here
   // (PageInfo.tabOf); each keeps its own tabs after "/" in nav.tab ("messages/verify", "psbt/file").
   import { t } from '../lib/i18n.svelte';
-  import { nav, outerTab } from '../lib/nav.svelte';
+  import TabRow from '../components/TabRow.svelte';
+  import { SUBTABS, subTabOf } from '../lib/subtabs';
+  import { nav, outerTab, setOwnTab, type PageId } from '../lib/nav.svelte';
   import Messages from './Messages.svelte';
   import Multisig from './Multisig.svelte';
   import Psbt from './Psbt.svelte';
@@ -14,15 +16,18 @@
     { id: 'multisig', label: 'Multisig' },
   ];
   const tab = $derived(TABS.some((tb) => tb.id === outerTab()) ? outerTab() : 'messages');
+  // The sub-tabs of the page shown in this tab, if it has some (SUBTABS).
+  const subRow = $derived.by(() => {
+    const page = tab as PageId;
+    const sub = SUBTABS[page];
+    return sub ? { label: sub.label, tabs: sub.tabs, current: subTabOf(page), select: (id: string) => setOwnTab(page, id) } : null;
+  });
 </script>
 
 <div class="page advanced">
   <header class="page-head"><h1>Advanced transactions</h1></header>
-  <div class="tabs" role="tablist" aria-label="Advanced transactions">
-    {#each TABS as tb (tb.id)}
-      <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (nav.tab = tb.id)}>{t(tb.label)}</button>
-    {/each}
-  </div>
+  <!-- The tabs of the tab shown follow on the same row, after an arrow. -->
+  <TabRow label="Advanced transactions" tabs={TABS} current={tab} select={(id) => (nav.tab = id)} sub={subRow} />
   {#key tab}
     {#if tab === 'messages'}
       <Messages embedded />

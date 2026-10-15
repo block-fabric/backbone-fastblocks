@@ -4,7 +4,8 @@
   // amount, address, label, confirmations, age and lock; sorted, filtered, all or none chosen; what
   // the coins chosen hold against what is sent, and the estimate of the host (CoinSummary). Only the
   // coins chosen are spent (the host's coin control: no other inputs once some are selected). The
-  // list is virtual (DataTable): thousands of coins scroll as fast as ten.
+  // list is virtual (DataTable): thousands of coins scroll as fast as ten. With purpose 'prove' (the
+  // Proof of funds): the coins to prove, locked ones too; nothing about sending.
   import { t } from '../lib/i18n.svelte';
   import SafeText from './SafeText.svelte';
   import Amount from './Amount.svelte';
@@ -22,10 +23,12 @@
   let {
     wallet,
     selected = $bindable([]),
-    amounts,
-    subtractFee,
-    fee,
-  }: { wallet: string; selected?: Outpoint[]; amounts: bigint[]; subtractFee: boolean; fee: FeeChoice } = $props();
+    amounts = [],
+    subtractFee = false,
+    fee = { confTarget: 6 },
+    purpose = 'send',
+  }: { wallet: string; selected?: Outpoint[]; amounts?: bigint[]; subtractFee?: boolean; fee?: FeeChoice; purpose?: 'send' | 'prove' } = $props();
+  const proving = $derived(purpose === 'prove');
 
   type Row = Coin & { key: string };
   type Show = 'all' | 'free' | 'unconfirmed' | 'locked';
@@ -53,8 +56,8 @@
       coins = groups.flatMap((g) => g.coins.map((c) => ({ ...c, label: c.change ? '' : c.label, key: keyOf(c) })));
       now = Math.floor(Date.now() / 1000);
       error = '';
-      // Locked coins, and coins spent meanwhile, are no longer chosen.
-      const free = new Set(coins.filter((c) => !c.locked).map((c) => c.key));
+      // Locked coins (unless proven), and coins spent meanwhile, are no longer chosen.
+      const free = new Set(coins.filter((c) => proving || !c.locked).map((c) => c.key));
       if (selected.some((o) => !free.has(keyOf(o)))) selected = selected.filter((o) => free.has(keyOf(o)));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -84,7 +87,7 @@
     const a = amounts;
     const s = subtractFee;
     const f = fee;
-    if (list.length === 0) {
+    if (list.length === 0 || proving) {
       summary = null;
       return;
     }
@@ -121,7 +124,7 @@
   }
 
   function toggle(c: Row) {
-    if (c.locked) return;
+    if (c.locked && !proving) return;
     const next = new Set(chosen);
     if (next.has(c.key)) next.delete(c.key);
     else next.add(c.key);
@@ -130,7 +133,7 @@
 
   function selectAll() {
     const next = new Set(chosen);
-    for (const c of visible) if (!c.locked) next.add(c.key);
+    for (const c of visible) if (proving || !c.locked) next.add(c.key);
     setChosen(next);
   }
 
@@ -180,15 +183,19 @@
   <div class="totals" aria-live="polite">
     <div class="total"><span class="muted">Chosen</span><strong>{coins.length ? `${selected.length} / ${coins.length}` : '0'}</strong></div>
     <div class="total"><span class="muted">The coins chosen hold</span><strong><Amount sats={chosenTotal} /></strong></div>
-    <div class="total"><span class="muted">To send</span><strong><Amount sats={toSend} /></strong></div>
+    {#if !proving}<div class="total"><span class="muted">To send</span><strong><Amount sats={toSend} /></strong></div>{/if}
     {#if lockedCount}<div class="total"><span class="muted">Locked</span><strong class="num">{lockedCount}</strong></div>{/if}
   </div>
-  {#if short}
+  {#if proving}
+    <p class="muted note">{selected.length === 0 ? t('No coin chosen yet: tick the coins to prove.') : t('The proof lists these %1 coin(s), and is signed with the addresses they are on.', selected.length)}</p>
+  {:else if short}
     <p class="warning" role="alert"><Icon name="alert" size={16} /> {t('Not enough: the coins chosen hold %1, less than the %2 to send. Choose more coins.', formatAmount(chosenTotal, prefs.unit, { withUnit: true }), formatAmount(toSend, prefs.unit, { withUnit: true }))}</p>
   {:else if shortOfFee}
     <p class="warning" role="alert"><Icon name="alert" size={16} /> {t('Not enough: the coins chosen do not pay for the fee too. Choose more coins.')}</p>
   {/if}
-  {#if selected.length === 0}
+  {#if proving}
+    <!-- Nothing is spent. -->
+  {:else if selected.length === 0}
     <p class="muted note">No coin chosen yet: tick the coins to spend. Only the coins chosen are spent; with none, the wallet chooses.</p>
   {:else}
     <p class="muted note">Only these {selected.length} coin(s) are spent.</p>
@@ -204,17 +211,17 @@
       bind:selected={current}
       bind:sortKey
       bind:sortDir
-      label="Coins of the wallet"
+      label={proving ? 'Coins to prove' : 'Coins of the wallet'}
       empty={!loaded ? 'Loading…' : coins.length ? 'Nothing matches the filter' : 'No coins to spend'}
       onactivate={(c) => toggle(c)}
       oncontext={(c, e) => (menu = { open: true, x: e.clientX, y: e.clientY })}
     >
       {#snippet cell(c, column)}
         {#if column.key === 'pick'}
-          {#if c.locked}
+          {#if c.locked && !proving}
             <span class="lock" title="Locked: unlock it to spend it"><Icon name="lock" size={15} label="Locked" /></span>
           {:else}
-            <input type="checkbox" aria-label="Spend this coin" checked={chosen.has(c.key)} onclick={(e) => e.stopPropagation()} onchange={() => toggle(c)} />
+             <input type="checkbox" aria-label={proving ? t('Prove this coin') : t('Spend this coin')} checked={chosen.has(c.key)} onclick={(e) => e.stopPropagation()} onchange={() => toggle(c)} />
           {/if}
         {:else if column.key === 'amount'}<span class:faint={c.locked}><Amount sats={c.sats} showUnit={false} /></span>
         {:else if column.key === 'address'}<SafeText text={c.address} />

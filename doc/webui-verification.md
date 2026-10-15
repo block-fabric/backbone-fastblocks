@@ -36,7 +36,7 @@ This round changed no code: only this report.
 | Midnight is the default theme | contrast.test.ts; refresh.js "Midnight is the look of a first start" | same | PASS |
 | Chain before tools | layouts.test.ts (menu groups, sidebar sections, workspace areas) | the sidebar and the Menus button | **PARTLY**: see "Failed" 2 |
 | Integrated title bar with minimize, maximize and close | titlebar.js (21 checks, Linux and Windows) | titlebar-*, window-frame.png (Windows) | PASS |
-| In Compact, the logo grows the sidebar | layouts.test.ts "compact: the logo grows the sidebar, and shrinks it again" | layouts/sidebar-expanded-light | PASS |
+| In Compact, the logo grows the sidebar | — (the compact sidebar is gone: user decision of 2026-10-15) | — | REMOVED |
 | All functions of chains-qt kept | parity list: 118/120 `[x]`; A15 (macOS) `[ ]`; B09 `[~]` (macOS) | | PASS, apart from macOS |
 | No credits to the inspiration | nothing under src/webui, doc/ or README names it; the About box and doc/webui.md list only the licences (webview, Svelte, QDarkStyleSheet, fonts, translators) | | PASS |
 

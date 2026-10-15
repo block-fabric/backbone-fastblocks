@@ -255,6 +255,8 @@ describe('settings', () => {
       'options.get': () => options,
       'options.set': (r) => {
         const { name, value } = r.params as { name: string; value: unknown };
+        // The RPC server turned on: the user says no in the dialog of the desktop.
+        if (name === 'server' && value === true) return { ...options, declined: true };
         Object.assign(options, { [name]: value, restartRequired: name !== 'natpmp' });
         return { ...options };
       },
@@ -275,6 +277,16 @@ describe('settings', () => {
     await fireEvent.input(document.getElementById('opt-proxy-ip')!, { target: { value: 'bad' } });
     await fireEvent.change(document.getElementById('opt-proxy-ip')!);
     await waitFor(() => screen.getByText('The supplied proxy address is invalid.'));
+    // Declined in the confirmation of the desktop: the switch shows what is still set.
+    nav.tab = 'main';
+    const server = (await waitFor(() => {
+      const el = document.getElementById('opt-server');
+      if (!el) throw new Error('not yet');
+      return el;
+    })) as HTMLInputElement;
+    await fireEvent.click(server);
+    await waitFor(() => expect(calls.some((c) => c.method === 'options.set' && (c.params as { name: string }).name === 'server')).toBe(true));
+    await waitFor(() => expect(server.checked).toBe(false));
   });
 });
 

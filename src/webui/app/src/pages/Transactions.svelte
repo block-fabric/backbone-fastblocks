@@ -26,6 +26,7 @@
     dateRange,
     filterRecords,
     plainText,
+    sortNewestFirst,
     statusText,
     transactionsCsv,
     TYPE_FILTERS,
@@ -207,7 +208,7 @@
 
   async function exportCsv() {
     // The rows as shown: filtered and sorted.
-    const sorted = [...shown].sort((a, b) => b.time - a.time || b.sortKey.localeCompare(a.sortKey));
+    const sorted = sortNewestFirst(shown);
     try {
       const path = await saveTextAs({ title: 'Export Transaction History', name: 'transactions.csv', filters: [FILTERS.csv] }, transactionsCsv(sorted, prefs.unit));
       if (path) toast('success', t('Exporting Successful'), t('The transaction history was successfully saved to %1.', path));

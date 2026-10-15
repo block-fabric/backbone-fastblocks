@@ -83,17 +83,32 @@
     }
   }
 
-  async function set<K extends keyof NodeOptionValues>(name: K, value: NodeOptionValues[K]) {
+  async function set<K extends keyof NodeOptionValues>(name: K | 'proxyAddress' | 'torAddress', value: NodeOptionValues[K] | { ip: string; port: number }) {
     if (!options) return;
     const before = options.restartRequired;
     try {
       options = await host.setOption(name, value);
+      // Declined in the confirmation of the desktop: the fields show what is still set.
+      if (options.declined) {
+        proxyIp = options.proxyIp;
+        proxyPort = options.proxyPort;
+        torIp = options.torIp;
+        torPort = options.torPort;
+        toast('info', t('Settings'), t('Not changed.'));
+      }
       if (options.restartRequired && !before) changedNow = true;
       if (options.restartRequired) changedNow = true;
     } catch (e) {
       toast('error', t('Settings'), errorText(e));
       await load();
     }
+  }
+
+  // A switch whose change the desktop asks about (a proxy, the Tor proxy, the RPC server): declined, it
+  // shows what is still set.
+  async function setAsked(box: HTMLInputElement, name: 'server' | 'proxyUse' | 'torUse') {
+    await set(name, box.checked);
+    if (options) box.checked = options[name];
   }
 
   let proxyError = $state('');
@@ -105,8 +120,8 @@
       return;
     }
     proxyError = '';
-    await set(tor ? 'torIp' : 'proxyIp', ip);
-    await set(tor ? 'torPort' : 'proxyPort', String(port));
+    // The address and the port at once: one confirmation of the desktop when the proxy is in use.
+    await set(tor ? 'torAddress' : 'proxyAddress', { ip, port });
   }
 
   const ignored = (setting: string) => !!options?.ignored[setting];
@@ -264,7 +279,7 @@
         </div>
 
         <label class="check" title={ignored('server') ? overriddenTip : undefined}>
-          <input id="opt-server" type="checkbox" checked={options.server} disabled={ignored('server')} onchange={(e) => set('server', (e.currentTarget as HTMLInputElement).checked)} />
+          <input id="opt-server" type="checkbox" checked={options.server} disabled={ignored('server')} onchange={(e) => setAsked(e.currentTarget as HTMLInputElement, 'server')} />
           <span>Enable RPC server</span>
         </label>
         <p class="hint">Enabling the RPC server allows you to control the node and the wallet with command-line tools or JSON-RPC requests. Sidechain nodes run from here need it to follow this node.</p>
@@ -330,7 +345,7 @@
 
         <fieldset class="proxy" title={ignored('proxy') ? overriddenTip : undefined}>
           <label class="check">
-            <input id="opt-proxy" type="checkbox" checked={options.proxyUse} disabled={ignored('proxy')} onchange={(e) => set('proxyUse', (e.currentTarget as HTMLInputElement).checked)} />
+            <input id="opt-proxy" type="checkbox" checked={options.proxyUse} disabled={ignored('proxy')} onchange={(e) => setAsked(e.currentTarget as HTMLInputElement, 'proxyUse')} />
             <span>Connect through SOCKS5 proxy (default proxy)</span>
           </label>
           <div class="field-row">
@@ -348,7 +363,7 @@
         </fieldset>
         <fieldset class="proxy" title={ignored('onion') ? overriddenTip : undefined}>
           <label class="check">
-            <input id="opt-tor" type="checkbox" checked={options.torUse} disabled={ignored('onion')} onchange={(e) => set('torUse', (e.currentTarget as HTMLInputElement).checked)} />
+            <input id="opt-tor" type="checkbox" checked={options.torUse} disabled={ignored('onion')} onchange={(e) => setAsked(e.currentTarget as HTMLInputElement, 'torUse')} />
             <span>Use separate SOCKS5 proxy to reach peers via Tor onion services</span>
           </label>
           <div class="field-row">

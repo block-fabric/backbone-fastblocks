@@ -7,7 +7,6 @@
   import type { Snippet } from 'svelte';
   import { css } from '../lib/actions';
   import { filterAndSort, visibleRange, type Column, type SortDir } from '../lib/table';
-  import { prefs } from '../lib/state.svelte';
 
   let {
     rows,
@@ -17,8 +16,7 @@
     sortKey = $bindable(null),
     sortDir = $bindable('desc'),
     selected = $bindable(null),
-    // Denser rows in the compact layout.
-    rowHeight = prefs.layout === 'sidebar' ? 29 : 34,
+    rowHeight = 34,
     label,
     empty = 'Nothing to show',
     onactivate,

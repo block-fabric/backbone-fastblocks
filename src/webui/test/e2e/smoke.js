@@ -8,6 +8,10 @@
   try {
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip);
     await check('info: regtest', T().app.info.network === 'regtest' && T().app.info.test === true);
+    // Every layout starts on Home; the checks below are on the overview.
+    await waitFor('Home at the start', () => T().nav.page === 'home', 20000);
+    await check('the app starts on Home', true);
+    T().go('overview');
     await snapshot('overview-nowallet-light');
 
     // The bridge: RPC calls, errors, cancellation.
@@ -61,7 +65,6 @@
     const evil = windows ? '&lt;img src=x onerror=alert(1)&gt;w' : '<img src=x onerror=alert(1)>w';
     await rpc('createwallet', [evil]);
     await waitFor('the second wallet', () => T().wallets.list.length === 2);
-    T().savePrefs({ sidebarExpanded: true });
     const select = await waitFor('the wallet selector', () => document.querySelector('.sidebar .wallet select'));
     await check('markup in a name stays text', select && !select.querySelector('img') && [...select.options].some((o) => o.textContent === evil), select ? select.innerHTML.slice(0, 120) : 'no selector');
     T().selectWallet('smoke');

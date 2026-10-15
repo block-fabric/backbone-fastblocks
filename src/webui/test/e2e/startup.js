@@ -16,12 +16,11 @@
     await check(`${STEP}: the page leaves the splash when the host is ready`, !!page, T() ? `page phase ${T().app.phase}` : 'no test hooks');
     await sleep(500);
     const splash = document.querySelector('.phase');
-    const shell = document.querySelector('nav[aria-label="Pages"], .sidebar, .workspace, .rail');
+    const shell = document.querySelector('nav[aria-label="Pages"], .sidebar, .workspace');
     await check(`${STEP}: the app is drawn, not the splash`, !splash && !!shell, splash ? splash.textContent.slice(0, 120) : 'no shell');
-    if (T().prefs.layout === 'dashboard') {
-      await waitFor('the home', () => T().nav.page === 'home' && document.querySelector('.cards, .home'), 20000).catch(() => null);
-      await check(`${STEP}: the dashboard shows its home`, T().nav.page === 'home', T().nav.page);
-    }
+    // Every layout starts on Home.
+    await waitFor('the home', () => T().nav.page === 'home' && document.querySelector('.cards, .home'), 20000).catch(() => null);
+    await check(`${STEP}: the ${T().prefs.layout} shows Home`, T().nav.page === 'home', T().nav.page);
     if (STEP === 'wallet') {
       await waitFor('the wallet', () => T().wallets.current === 'w', 30000).catch(() => null);
       await check(`${STEP}: the wallet loaded at the start is shown`, T().wallets.current === 'w', String(T().wallets.current));

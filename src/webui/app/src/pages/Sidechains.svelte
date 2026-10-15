@@ -36,9 +36,10 @@
 
   const TABS = [
     { id: 'sidechains', label: 'Sidechains' },
-    { id: 'nodes', label: 'Nodes' },
     { id: 'proposals', label: 'Proposals' },
     { id: 'withdrawals', label: 'Withdrawals' },
+    // The nodes of sidechains last (user decision).
+    { id: 'nodes', label: 'Nodes' },
   ];
   const tab = $derived(TABS.some((t) => t.id === nav.tab) ? nav.tab : 'sidechains');
 

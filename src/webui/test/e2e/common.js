@@ -22,7 +22,13 @@ const E2E = (() => {
   async function waitFor(what, fn, ms = 30000) {
     const until = Date.now() + ms;
     let last;
+    let noted = Date.now();
     while (Date.now() < until) {
+      // A long wait says what it waits for: the runner hears the page is alive, and where it is.
+      if (Date.now() - noted > 20000) {
+        noted = Date.now();
+        await log(`WAITING for ${what}`);
+      }
       try {
         last = await fn();
         if (last) return last;
@@ -66,10 +72,12 @@ const E2E = (() => {
   }
 
   async function finish(error) {
-    if (error) failures.push(`script error: ${error && error.stack ? error.stack : error}`);
+    if (error) failures.push(`script error: ${error}${error && error.stack ? ' at ' + error.stack.split('\n')[0] : ''}`);
     await report();
     await host('test.exit', { code: failures.length ? 1 : 0 });
   }
 
+  // The runner hears from the page from the start: a page that says nothing for long is stuck.
+  log('SCRIPT started');
   return { host, rpc, asPage, sleep, log, T, waitFor, check, snapshot, text, buttonByText, report, finish };
 })();

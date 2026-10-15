@@ -6,8 +6,8 @@
 
 Starts chains-app on regtest with a temporary data directory, in a virtual
 display, and has it run layouts.js in its page: a wallet with a history, two
-sidechains, then pictures of the workspace, dashboard and compact sidebar
-layouts in the light and dark themes (home, send, the history with the detail
+sidechains, then pictures of the workspace and dashboard layouts in the
+light and dark themes (Home, send, the history with the detail
 panel, sidechains, settings, the command palette).
 
     run_layouts.py --app build/bin/chains-app --tmp <dir> --shots <dir>
@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--tmp", required=True, type=Path, help="folder for the data directory (made anew)")
     parser.add_argument("--shots", required=True, type=Path, help="folder for the pictures")
     parser.add_argument("--port", type=int, default=29490)
-    parser.add_argument("--script", default="layouts.js", help="the page script: layouts.js, titlebar.js (the integrated title bar), refresh.js, or walletcard.js (the card of the wallet)")
+    parser.add_argument("--script", default="layouts.js", help="the page script: layouts.js, titlebar.js (the integrated title bar), refresh.js, walletcard.js (the card of the wallet), uishots.js or controls.js (the dropdowns and scroll bars)")
     args = parser.parse_args()
 
     if shutil.which("xvfb-run") is None:

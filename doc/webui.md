@@ -5,8 +5,8 @@ interface in a native web view, in one program, without Qt. It replaced
 `chains-qt`, which was removed from the tree (the commit "Remove the Qt GUI").
 What it had to do to replace it is recorded in [webui-parity.md](webui-parity.md);
 the audit of it, and how each finding was closed, in
-[webui-audit.md](webui-audit.md). Its window comes in three layouts
-(dashboard, workspace tabs, compact sidebar) with a command palette and an
+[webui-audit.md](webui-audit.md). Its window comes in two layouts
+(dashboard, workspace tabs), both starting on Home, with a command palette and an
 integrated title bar: [webui-layouts.md](webui-layouts.md).
 
 This document says how to build and run it, and how it is made, so that the
@@ -191,8 +191,8 @@ messages go through `G_TRANSLATION_FUN`.
 ```
 src/
   main.ts, App.svelte     start: hello, language, the title bar, phases (intro, splash, shell, fatal)
-  views/                  Shell (the layout chosen, the palette), layouts/ (Dashboard, Workspace,
-                          Compact), home/ (the dashboard's Home), PageView, Intro, Splash, Fatal
+  views/                  Shell (the layout chosen, the palette), layouts/ (Dashboard, Workspace),
+                          home/ (Home, in both layouts), PageView, Intro, Splash, Fatal
   pages/                  one per page of chains-qt (Overview, Send, Receive, Transactions,
                           Sidechains, Mine, Explorer, NodeWindow, Settings, Wallets, ...)
   components/             shared parts: DataTable (virtual, sortable), Dialog, DialogHost,
@@ -292,7 +292,7 @@ Rules the code keeps:
   Use `--accent-fg`, not `--accent`, for text.
 * **Narrow windows.** Pages wrap rather than clip; grids use
   `minmax(min(Xrem, 100%), 1fr)`; below 760 px the dashboard's sidebar is a
-  drawer and the compact rail shows icons; the menus are in one Menus button
+  drawer; the menus are in one Menus button
   that opens inside the window; tables can `fit` the width.
 * **Long lists.** Keep them as raw state (`$state.raw`), replaced as a whole,
   and draw them with DataTable (only the rows in view).

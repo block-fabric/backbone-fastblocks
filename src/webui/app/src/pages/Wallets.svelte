@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { every } from '../lib/poll';
   import { t } from '../lib/i18n.svelte';
   import { CHAIN } from '../chain/config';
   // Wallets (WalletController and its activities, the wallet menu of chains-qt): create, open, close,
@@ -55,8 +56,7 @@
       .catch(() => (unlockedUntil = 0));
   });
   $effect(() => {
-    const t = setInterval(() => (now = Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(t);
+    return every(1000, () => (now = Math.floor(Date.now() / 1000)));
   });
 
   // The actions of the menus arrive as tabs of this page.

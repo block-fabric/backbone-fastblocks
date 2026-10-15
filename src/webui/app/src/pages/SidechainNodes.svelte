@@ -2,6 +2,7 @@
   // The Sidechain Nodes window of chains-qt: run the nodes of sidechains from here. Their programs
   // are located on this computer or downloaded (with a hash check); a node started here follows
   // this node, mines its blocks through the miners of this chain, and holds what is deposited.
+  import { every } from '../lib/poll';
   import { t } from '../lib/i18n.svelte';
   import SafeText from '../components/SafeText.svelte';
   import Icon from '../components/Icon.svelte';
@@ -50,9 +51,7 @@
     }
   }
   $effect(() => {
-    refresh();
-    const timer = setInterval(refresh, REFRESH_MS);
-    return () => clearInterval(timer);
+    return every(REFRESH_MS, refresh, { now: true });
   });
 
   async function run(method: SidechainNodeMethod, params: Record<string, unknown> = {}) {

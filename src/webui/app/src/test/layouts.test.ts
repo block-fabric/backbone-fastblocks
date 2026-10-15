@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
-import { buildCommands, MENU_GROUPS, menuSections, palette, searchCommands, setLayout } from '../lib/commands.svelte';
+import { buildCommands, MENU_GROUPS, menuSections, pageAvailable, palette, searchCommands, setLayout } from '../lib/commands.svelte';
 import { closeDetail, detail } from '../lib/detail.svelte';
 import { handleShortcut } from '../lib/keyboard';
 import { AREAS, chainBeforeTools, DEFAULT_LAYOUT, HOME_QUICK_ACTIONS, LAYOUTS, NAV_SECTIONS, pageKind } from '../lib/layout';
@@ -65,6 +65,9 @@ const OLD_MENUS: Record<string, string[]> = {
 
 const calls: BridgeRequest[] = [];
 
+/** This node's own mining as getgenerate tells it (null: the call failed; off by default). */
+let generating: { generate: boolean; threads: number; hashespersec: number } | null = { generate: false, threads: 0, hashespersec: 0 };
+
 /** The node as the pages and cards ask it. */
 async function fakeNode(r: BridgeRequest): Promise<unknown> {
   calls.push(r);
@@ -75,6 +78,8 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
       return [{ id: 7, addr: '10.0.0.7:8333', inbound: false, pingtime: 0.05, synced_blocks: 10, network: 'ipv4', connection_type: 'outbound-full-relay', subver: '/Chains:32/', version: 70016, startingheight: 1, synced_headers: 10, bytessent: 1, bytesrecv: 2, conntime: 1, lastsend: 1, lastrecv: 1 }];
     case 'getblockheader':
       return { height: 10, time: 1_700_000_000, nTx: 1 };
+    case 'getgenerate':
+      return generating;
     case 'getmininginfo':
       return { blocks: 10, difficulty: 1, networkhashps: 12345, pooledtx: 0, chain: 'regtest', next: { height: 11, bits: '207fffff', difficulty: 1, target: '7f'.padEnd(64, 'f') } };
     case 'getdrivechaininfo':
@@ -136,7 +141,7 @@ afterEach(() => {
   wallets.list = [];
   wallets.current = null;
   resetWalletData();
-  prefs.layout = 'sidebar';
+  prefs.layout = 'dashboard';
 });
 
 describe('the commands', () => {
@@ -162,7 +167,16 @@ describe('the commands', () => {
       expect(AREAS.some((a) => a.tabs.some((t) => t.page === p)), `workspace: ${p}`).toBe(true);
       expect(NAV_SECTIONS.some((s) => s.pages.includes(p)), `sidebars: ${p}`).toBe(true);
     }
-    expect(LAYOUTS.map((l) => l.id)).toEqual(['workspace', 'dashboard', 'sidebar']);
+    // The compact sidebar is gone (user decision): two layouts.
+    expect(LAYOUTS.map((l) => l.id)).toEqual(['workspace', 'dashboard']);
+    // Home in every layout: the workspace's first area, the dashboard's first page.
+    expect(AREAS[0]).toMatchObject({ id: 'home', tabs: [{ page: 'home' }] });
+    for (const layout of ['workspace', 'dashboard'] as const) {
+      prefs.layout = layout;
+      expect(pageAvailable('home'), layout).toBe(true);
+      expect(buildCommands().some((c) => c.id === 'page.home'), layout).toBe(true);
+    }
+    expect(buildCommands().some((c) => c.id.startsWith('layout.sidebar') || /compact/i.test(c.label))).toBe(false);
   });
 
   it.skipIf(SIDECHAIN)('sidechain nodes: a tab of the Sidechains page, not a page of its own', () => {
@@ -200,7 +214,7 @@ describe('the commands', () => {
   });
 
   it('receiving addresses: the Receive page shows its Addresses tab', async () => {
-    prefs.layout = 'sidebar';
+    prefs.layout = 'dashboard';
     render(Shell);
     go('receive', 'addresses');
     const tab = await screen.findByRole('tab', { name: 'Addresses' });
@@ -264,7 +278,7 @@ describe('the commands', () => {
   });
 
   it('tools and advanced transactions: the pages draw the tab asked for', async () => {
-    prefs.layout = 'sidebar';
+    prefs.layout = 'dashboard';
     render(Shell);
     go('crypto', 'merkle');
     const tools = await screen.findByRole('tablist', { name: 'Tools' });
@@ -302,21 +316,34 @@ describe('the commands', () => {
     expect([nav.page, nav.tab]).toEqual(['tools', 'crypto/merkle']);
   });
 
-  it('switch the layout, with the home of the dashboard', () => {
-    go('overview');
+  it('switch the layout, the page shown staying (Home is in every layout)', () => {
+    prefs.layout = 'workspace';
+    go('home');
     setLayout('dashboard');
     expect(prefs.layout).toBe('dashboard');
     expect(nav.page).toBe('home');
     setLayout('workspace');
+    expect(nav.page).toBe('home');
+    go('overview');
+    setLayout('dashboard');
     expect(nav.page).toBe('overview');
-    expect(buildCommands().find((c) => c.id === 'layout.workspace')?.checked).toBe(true);
+    expect(buildCommands().find((c) => c.id === 'layout.dashboard')?.checked).toBe(true);
   });
 
   it('keep the layout in the preferences', () => {
     applyPrefs({ layout: 'dashboard' });
     expect(prefs.layout).toBe('dashboard');
+    applyPrefs({ layout: 'workspace' });
+    expect(prefs.layout).toBe('workspace');
+    // The compact sidebar is gone: a saved 'sidebar', or any layout not known, is the dashboard.
+    applyPrefs({ layout: 'sidebar' });
+    expect(prefs.layout).toBe('dashboard');
+    prefs.layout = 'workspace';
     applyPrefs({ layout: 'nonsense' });
     expect(prefs.layout).toBe('dashboard');
+    prefs.layout = 'workspace';
+    applyPrefs({});
+    expect(prefs.layout).toBe('workspace');
   });
 
   it('open the palette with Ctrl+K, and the node tabs with their keys', () => {
@@ -332,7 +359,11 @@ describe('the layouts', () => {
     prefs.layout = 'workspace';
     render(Shell);
     const areas = screen.getByRole('navigation', { name: 'Areas' });
-    expect(within(areas).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(SIDECHAIN ? ['Wallet', 'Chain', 'Tools', 'Node'] : ['Wallet', 'Chain', 'Sidechains', 'Tools', 'Node']);
+    expect(within(areas).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(SIDECHAIN ? ['Home', 'Wallet', 'Chain', 'Tools', 'Node'] : ['Home', 'Wallet', 'Chain', 'Sidechains', 'Tools', 'Node']);
+    // It starts on Home, as every layout.
+    await waitFor(() => expect(nav.page).toBe('home'));
+    expect(within(areas).getByRole('button', { name: 'Home' }).getAttribute('aria-current')).toBe('true');
+    await fireEvent.click(within(areas).getByRole('button', { name: 'Wallet' }));
     const subtabs = screen.getByRole('navigation', { name: 'Wallet pages' });
     expect(within(subtabs).getByRole('button', { name: 'Overview' }).getAttribute('aria-current')).toBe('page');
     await fireEvent.click(within(areas).getByRole('button', { name: 'Node' }));
@@ -433,7 +464,7 @@ describe('the layouts', () => {
   });
 
   it('every layout: the notifications and the light/dark switch in the top bar', async () => {
-    for (const layout of ['dashboard', 'workspace', 'sidebar'] as const) {
+    for (const layout of ['dashboard', 'workspace'] as const) {
       prefs.layout = layout;
       prefs.theme = 'midnight';
       wallets.newTxs = [];
@@ -465,41 +496,31 @@ describe('the layouts', () => {
     expect(within(side).getByRole('button', { name: new RegExp(`Quit ${CHAIN.name}`) })).toBeTruthy();
   });
 
-  it('compact: an icon rail named for screen readers, opened on demand', async () => {
-    prefs.layout = 'sidebar';
-    prefs.sidebarExpanded = false;
+  it('workspace: Home first, its live cards, Send and Receive in the side panel', async () => {
+    prefs.layout = 'workspace';
+    go('home');
     render(Shell);
-    const rail = screen.getByRole('navigation', { name: 'Pages' });
-    const send = within(rail).getByRole('button', { name: 'Send' });
-    expect(send.textContent?.trim()).toBe('');
-    // The toggle at the foot of the rail (the logo does the same: see below).
-    const toggles = within(rail).getAllByRole('button', { name: 'Show the names of the pages' });
-    expect(toggles.length).toBe(2);
-    await fireEvent.click(toggles[toggles.length - 1]);
-    expect(prefs.sidebarExpanded).toBe(true);
-    expect(within(rail).getByRole('button', { name: 'Send' }).textContent).toContain('Send');
-    expect(screen.queryByRole('menubar')).toBeNull();
-  });
+    // A sidechain has its own home (views/home/SideHome.svelte): the peg and merged mining.
+    const titles = SIDECHAIN ? ['Balance', 'Network', 'Peg', 'Merged mining'] : ['Balance', 'Network', 'Sidechains', 'Mining', 'Wallet balance', 'Blind merged mining'];
+    for (const title of titles) {
+      expect(screen.getByRole('heading', { name: title })).toBeTruthy();
+    }
+    expect(screen.getByRole('navigation', { name: 'Quick actions' })).toBeTruthy();
+    const balance = screen.getByRole('heading', { name: 'Balance' }).closest('section')!;
+    await fireEvent.click(within(balance).getByRole('button', { name: 'Send' }));
+    const panel = await waitFor(() => screen.getByRole('complementary', { name: 'Send' }));
+    expect(within(panel).getByLabelText('Pay to')).toBeTruthy();
+    // A new page closes it.
+    const areas = screen.getByRole('navigation', { name: 'Areas' });
+    await fireEvent.click(within(areas).getByRole('button', { name: 'Chain' }));
+    expect(nav.page).toBe(SIDECHAIN ? 'peg' : 'explorer');
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Send' })).toBeNull());
+    // The logo goes home.
+    await fireEvent.click(document.querySelector('header.top button.brand') as HTMLButtonElement);
+    expect(nav.page).toBe('home');
+  }, 20000);
 
-  it('compact: the logo grows the sidebar, and shrinks it again', async () => {
-    prefs.layout = 'sidebar';
-    prefs.sidebarExpanded = false;
-    render(Shell);
-    const rail = screen.getByRole('navigation', { name: 'Pages' });
-    const logo = rail.querySelector('button.brand') as HTMLButtonElement;
-    expect(logo).not.toBeNull();
-    expect(logo.getAttribute('aria-expanded')).toBe('false');
-    await fireEvent.click(logo);
-    expect(prefs.sidebarExpanded).toBe(true);
-    expect(within(rail).getByRole('button', { name: 'Send' }).textContent).toContain('Send');
-    // The page did not change: the logo of the rail is the sidebar's switch, not a link.
-    const page = nav.page;
-    await fireEvent.click(rail.querySelector('button.brand') as HTMLButtonElement);
-    expect(prefs.sidebarExpanded).toBe(false);
-    expect(nav.page).toBe(page);
-  });
-
-  it('chain before tools, in the sidebars and the workspace', () => {
+  it('chain before tools, in the sidebar and the workspace', () => {
     const titles = NAV_SECTIONS.map((s) => s.title);
     expect(titles.indexOf('Chain')).toBeLessThan(titles.indexOf('Tools'));
     const areas = AREAS.map((a) => a.id);
@@ -557,5 +578,39 @@ describe('the layouts', () => {
     await fireEvent.keyDown(input, { key: 'Enter' });
     expect(palette.open).toBe(false);
     expect([nav.page, nav.tab]).toEqual(['advanced', 'messages/verify']);
+  });
+
+  it.skipIf(SIDECHAIN)("the dashboard's Mining card shows this node's mining, not the network's estimate", async () => {
+    prefs.layout = 'dashboard';
+    generating = { generate: false, threads: 0, hashespersec: 0 };
+    go('home');
+    const view = render(Shell);
+    const rate = await waitFor(() => {
+      const el = document.querySelector('[data-testid="mining-rate"]');
+      expect(el?.textContent).toBe('Off');
+      return el!;
+    });
+    // The network's estimate (12,345 H/s in the fake node) is a line of its own.
+    expect(rate.closest('section, article, div')!.textContent).toMatch(/Network/);
+    view.unmount();
+    generating = { generate: true, threads: 2, hashespersec: 1500 };
+    go('home');
+    render(Shell);
+    await waitFor(() => expect(document.querySelector('[data-testid="mining-rate"]')?.textContent).toMatch(/1\.5\d* kH\/s|1,?500 H\/s/));
+    generating = { generate: false, threads: 0, hashespersec: 0 };
+  });
+
+  it.skipIf(SIDECHAIN)("the Mining card's Network line opens the network hash estimator of the Mine page", async () => {
+    prefs.layout = 'dashboard';
+    go('home');
+    render(Shell);
+    const link = await waitFor(() => {
+      const el = document.querySelector<HTMLButtonElement>('[data-testid="mining-network"]');
+      expect(el?.textContent).toMatch(/12\.3\d* kH\/s/);
+      return el!;
+    });
+    link.click();
+    expect(nav.page).toBe('mine');
+    expect(nav.tab).toBe('estimator');
   });
 });

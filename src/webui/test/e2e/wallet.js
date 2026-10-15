@@ -380,6 +380,38 @@
     await check('choose coins: off again', !$('[role="grid"][aria-label="Coins of the wallet"]'));
     await click('Clear all');
 
+    // --- A proof of funds of chosen coins (user decision, 2026-10-15), checked by another wallet ---
+    await go('proof');
+    await waitFor('the proof page', () => $('#proof-statement'), 20000);
+    $('.choose input[role="switch"]').click();
+    await click('By coin');
+    const proofGrid = await waitFor('the coins to prove', () => {
+      const g = $('[role="grid"][aria-label="Coins to prove"]');
+      return g && $$('input[type="checkbox"]', g).length > 1 ? g : null;
+    }, 20000);
+    $$('input[type="checkbox"]', proofGrid)[0].click();
+    $$('input[type="checkbox"]', proofGrid)[1].click();
+    await waitFor('the total of the coins', () => text('.plan').includes('2 coin(s)'), 10000);
+    await snapshot('proof-coins-light');
+    await click('Create proof');
+    // Alice is encrypted: the passphrase, unless she is unlocked for a while.
+    const made = await waitFor('the proof, or the passphrase', () => ($('#proof-output') && $('#proof-output').value.includes('-----END') ? 'proof' : $('#passphrase-form') ? 'pass' : null), 30000);
+    if (made === 'pass') await passphrase('Unlock wallet', { pass1: PASS });
+    const proofText = await waitFor('the proof', () => ($('#proof-output').value.includes('-----END') ? $('#proof-output').value : null), 30000);
+    const listedCoins = proofText.split('-----COINS-----\n')[1]?.split('-----SIGNATURES-----')[0].trim().split('\n') ?? [];
+    await check('proof of funds: the two coins chosen are listed', listedCoins.length === 2 && listedCoins.every((l) => /^[0-9a-f]{64}:\d+ \d+\.\d{8}$/.test(l)), listedCoins.join(' | '));
+    T().selectWallet('bob');
+    await waitFor('bob', () => T().wallets.current === 'bob');
+    await go('proof', 'verify');
+    const proofInput = await waitFor('the check of a proof', () => $('#proof-input'), 20000);
+    set(proofInput, proofText);
+    await click('Check proof');
+    const verdictText = await waitFor('the verdict', () => (text('#proof-verdict').includes('Coins listed') ? text('#proof-verdict') : null), 60000);
+    await check('proof of funds: checked by another wallet, both coins unspent on signed addresses', verdictText.startsWith('VALID') && verdictText.includes('Coins listed in the proof: 2. Unspent now, on addresses that signed: 2') && $('#proof-verdict').classList.contains('valid'), verdictText.slice(0, 300));
+    await snapshot('proof-verify-coins-light');
+    T().selectWallet('alice');
+    await waitFor('alice', () => T().wallets.current === 'alice');
+
     // --- Pictures of the wallet pages, light and dark ---
     for (const theme of ['light', 'dark']) {
       T().savePrefs({ theme });

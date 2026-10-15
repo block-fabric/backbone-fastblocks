@@ -85,10 +85,13 @@
 
 <div class="messages" class:page={!embedded}>
   {#if !embedded}<header class="page-head"><h1>Signatures - Sign / Verify a Message</h1></header>{/if}
+  <!-- Inside another page (Tools, Advanced transactions), its tabs are on that page's row. -->
+  {#if !embedded}
   <div class="tabs" role="tablist" aria-label="Sign or verify">
     <button type="button" role="tab" aria-selected={tab === 'sign'} onclick={() => (setOwnTab('messages', 'sign'))}>Sign Message</button>
     <button type="button" role="tab" aria-selected={tab === 'verify'} onclick={() => (setOwnTab('messages', 'verify'))}>Verify Message</button>
   </div>
+  {/if}
 
   {#if tab === 'sign'}
     <section class="panel">

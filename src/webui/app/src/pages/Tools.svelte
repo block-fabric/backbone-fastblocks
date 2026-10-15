@@ -3,8 +3,10 @@
   // calculator, Merkle tree, address decoder) are the tabs of one page. Their old page ids lead here
   // (PageInfo.tabOf); each keeps its own tabs after "/" in nav.tab ("crypto/merkle").
   import { t } from '../lib/i18n.svelte';
+  import TabRow from '../components/TabRow.svelte';
+  import { SUBTABS, subTabOf } from '../lib/subtabs';
   import NoWallet from '../components/NoWallet.svelte';
-  import { nav, outerTab, PAGES } from '../lib/nav.svelte';
+  import { nav, outerTab, setOwnTab, type PageId, PAGES } from '../lib/nav.svelte';
   import { wallets, walletsEnabled } from '../lib/state.svelte';
   import Crypto from './Crypto.svelte';
   import Proof from './Proof.svelte';
@@ -16,15 +18,18 @@
     { id: 'crypto', label: 'Crypto tools' },
   ];
   const tab = $derived(TABS.some((tb) => tb.id === outerTab()) ? outerTab() : 'timestamp');
+  // The sub-tabs of the page shown in this tab, if it has some (SUBTABS).
+  const subRow = $derived.by(() => {
+    const page = tab as PageId;
+    const sub = SUBTABS[page];
+    return sub ? { label: sub.label, tabs: sub.tabs, current: subTabOf(page), select: (id: string) => setOwnTab(page, id) } : null;
+  });
 </script>
 
 <div class="page tools">
   <header class="page-head"><h1>Tools</h1></header>
-  <div class="tabs" role="tablist" aria-label="Tools">
-    {#each TABS as tb (tb.id)}
-      <button type="button" role="tab" aria-selected={tab === tb.id} onclick={() => (nav.tab = tb.id)}>{t(tb.label)}</button>
-    {/each}
-  </div>
+  <!-- The tabs of the tab shown follow on the same row, after an arrow. -->
+  <TabRow label="Tools" tabs={TABS} current={tab} select={(id) => (nav.tab = id)} sub={subRow} />
   {#key tab}
     {#if tab === 'timestamp'}
       <Timestamp embedded />

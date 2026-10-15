@@ -4,6 +4,7 @@
   // its timeframes; blind merged mining; then tables of the recent transactions, the sidechains,
   // the latest blocks and the peers, with the actions of each row. A row opens the detail panel;
   // Send and Receive open the side panel (components/QuickPanel.svelte).
+  import { every } from '../../lib/poll';
   import { t } from '../../lib/i18n.svelte';
   import SafeText from '../../components/SafeText.svelte';
   import { untrack } from 'svelte';
@@ -23,7 +24,7 @@
   import { syncStatus } from '../../lib/sync';
   import { coinsToSats, formatAmount } from '../../lib/units';
   import { openQuick } from '../../lib/quick.svelte';
-  import { balanceHistory } from '../../lib/wallet';
+  import { balanceHistory, newest } from '../../lib/wallet';
   import { current, refreshRecords } from '../../lib/walletdata.svelte';
 
   interface Peer {
@@ -59,6 +60,12 @@
     networkhashps: number;
     pooledtx: number;
   }
+  /** This node's own mining (getgenerate): off, or the threads and the rate they hash at. */
+  interface Generate {
+    generate: boolean;
+    threads: number;
+    hashespersec: number;
+  }
   interface BlockRow {
     height: number;
     hash: string;
@@ -79,10 +86,10 @@
   /** Each sidechain's blocks merged mined so far in the window, block after block (its sparkline). */
   let bmmSeries: Record<number, number[]> = $state({});
   let mining: MiningInfo | null = $state(null);
+  let generate: Generate | null = $state(null);
 
   $effect(() => {
-    const timer = setInterval(() => (now = Math.floor(Date.now() / 1000)), 5000);
-    return () => clearInterval(timer);
+    return every(5000, () => (now = Math.floor(Date.now() / 1000)));
   });
 
   // --- The wallet ---
@@ -105,7 +112,8 @@
       })
       .catch(() => undefined);
   });
-  const recent = $derived([...current.records].sort((a, b) => b.time - a.time || b.sortKey.localeCompare(a.sortKey)).slice(0, 8));
+  // The newest few, without sorting the whole history (a wallet of 100 000 records).
+  const recent = $derived(newest(current.records, 8));
   const history = $derived(balanceHistory(current.records));
 
   // --- The node ---
@@ -135,9 +143,7 @@
         .raw<Peer[]>('getpeerinfo')
         .then((list) => (peers = list))
         .catch(() => undefined);
-    load();
-    const timer = setInterval(load, 15000);
-    return () => clearInterval(timer);
+    return every(15000, load, { now: true });
   });
 
   async function toggleNetwork() {
@@ -160,6 +166,7 @@
     blocks = rows;
     now = Math.floor(Date.now() / 1000);
     mining = await rpc.raw<MiningInfo>('getmininginfo', [], { signal });
+    generate = await rpc.raw<Generate>('getgenerate', [], { signal }).catch(() => null);
     drivechain = await rpc.raw<DrivechainInfo>('getdrivechaininfo', [], { signal });
     sidechains = await rpc.raw<Sidechain[]>('listactivesidechains', [], { signal });
     bundles = await rpc.raw<Bundle[]>('listwithdrawalbundles', [], { signal });
@@ -319,8 +326,10 @@
     </Card>
 
     <Card title="Mining" icon="mine" open={() => go('mine')} openLabel="Open mining" stat>
-      <span class="value num">{mining ? hashRate(mining.networkhashps) : '–'}</span>
+      <!-- This node's mining (user decision: the network's estimate is not what this node mines). -->
+      <span class="value num" data-testid="mining-rate">{generate?.generate ? hashRate(generate.hashespersec) : t('Off')}</span>
       <dl class="pairs">
+        <dt title="An estimate from the difficulty and the times of recent blocks">Network</dt><dd class="num"><button type="button" class="link" data-testid="mining-network" title="Open the network hash estimator" onclick={() => go('mine', 'estimator')}>{mining ? hashRate(mining.networkhashps) : '–'}</button></dd>
         <dt>Difficulty</dt><dd class="num">{mining ? mining.difficulty.toPrecision(5) : '–'}</dd>
         <dt>Last block</dt><dd>{blocks[0] ? `${niceTimeOffset(Math.max(0, now - blocks[0].time))} ago` : '–'}</dd>
         <dt title="Blocks of the last {bmmWindow} that merged mined a sidechain, on average">BMM</dt><dd class="num">{bmmAverage === null ? '–' : `${bmmAverage}%`}</dd>
@@ -517,6 +526,20 @@
     font-weight: 600;
     font-size: 0.92rem;
   }
+  /* The network's rate opens the estimator of the Mine page: a value that reads as a link. */
+  .pairs .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 0.2em;
+  }
+  .pairs .link:hover {
+    text-decoration-style: solid;
+  }
   progress {
     width: 100%;
     height: 0.35rem;
@@ -616,9 +639,13 @@
   .frames button:hover {
     color: var(--text);
   }
-  .frames button[aria-pressed='true'] {
+  .frames button[aria-pressed='true'],
+  .frames button[aria-pressed='true']:hover {
     background: var(--accent);
     color: var(--on-accent);
+  }
+  .frames button[aria-pressed='true']:hover {
+    box-shadow: var(--glow);
   }
   .chart-body {
     flex: 1;

@@ -73,7 +73,7 @@ export const PAGES: Record<PageId, PageInfo> = {
   // were apart are their tabs (tabOf).
   tools: { id: 'tools', title: 'Tools', icon: 'hash', summary: 'Timestamp a file, prove the funds of the wallet, and the crypto tools (hash, Merkle tree, address decoder)', parity: ['L07', 'L08', 'L10'], ready: true },
   advanced: { id: 'advanced', title: 'Advanced transactions', icon: 'key', summary: 'Sign and verify messages, partially signed transactions (PSBT), and the multisig lounge', parity: ['K01', 'K02', 'K03', 'L09'], wallet: true, ready: true },
-  home: { id: 'home', title: 'Home', icon: 'home', summary: 'Live cards of the wallet, the chain, the sidechains and the node (the dashboard layout)', parity: [], ready: true },
+  home: { id: 'home', title: 'Home', icon: 'home', summary: 'Live cards of the wallet, the chain, the sidechains and the node', parity: [], ready: true },
   // The pages of a sidechain (doc/webui.md): the peg (deposits from the mainchain, withdrawals to it and
   // their bundles) and blind merged mining. Only in the app of a sidechain (pageAvailable).
   peg: { id: 'peg', title: 'Peg', icon: 'peg', summary: 'Deposit from the mainchain, withdraw to it, and follow the withdrawal bundles and their votes', parity: ['S01', 'S02', 'S03'], shortcut: 'Alt+5', ready: true },

@@ -260,6 +260,20 @@
     await check('mining: stopped', !(await rpc('getgenerate')).generate);
     both.push({ name: 'mine', page: 'mine', tab: '' });
 
+    // --- The network hash estimator (opened as from the Network line of the Home's Mining card) ---
+    const estimate = async () => {
+      await waitFor('the estimate', () => /\s(k|M|G|T|P|E)?H\/s$/.test(text('#estimator-network').trim()) && $('.estimator .chart path.line'), 60000);
+      set($('#estimator-rate'), '1 MH/s');
+      await waitFor('what 1 MH/s finds', () => text('#estimator-share').endsWith('%') && text('#estimator-time') !== '–', 10000);
+    };
+    await go('mine', 'estimator');
+    await estimate();
+    await check('estimator: the network rate, a chart, and a typed rate with its unit', $('#estimator-unit').value === 'MH/s' && $('#estimator-rate').value === '1' && text('#estimator-coins').includes('CHN'), `${$('#estimator-unit').value} ${$('#estimator-rate').value} ${text('#estimator-coins')}`);
+    set($('#estimator-window'), '20');
+    await waitFor('the 20-block window', () => /\s(k|M|G|T|P|E)?H\/s$/.test(text('#estimator-network').trim()), 10000);
+    await snapshot('mine-estimator-light');
+    both.push({ name: 'mine-estimator', page: 'mine', tab: 'estimator', prepare: estimate });
+
     // --- Timestamp a file ---
     await go('timestamp');
     await host('test.fileAnswer', { path: `${DIR}/stamp-me.txt` });
@@ -467,6 +481,18 @@
     await snapshot('settings-main-light');
     both.push({ name: 'settings-main', page: 'settings', tab: 'main' });
     await go('settings', 'network');
+    // Turning a proxy on is asked in a dialog of the desktop (audit 2026-10-14 item 5): declined, then accepted.
+    const asked = (await host('test.confirmed')).length;
+    await host('test.confirmAnswer', { yes: false });
+    $('#opt-proxy').click();
+    const proxyQuestion = await waitFor('the question', async () => {
+      const list = await host('test.confirmed');
+      return list.length > asked ? list[list.length - 1] : null;
+    }, 30000);
+    await check('settings: the proxy is asked in a dialog of the desktop, with its address', proxyQuestion.message.includes('Route all connections through 127.0.0.1:9050?'), proxyQuestion.message);
+    await sleep(500);
+    await check('settings: declined, the proxy stays off', !(await host('options.get')).proxyUse);
+    await host('test.confirmAnswer', { yes: true });
     $('#opt-proxy').click();
     await waitFor('the proxy on', async () => (await host('options.get')).proxyUse, 30000);
     set($('#opt-proxy-ip'), 'not a proxy');

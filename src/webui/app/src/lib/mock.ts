@@ -123,6 +123,7 @@ export function installMock(options: MockOptions = {}): void {
     getpeerinfo: () =>
       [1, 2, 3, 4].map((id) => ({ id, addr: `203.0.113.${id * 11}:38333`, inbound: id === 3, pingtime: 0.02 * id, synced_blocks: height, network: 'ipv4', connection_type: 'outbound-full-relay', subver: '/Chains:32.0.0/', version: 70016, startingheight: 1, synced_headers: height, bytessent: 1, bytesrecv: 2, conntime: start, lastsend: start, lastrecv: start })),
     getmininginfo: () => ({ blocks: height, difficulty: 4.6565e-10, networkhashps: 12.4, pooledtx: 3 }),
+    getnetworkhashps: (p) => 12.4 * (1 + 0.2 * Math.sin((Number(p[1]) < 0 ? height : Number(p[1])) / 50)),
     getdrivechaininfo: () => ({ activesidechains: 2, proposals: 1, pendingbundles: 1, escrowtotal: 7.25, withdrawalperiod: 100 }),
     listactivesidechains: () => [
       { slot: 2, title: 'Thunder', description: 'Fast payments', escrow: { txid: 'aa', n: 0, amount: 5.25 }, pendingbundles: 1 },

@@ -182,7 +182,7 @@ describe.runIf(SIDECHAIN)('the chain of a sidechain, in one place (chain.json)',
     const all = buildCommands();
     expect(all.some((c) => c.page === 'sidechains' || c.page === 'mine')).toBe(false);
     // A page dropped is never shown: going there shows the overview.
-    expect(AREAS.map((a) => a.id)).toEqual(['wallet', 'chain', 'tools', 'node']);
+    expect(AREAS.map((a) => a.id)).toEqual(['home', 'wallet', 'chain', 'tools', 'node']);
   });
 
   it('has its peg and merged mining in the Chain section, before the tools, and Alt+5 opens the peg', () => {

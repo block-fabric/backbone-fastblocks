@@ -10,6 +10,7 @@
 #include <webui/guard.h>
 
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -95,10 +96,23 @@ public:
      */
     UniValue Get();
 
-    /** Change one option (a name of Get). Throws std::runtime_error for a value that is not valid. @return Get() */
+    /**
+     * Change one option (a name of Get, or proxyAddress / torAddress: {ip, port} at once). Throws
+     * std::runtime_error for a value that is not valid. Turning a proxy or the Tor proxy on, changing the
+     * address of one in use, or turning the RPC server on takes the confirmation of the desktop (ConfirmFn),
+     * which shows exactly what changes; turning them off does not.
+     * @return Get(), with declined: true when the user said no (nothing changed)
+     */
     UniValue Set(const std::string& name, const UniValue& value);
 
-    /** Whether text is the address of a proxy, without a port (ProxyAddressValidator). */
+    /**
+     * Held across every change of the options, from what a confirmation shows to what is written (Set,
+     * ChooseProgram, the Cancel and the reset of the options): a change made while a confirmation of the
+     * desktop is open waits for it, so that what the user accepts is what is applied.
+     */
+    static std::mutex& ChangesMutex();
+
+    /** Whether text is the address of a proxy, without a port (ProxyAddressValidator), and without a user or password. */
     static bool ValidProxyAddress(const std::string& text);
 
     /** Start the app when the user logs in (GUIUtil::SetStartOnSystemStartup), per network. */

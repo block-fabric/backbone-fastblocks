@@ -397,8 +397,29 @@ export function parseRecords(raw: unknown[][]): TxRecord[] {
 }
 
 /** Newest first, as the overview and the table sort by date (time, then the sort key of TransactionRecord). */
+/**
+ * The order of two records by time, then by their sort key (fixed-width digits from the host: compared
+ * as they are, not by the locale, which is ten times slower on a long history).
+ */
+export function compareRecords(a: Pick<TxRecord, 'time' | 'sortKey'>, b: Pick<TxRecord, 'time' | 'sortKey'>): number {
+  return a.time - b.time || (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0);
+}
+
 export function sortNewestFirst<T extends Pick<TxRecord, 'time' | 'sortKey'>>(records: readonly T[]): T[] {
-  return [...records].sort((a, b) => b.time - a.time || b.sortKey.localeCompare(a.sortKey));
+  return [...records].sort((a, b) => compareRecords(b, a));
+}
+
+/** The newest `count` records, newest first, in one pass over the history (no sort of all of it). */
+export function newest<T extends Pick<TxRecord, 'time' | 'sortKey'>>(records: readonly T[], count: number): T[] {
+  const best: T[] = [];
+  for (const r of records) {
+    if (best.length === count && compareRecords(r, best[best.length - 1]) <= 0) continue;
+    let i = best.length;
+    while (i > 0 && compareRecords(r, best[i - 1]) > 0) i--;
+    best.splice(i, 0, r);
+    if (best.length > count) best.pop();
+  }
+  return best;
 }
 
 /**
@@ -698,7 +719,7 @@ export function plainText(r: TxRecord, unit: Unit): string {
 /** The running balance after each transaction, oldest first: for the balance chart of the overview. */
 export function balanceHistory(records: readonly TxRecord[]): { time: number; balance: bigint }[] {
   const counted = records.filter((r) => r.status !== 'conflicted' && r.status !== 'abandoned' && r.status !== 'notaccepted');
-  const byTime = [...counted].sort((a, b) => a.time - b.time || a.sortKey.localeCompare(b.sortKey));
+  const byTime = counted.sort(compareRecords);
   const out: { time: number; balance: bigint }[] = [];
   let balance = 0n;
   for (const r of byTime) {

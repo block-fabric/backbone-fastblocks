@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -38,9 +39,15 @@ def script(name, prelude=""):
 class App:
     """chains-app in a virtual display, its output followed line by line."""
 
+    #: The longest the page may say nothing (a step of a page script waits 2 minutes at most): past
+    #: this, the app is stuck, and is stopped with the last thing the page said.
+    QUIET = 300
+
     def __init__(self, app, args, env, log_path):
         self.lines = []
         self.events = {}
+        self.last = "nothing yet (the page script did not start)"
+        self.last_time = time.time()
         self.log = open(log_path, "w", encoding="utf-8")
         cmd = ["xvfb-run", "-a", "-s", "-screen 0 1400x900x24", str(app)] + args
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True, bufsize=1, start_new_session=True)
@@ -58,6 +65,8 @@ class App:
                 print("  " + message, flush=True)
                 key = message.split(" ", 1)[0]
                 self.events[key] = message
+                self.last = message
+                self.last_time = time.time()
 
     def wait_event(self, key, timeout):
         until = time.time() + timeout
@@ -67,22 +76,54 @@ class App:
             if self.proc.poll() is not None and not self.reader.is_alive():
                 return None
             time.sleep(0.1)
+        print(f"chains-app: no {key} in {timeout} s; the page last said: {self.last}", flush=True)
         return None
 
-    def wait(self, timeout):
-        try:
-            code = self.proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.proc.pid, 15)
-            self.proc.wait(timeout=60)
-            print(f"chains-app did not stop in {timeout} s", flush=True)
-            return None
+    def wait(self, timeout, quiet=None):
+        """The exit code of the app, or None when it runs past timeout, or says nothing for quiet seconds."""
+        quiet = self.QUIET if quiet is None else quiet
+        until = time.time() + timeout
+        while self.proc.poll() is None:
+            now = time.time()
+            if now > until:
+                print(f"chains-app did not stop in {timeout} s; the page last said: {self.last}", flush=True)
+                self.stop()
+                return None
+            if now - self.last_time > quiet:
+                print(f"chains-app: the page said nothing for {quiet} s, stuck after: {self.last}", flush=True)
+                self.stop()
+                return None
+            time.sleep(0.2)
         self.reader.join(timeout=10)
-        return code
+        return self.proc.returncode
+
+    def stop(self):
+        """Stop the app (and its virtual display) if it still runs."""
+        if self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, 15)
+                self.proc.wait(timeout=60)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(self.proc.pid, 9)
+                except ProcessLookupError:
+                    pass
+                self.proc.wait()
+        self.reader.join(timeout=10)
 
     def result(self):
         message = self.events.get("RESULT")
         return json.loads(message[len("RESULT "):]) if message else None
+
+
+def ports_taken(ports):
+    """The ports of the list that are taken on 127.0.0.1 (a node left over from an earlier run)."""
+    taken = []
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                taken.append(port)
+    return taken
 
 
 def short_tmp():

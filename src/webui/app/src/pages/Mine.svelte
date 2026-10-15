@@ -1,8 +1,13 @@
 <script lang="ts">
+  import { every } from '../lib/poll';
   import { t } from '../lib/i18n.svelte';
   // Solo mining with the processor of this computer (MiningDialog of chains-qt): an address for the
   // rewards (new from the wallet), threads, start and stop, how the miner does, and the network.
+  import HashEstimator from '../components/HashEstimator.svelte';
   import Icon from '../components/Icon.svelte';
+  import { formatHashRate } from '../lib/hashrate';
+  import { nav } from '../lib/nav.svelte';
+  import { tick } from 'svelte';
   import { errorText, inform } from '../lib/dialogs.svelte';
   import { formatCount, niceTimeOffset } from '../lib/format';
   import { rpc } from '../lib/rpc';
@@ -44,9 +49,7 @@
   }
   // Every 2 seconds (MiningDialog REFRESH_INTERVAL_MS).
   $effect(() => {
-    refresh();
-    const timer = setInterval(refresh, 2000);
-    return () => clearInterval(timer);
+    return every(2000, refresh, { now: true });
   });
 
   const running = $derived(!!gen?.generate);
@@ -95,15 +98,13 @@
   }
 
   /** Hash rate with a unit (NodeRpc::HashRate). */
-  function hashRate(h: number): string {
-    const units = ['H/s', 'kH/s', 'MH/s', 'GH/s', 'TH/s', 'PH/s', 'EH/s'];
-    let i = 0;
-    while (h >= 1000 && i < units.length - 1) {
-      h /= 1000;
-      i++;
-    }
-    return `${h.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-  }
+  const hashRate = (h: number) => formatHashRate(h, 1);
+
+  // Opened on the estimator (the Network line of the Home's Mining card): shown at once.
+  $effect(() => {
+    if (nav.tab !== 'estimator') return;
+    tick().then(() => document.getElementById('hash-estimator')?.scrollIntoView({ block: 'start' }));
+  });
 
   // A block takes difficulty * 2^32 hashes on average.
   const expected = $derived.by(() => {
@@ -166,6 +167,8 @@
         <dt>Transactions waiting</dt><dd class="num">{info ? formatCount(info.pooledtx) : '–'}</dd>
       </dl>
     </section>
+
+    <HashEstimator ownRate={running && gen ? gen.hashespersec : null} />
   </div>
 </div>
 

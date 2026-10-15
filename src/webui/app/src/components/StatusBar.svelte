@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { every } from '../lib/poll';
   import SafeText from './SafeText.svelte';
   import { CHAIN } from '../chain/config';
   // The bar at the bottom: sync, the chain as it grows, peers, the unit of amounts, the lock of the wallet.
@@ -14,8 +15,7 @@
 
   let now = $state(Math.floor(Date.now() / 1000));
   $effect(() => {
-    const timer = setInterval(() => (now = Math.floor(Date.now() / 1000)), 5000);
-    return () => clearInterval(timer);
+    return every(5000, () => (now = Math.floor(Date.now() / 1000)));
   });
 
   const status = $derived(
@@ -290,9 +290,10 @@
   }
   .unit select {
     min-height: 1.8rem;
-    padding: 0 0.4rem;
+    padding: 0 1.7rem 0 0.55rem;
     border-color: var(--line);
-    background: var(--surface-2);
+    background-color: var(--surface-2);
+    background-position: right 0.45rem center;
     font-size: 0.86rem;
   }
   .hd {

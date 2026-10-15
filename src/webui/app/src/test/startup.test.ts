@@ -70,20 +70,23 @@ describe('the start of the page', () => {
   });
 });
 
-describe('the dashboard at the start', () => {
-  it('opens its home also when the preferences come after the frame is drawn', async () => {
-    const { prefs } = await import('../lib/state.svelte');
-    const { go, nav } = await import('../lib/nav.svelte');
-    const Shell = (await import('../views/Shell.svelte')).default;
-    app.info = INFO;
-    prefs.layout = 'dashboard';
-    prefs.loaded = false;
-    go('overview');
-    setTransport(async (r) => node(r, 'ready'));
-    render(Shell);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(nav.page).toBe('overview');
-    prefs.loaded = true;
-    await waitFor(() => expect(nav.page).toBe('home'));
-  });
+describe('every layout at the start', () => {
+  for (const layout of ['dashboard', 'workspace'] as const) {
+    it(`${layout}: opens Home, also when the preferences come after the frame is drawn`, async () => {
+      const { prefs } = await import('../lib/state.svelte');
+      const { go, nav } = await import('../lib/nav.svelte');
+      const Shell = (await import('../views/Shell.svelte')).default;
+      app.info = INFO;
+      prefs.layout = layout;
+      prefs.loaded = false;
+      go('overview');
+      setTransport(async (r) => node(r, 'ready'));
+      const view = render(Shell);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(nav.page).toBe('overview');
+      prefs.loaded = true;
+      await waitFor(() => expect(nav.page).toBe('home'));
+      view.unmount();
+    });
+  }
 });

@@ -14,9 +14,9 @@
     const state = await host('window.state');
     await check('the integrated title bar by default', state.titleBar === 'integrated' && state.frameless === true && state.supported === true, JSON.stringify(state));
 
-    for (const layout of ['workspace', 'dashboard', 'sidebar']) {
+    for (const layout of ['workspace', 'dashboard']) {
       for (const theme of ['light', 'dark']) {
-        T().savePrefs({ theme, layout, sidebarExpanded: false });
+        T().savePrefs({ theme, layout });
         T().go(layout === 'dashboard' ? 'home' : 'send');
         await sleep(300);
         const group = await waitFor('the buttons of the window', controls);
