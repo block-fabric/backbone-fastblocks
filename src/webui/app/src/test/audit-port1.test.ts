@@ -91,9 +91,11 @@ describe('#11: words cut short', () => {
   });
 
   it('the labels of the cards of Home wrap instead of being cut', () => {
-    const css = read('views/home/Home.svelte');
-    const dt = css.slice(css.indexOf('  .pairs dt {'), css.indexOf('}', css.indexOf('  .pairs dt {')));
-    expect(dt).not.toMatch(/text-overflow: ellipsis/);
-    expect(dt).not.toMatch(/white-space: nowrap/);
+    for (const file of ['views/home/Home.svelte', 'views/home/SideHome.svelte']) {
+      const css = read(file);
+      const dt = css.slice(css.indexOf('  .pairs dt {'), css.indexOf('}', css.indexOf('  .pairs dt {')));
+      expect(dt).not.toMatch(/text-overflow: ellipsis/);
+      expect(dt).not.toMatch(/white-space: nowrap/);
+    }
   });
 });
