@@ -482,12 +482,12 @@
     both.push({ name: 'settings-main', page: 'settings', tab: 'main' });
     await go('settings', 'network');
     // Turning a proxy on is asked in a dialog of the desktop (audit 2026-10-14 item 5): declined, then accepted.
-    const asked = (await host('test.confirmed')).length;
+    const proxyAsked = (await host('test.confirmed')).length;
     await host('test.confirmAnswer', { yes: false });
     $('#opt-proxy').click();
     const proxyQuestion = await waitFor('the question', async () => {
       const list = await host('test.confirmed');
-      return list.length > asked ? list[list.length - 1] : null;
+      return list.length > proxyAsked ? list[list.length - 1] : null;
     }, 30000);
     await check('settings: the proxy is asked in a dialog of the desktop, with its address', proxyQuestion.message.includes('Route all connections through 127.0.0.1:9050?'), proxyQuestion.message);
     await sleep(500);

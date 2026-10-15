@@ -8,7 +8,8 @@
     if (doc.scrollWidth > doc.clientWidth + 1) out.push(`the page scrolls sideways (${doc.scrollWidth} > ${doc.clientWidth})`);
     for (const el of document.querySelectorAll('.content button, .content .panel, .content h1, .content input, .content select, .top button, .titlestrip button, .statusbar > *')) {
       const r = el.getBoundingClientRect();
-      if (r.width && r.right > window.innerWidth + 1 && !el.closest('[role="grid"]')) out.push(`${el.tagName.toLowerCase()} "${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 24)}" ends at ${Math.round(r.right)}`);
+      // A grid, and the explorer's ribbon of blocks, scroll sideways in their own box: their rows and boxes go on past it.
+      if (r.width && r.right > window.innerWidth + 1 && !el.closest('[role="grid"], .ribbon .strip')) out.push(`${el.tagName.toLowerCase()} "${(el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 24)}" ends at ${Math.round(r.right)}`);
       if (out.length > 5) break;
     }
     return out;
