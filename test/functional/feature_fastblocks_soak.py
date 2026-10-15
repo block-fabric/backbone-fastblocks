@@ -123,7 +123,11 @@ class FastBlocksSoakTest(SidechainTest):
         self.log.info(f"  a mainchain reorg of {depth} block(s)")
         main = self.main
         main.invalidateblock(main.getblockhash(main.getblockcount() - depth + 1))
+        # The replacement branch pays a fresh address: mined within the same second to the same address
+        # (and with an empty mempool), a block would be the very block just invalidated (duplicate-invalid).
+        address, self.main_address = self.main_address, main.getnewaddress()
         self.mine_main(depth + 1)
+        self.main_address = address
 
     def bond(self):
         i = random.randrange(3)
