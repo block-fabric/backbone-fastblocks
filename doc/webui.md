@@ -337,12 +337,31 @@ The host side (src/webui/sidechainapi.cpp) reaches the mainchain node on the nod
 |---|---|
 | `peg.connection` | How the node reaches its mainchain node: connected or why not, host:port, the slot, the wallet, cookie or password (never the password) |
 | `peg.call {method, params}` | A method of the mainchain node, from a list that only reads (`getdrivechaininfo`, `listwithdrawalbundles`, `getsidechainevents`, `listsidechaindeposits`...) and of its wallet (`getbalances`, `getwalletinfo`, `getnewaddress`) |
-| `peg.deposit {destination, amount}` | The deposit helper: `createsidechaindeposit` of the mainchain wallet, only to a deposit address of this sidechain (its slot, its checksum, a valid address of this chain) |
+| `peg.deposit {destination, amount}` | The deposit helper: `createsidechaindeposit` of the mainchain wallet, only to a deposit address of this sidechain (its slot, its checksum, a valid address of this chain), on the user's word given to the desktop |
+| `bmm.set {mine, address?, always?, amount?}` | Merged mining on (`setbmm`: the address of the fees, an address of this chain; with `always`, the offer for every block of the mainchain, at most 0.01) on the user's word given to the desktop; off at once |
+| `bmm.request {address, amount}` | One block by hand (`requestbmmblock`), the offer at most 0.01, on the user's word given to the desktop |
+
+**What spends the wallet of the mainchain node waits for the desktop** (audit port-1 #4). A deposit,
+merged mining turned on and a block asked for by hand are host methods: the host checks what the
+page gives, caps the offers of merged mining (`SidechainApi::MAX_BMM_OFFER`), then asks with
+`Window::Confirm`, the amount it parsed first ("Amount: 5.00 coins of Chains", "Offer: 0.0001 coins
+of Chains for every block of Chains"). A decline answers `CANCELLED`, which the pages take quietly.
+The address of the mainchain node (`mainchainConnect` in Settings) is another machine only on the
+user's word too: the node sends that machine the credentials of the mainchain node, unencrypted.
+`setbmm`, `requestbmmblock` and `createsidechaindeposit` are not methods the page calls.
 
 The RPC policy of a sidechain (rpcpolicy.cpp) adds its methods (`getmainchaininfo`, `getbmminfo`,
-`setbmm`, `requestbmmblock`, `listwithdrawals`, `getwithdrawalbundle`, `getdepositaddress`, and
+`syncmainchain`, `listwithdrawals`, `getwithdrawalbundle`, `getdepositaddress`, and
 `createwithdrawal` and `refundwithdrawal`, which need the keys) and has none of the drivechain methods
-of the mainchain.
+of the mainchain. `test/rpcpolicy.test.ts` reads it as this chain builds it (the branch of `#if
+WEBUI_SIDECHAIN` of its role, with local.cpp), against the sources that run in this chain (not the
+pages chain.json drops, nor the home of the other role); the end-to-end runs keep to it as well.
+
+The help links of chain.json (`links`) are the app's own: they open without asking (they are built into
+the host, webui/chainconfig.h); any other web address waits for the desktop.
+
+In a narrow panel (a window of 480 px) the tables of Peg and Merged mining are lists of cards, every
+cell under the words of its column (`use:stacked`, a container query in styles/side.css).
 
 The rules of the kit hold in these pages: text from the chain (addresses, hashes, errors of the
 mainchain node) is shown with `SafeText` or `translate="no"`; the app's own words go through `t()`;
@@ -391,6 +410,7 @@ not offer, make it a change of the template (generic, behind `chain.json`), and 
 | `e2e/run_layouts.py` | The three layouts, the palette, the detail panel, the integrated title bar and the refresh (layouts.js, titlebar.js, refresh.js); pictures of each layout |
 | `e2e/run_windows.py` | From WSL, on the Windows of the machine (`--app build_win/bin/chains-app.exe --unit build_win/bin/test_chains-app.exe --shots <dir>`, in a folder `<stem>-app-test` of the Windows temporary folder, removed at the end): the unit tests, then smoke.js, layouts.js and titlebar.js; for a sidechain sidechain.js, the app on Windows following a regtest mainchain run in WSL |
 | `e2e/run_sidechain.py` | A sidechain (`webui_e2e_sidechain`, with `WEBUI_MAINCHAIN_BIN_DIR` or `MAINCHAIN_BIN_DIR` naming the folder of `chainsd`): a regtest mainchain started and mining a block every second, the sidechain activated in its slot, the app following it with a user name and a password file; through the page: a deposit address, the deposit made by the helper, merged mining on, the deposit credited, a withdrawal to an address of the mainchain wallet, its bundle voted on and paid (checked on the mainchain); pictures of the pages of the sidechain in the layouts and looks |
+| `e2e/run_release.py` | The release as a user gets it (`deploy-app`, built with `WEBUI_TEST_HOOKS=OFF`; `--windows` for the zip, run on the Windows of the machine): what the package holds and SHA256SUMS, no hooks of the tests in the app; the app run with no test script on regtest against a live mainchain, its node answering the command line program of the package, following the mainchain in its slot, and stopping cleanly |
 | `test_<stem>-app`: chainconfig_tests, sidechainapi_tests | chain.json against the chain parameters (names, unit, ports, prefixes); the methods of the mainchain the pages may call, the deposit helper refusing what is not a deposit address of this sidechain, the RPC policy of a sidechain |
 | `npm test`: test/sidechain.test.ts | The chain of chain.json (units, URIs, addresses of both chains), the pages dropped, Peg and Merged mining in the Chain section and the menus, the events of the mainchain kept up to date across a reorganisation, the bundles, deposits and commitments, the log of merged mining, and the pages driven: the deposit helper, a withdrawal and its refund, the votes of the bundle, merged mining on and off and one block by hand, the cards of the home, the Mainchain settings |
 
