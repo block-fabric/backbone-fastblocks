@@ -21,10 +21,11 @@ std::set<std::string> KeyedRpcMethods()
     return {};
 }
 
-void RegisterHost(Bridge& bridge, NodeFn node)
+void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
 {
     (void)bridge;
     (void)node;
+    (void)confirm;
 }
 
 } // namespace webui::local
