@@ -5,6 +5,7 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <webui/chainconfig.h>
+#include <webui/guard.h>
 
 #include <chainparams.h>
 #include <chainparamsbase.h>
@@ -45,6 +46,20 @@ BOOST_AUTO_TEST_CASE(chain_json_matches_the_node)
 #endif
         }
     }
+}
+
+// The help links of chain.json open without asking; any other web address the page names waits for the
+// desktop (audit port-1 #3).
+BOOST_AUTO_TEST_CASE(own_links_open_without_asking)
+{
+    BOOST_CHECK_EQUAL(webui::guard::KnownLinks().size(), webui::chain::LINKS.size());
+    for (const std::string_view link : webui::chain::LINKS) {
+        BOOST_CHECK(link.starts_with("https://"));
+        BOOST_CHECK(!webui::guard::OpenUrlConfirmation(link));
+        // The same address with something added is not the link.
+        BOOST_CHECK(webui::guard::OpenUrlConfirmation(std::string{link} + "?x"));
+    }
+    BOOST_CHECK(webui::guard::OpenUrlConfirmation("https://explorer.example/tx/1"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

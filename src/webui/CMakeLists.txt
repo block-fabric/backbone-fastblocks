@@ -42,6 +42,18 @@ foreach(network main test signet regtest)
   string(APPEND WEBUI_CHAIN_NETWORKS "Network{\"${network}\", ${p2p}, ${rpc}, \"${hrp}\", ${main_rpc}},\n    ")
 endforeach()
 string(STRIP "${WEBUI_CHAIN_NETWORKS}" WEBUI_CHAIN_NETWORKS)
+# Its help links (links: website, source, issues, guide), which the app opens without asking (webui/guard.cpp).
+set(WEBUI_CHAIN_LINKS "")
+foreach(link website source issues guide)
+  string(JSON url ERROR_VARIABLE no_link GET "${webui_chain}" links ${link})
+  if(NOT no_link AND url MATCHES "^https://[A-Za-z0-9./_#?=%-]+$")
+    string(APPEND WEBUI_CHAIN_LINKS "\"${url}\", ")
+  elseif(NOT no_link)
+    message(FATAL_ERROR "${webui_chain_json}: links.${link} is an https address of plain characters, not ${url}")
+  endif()
+endforeach()
+string(REGEX MATCHALL "\"," webui_link_commas "${WEBUI_CHAIN_LINKS}")
+list(LENGTH webui_link_commas WEBUI_CHAIN_LINKS_COUNT)
 configure_file(chainconfig.h.in ${CMAKE_CURRENT_BINARY_DIR}/gen/webui/chainconfig.h @ONLY)
 
 # The hooks of the end-to-end tests (-webuitestscript, -webuitestshots and the test.* methods of the bridge,

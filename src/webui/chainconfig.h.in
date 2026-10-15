@@ -31,6 +31,9 @@ inline constexpr int ICON_HUE{@WEBUI_CHAIN_ICON_HUE@};
 //! The name of the mainchain (the chain a sidechain is pegged to).
 inline constexpr std::string_view MAINCHAIN_NAME{"@WEBUI_MAINCHAIN_NAME@"};
 
+//! The help links of chain.json (links), which the app opens without asking.
+inline constexpr std::array<std::string_view, @WEBUI_CHAIN_LINKS_COUNT@> LINKS{{@WEBUI_CHAIN_LINKS@}};
+
 struct Network {
     std::string_view id;
     int p2p_port;

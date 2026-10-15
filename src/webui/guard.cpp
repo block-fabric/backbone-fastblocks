@@ -4,6 +4,8 @@
 
 #include <webui/guard.h>
 
+#include <webui/chainconfig.h>
+
 #include <tinyformat.h>
 #include <util/strencodings.h>
 
@@ -206,8 +208,8 @@ std::optional<Window::ConfirmDialog> ConsoleConfirmation(std::string_view method
 
 const std::vector<std::string>& KnownLinks()
 {
-    // Chains has no links of its own in its pages; a sidechain lists the ones of its chain.json.
-    static const std::vector<std::string> links{};
+    // The help links of chain.json (webui/chainconfig.h).
+    static const std::vector<std::string> links{chain::LINKS.begin(), chain::LINKS.end()};
     return links;
 }
 
