@@ -25,6 +25,7 @@ with peers of the test framework:
 """
 
 import time
+from contextlib import contextmanager
 from decimal import Decimal
 
 from feature_sidechain import SidechainTest
@@ -147,14 +148,24 @@ class FastBlocksUncheckedTest(SidechainTest):
         self.wait_until(lambda: len({n.getbestblockhash() for n in nodes}) == 1, timeout=timeout)
 
     def anchor(self):
-        """One more anchor: mine the merged miner's ticket requests until one is acknowledged."""
+        """One more anchor: mine the merged miner's ticket requests until one is acknowledged. With no
+        request for a while, a mainchain block all the same: after a long stretch without one (the
+        attack phases of a slow build, TSan, take an hour), the blocks of stake stopped, without an
+        anchor (max_unanchored_slots) and without the seeds of the epochs since; the merged miner asks
+        for nothing more while its last ticket waits for its acknowledgement. Mainchain blocks bring
+        the seeds and move the mainchain's median time on: then its ticket is acknowledged, or the chain
+        shows stalled and a merged mined block anchors."""
         before = [n.getposinfo()["anchors"] for n in self.validators()]
+        quiet = [0]
 
         def anchored():
             if all(n.getposinfo()["anchors"] > b for n, b in zip(self.validators(), before)):
                 return True
-            if self.main.getrawmempool():
+            if self.main.getrawmempool() or quiet[0] >= 10:
                 self.mine_main()
+                quiet[0] = 0
+            else:
+                quiet[0] += 1
             time.sleep(1)
             return False
         self.wait_until(anchored, timeout=120)
@@ -179,6 +190,19 @@ class FastBlocksUncheckedTest(SidechainTest):
             self.run_sidechain_test()
         finally:
             self.stop_mainchain()
+
+    @contextmanager
+    def clock_stays(self, node):
+        """`node`'s clock stays while attackers flood it. They do not serve the blocks of their headers,
+        and a block download times out after nPowTargetSpacing (10 minutes on regtest, more with more
+        peers): a slow build (TSan) can take that long over the flood, and the node would disconnect
+        the attackers for the time it took, not for anything they did. The checks stay the same; the
+        test's waits scale with --timeout-factor."""
+        node.setmocktime(int(time.time()))
+        try:
+            yield
+        finally:
+            node.setmocktime(0)
 
     def run_sidechain_test(self):
         use_raw_messages()
@@ -217,38 +241,39 @@ class FastBlocksUncheckedTest(SidechainTest):
         self.wait_until(lambda: n0.getposinfo()["slot"] > slot + 3, timeout=60)
         base = self.tips(late)
 
-        self.log.info("Reconnections: an attacker sends headers nobody can check, leaves, and comes back")
-        for r in range(ROUNDS):
-            attacker = late.add_p2p_connection(FastBlocksPeer())
-            self.send_headers(attacker, forged)
-            self.send_siblings(attacker, newest, slot + 1, r + 1)
-            attacker.sync_with_ping(timeout=120)
-            assert attacker.is_connected
-            held = self.tips(late)
-            self.log.debug(f"round {r}: {held} chain tips with the attacker connected")
-            # The forged chain and the siblings: the peer's budget, not more.
-            assert_greater_than(UNCHECKED_PER_PEER + base + 2, held)
-            attacker.peer_disconnect()
-            attacker.wait_for_disconnect()
-            # What it alone held goes with it.
-            self.wait_until(lambda: self.tips(late) <= base + 1, timeout=30)
-        assert_equal(late.getblockcount(), 0)
+        with self.clock_stays(late):
+            self.log.info("Reconnections: an attacker sends headers nobody can check, leaves, and comes back")
+            for r in range(ROUNDS):
+                attacker = late.add_p2p_connection(FastBlocksPeer())
+                self.send_headers(attacker, forged)
+                self.send_siblings(attacker, newest, slot + 1, r + 1)
+                attacker.sync_with_ping(timeout=120)
+                assert attacker.is_connected
+                held = self.tips(late)
+                self.log.debug(f"round {r}: {held} chain tips with the attacker connected")
+                # The forged chain and the siblings: the peer's budget, not more.
+                assert_greater_than(UNCHECKED_PER_PEER + base + 2, held)
+                attacker.peer_disconnect()
+                attacker.wait_for_disconnect()
+                # What it alone held goes with it.
+                self.wait_until(lambda: self.tips(late) <= base + 1, timeout=30)
+            assert_equal(late.getblockcount(), 0)
 
-        self.log.info("Many attackers at once: each holds its own budget, no more")
-        attackers = [late.add_p2p_connection(FastBlocksPeer()) for _ in range(ATTACKERS)]
-        for k, attacker in enumerate(attackers):
-            self.send_headers(attacker, forged)
-            self.send_siblings(attacker, newest, slot + 1, 10 + k, count=1500)
-        for attacker in attackers:
-            attacker.sync_with_ping(timeout=600)
-            assert attacker.is_connected
-        held = self.tips(late)
-        self.log.debug(f"{held} chain tips with {ATTACKERS} attackers connected")
-        assert_greater_than(ATTACKERS * UNCHECKED_PER_PEER + base + 2, held)
-        for attacker in attackers:
-            attacker.peer_disconnect()
-            attacker.wait_for_disconnect()
-        self.wait_until(lambda: self.tips(late) <= base + 1, timeout=30)
+            self.log.info("Many attackers at once: each holds its own budget, no more")
+            attackers = [late.add_p2p_connection(FastBlocksPeer()) for _ in range(ATTACKERS)]
+            for k, attacker in enumerate(attackers):
+                self.send_headers(attacker, forged)
+                self.send_siblings(attacker, newest, slot + 1, 10 + k, count=1500)
+            for attacker in attackers:
+                attacker.sync_with_ping(timeout=600)
+                assert attacker.is_connected
+            held = self.tips(late)
+            self.log.debug(f"{held} chain tips with {ATTACKERS} attackers connected")
+            assert_greater_than(ATTACKERS * UNCHECKED_PER_PEER + base + 2, held)
+            for attacker in attackers:
+                attacker.peer_disconnect()
+                attacker.wait_for_disconnect()
+            self.wait_until(lambda: self.tips(late) <= base + 1, timeout=30)
 
         self.log.info("An attacker serves forged copies of the blocks and inflates the best header; honest nodes connect")
         blocks = {}
@@ -321,23 +346,24 @@ class FastBlocksUncheckedTest(SidechainTest):
         # The stretch the node cannot check, which honest peers give it: several inbound budgets.
         assert_greater_than(len(honest) - first, 3 * INBOUND_BUDGET)
         blocks = {n0.getblockhash(h): bytes.fromhex(n0.getblock(n0.getblockhash(h), 0)) for h in range(1, first + 1)}
-        base = self.tips(last)
-        attackers = [last.add_p2p_connection(ServingPeer(blocks)) for _ in range(INBOUND_HOLDERS + 3)]
-        with last.assert_debug_log(["unchecked-budget"]):
-            for k, attacker in enumerate(attackers):
-                self.send_headers(attacker, prefix)
-                self.send_siblings(attacker, parent, slot, 30 + k, count=INBOUND_BUDGET + 20)
-                attacker.sync_with_ping(timeout=120)
-        held = self.tips(last) - base
-        self.log.debug(f"{held} new chain tips with {len(attackers)} inbound attackers connected")
-        # Each sibling is a tip: INBOUND_HOLDERS attackers hold INBOUND_BUDGET each, the others none.
-        assert_greater_than(INBOUND_HOLDERS * INBOUND_BUDGET + 2, held)
-        assert_greater_than(held, (INBOUND_HOLDERS - 1) * INBOUND_BUDGET)
-        connected = [a for a in attackers if a.is_connected]
-        assert_equal(len(connected), len(attackers))
-        # None punished for it.
-        with open(last.debug_log_path, encoding="utf-8") as log:
-            assert "Misbehaving" not in log.read()
+        with self.clock_stays(last):
+            base = self.tips(last)
+            attackers = [last.add_p2p_connection(ServingPeer(blocks)) for _ in range(INBOUND_HOLDERS + 3)]
+            with last.assert_debug_log(["unchecked-budget"]):
+                for k, attacker in enumerate(attackers):
+                    self.send_headers(attacker, prefix)
+                    self.send_siblings(attacker, parent, slot, 30 + k, count=INBOUND_BUDGET + 20)
+                    attacker.sync_with_ping(timeout=120)
+            held = self.tips(last) - base
+            self.log.debug(f"{held} new chain tips with {len(attackers)} inbound attackers connected")
+            # Each sibling is a tip: INBOUND_HOLDERS attackers hold INBOUND_BUDGET each, the others none.
+            assert_greater_than(INBOUND_HOLDERS * INBOUND_BUDGET + 2, held)
+            assert_greater_than(held, (INBOUND_HOLDERS - 1) * INBOUND_BUDGET)
+            connected = [a for a in attackers if a.is_connected]
+            assert_equal(len(connected), len(attackers))
+            # None punished for it.
+            with open(last.debug_log_path, encoding="utf-8") as log:
+                assert "Misbehaving" not in log.read()
 
         # The attackers serve the blocks below (the node asked them, the only peers that had them); honest
         # outbound peers: the node syncs the whole stretch, far over the inbound budget.
