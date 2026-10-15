@@ -694,6 +694,20 @@ without blaming the peer. One the node keeps already is found before any
 signature is checked, and dropped. Each leader found (below either header, or
 at the tip) is checked once.
 
+The set of the offence's epoch is looked for down the chain from the parent
+(of the block that carries the proof, of either header, or the tip), and never
+past `evidence_window_anchors` + 1 anchors (`SetFor`, `EvidenceWithin`): a set
+further down is out of the window (each anchor counts one in the state, so the
+anchors since it are more than the window: `bad-pos-evidence-old`, as when it
+is found), and a proof of any old slot anyone can name, slot 1 say, made the
+node walk the whole chain under `cs_main`, unblamed, 64 times a connection (154
+ms for 32 proofs over 200,000 blocks; review 5 of audit 6, attack 1,
+`attack5_old_slot_evidence_walks_the_chain`). The same bound holds for a block
+whose acknowledgement `CheckBlock` notes (a slot far below its parent's, which
+the header rules turn away: noted when connected otherwise). A header's own
+slot is after the median time of its parent's chain (`time-too-old`, before the
+hooks), so its leader's walk is short.
+
 From a peer, only a proof whose form is wrong (`-kind`, `-slot`, `-same`: any node
 sees it, whatever chain it has) is the peer's fault. One whose signatures do not
 check against the leader this node finds (`bad-pos-evidence-sig`) is dropped

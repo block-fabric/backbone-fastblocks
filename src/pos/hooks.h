@@ -138,12 +138,22 @@ public:
      * node does not know it: the anchor is on a branch whose blocks it has not connected. `view`: the
      * state of the chain of `prev`, to read the set from (that state alone); none: the sets this node
      * read before, or else the active chain's state (for headers). `anchor`: set to the anchor that made
-     * it (left alone for the genesis set). Called with cs_main held.
+     * it (left alone for the genesis set). `within`: if given, nullptr too once the walk down the chain
+     * passed more anchors than that (for a proof: a set out of its window, EvidenceWithin), so that
+     * the walk for a slot anyone names (a proof's) costs no more than the window, not the chain.
+     * Called with cs_main held.
      */
     std::shared_ptr<const ValidatorSet> SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view = nullptr, uint64_t* set_anchors = nullptr,
-                                               const CBlockIndex** anchor = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
-    /** The leader of `slot` for a block on top of `prev`: its epoch's set, and seed (from the record). Called with cs_main held. */
-    SlotLeader LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+                                               const CBlockIndex** anchor = nullptr, std::optional<uint64_t> within = std::nullopt) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    /** The leader of `slot` for a block on top of `prev`: its epoch's set, and seed (from the record). `within`: as SetFor's. Called with cs_main held. */
+    SlotLeader LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view = nullptr, std::optional<uint64_t> within = std::nullopt) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_sets_mutex);
+    /**
+     * Anchors the walk for the set of a proof's slot passes at most (SetFor's `within`): past them, the
+     * set is out of the window for proofs (more than evidence_window_anchors anchors before the chain's:
+     * bad-pos-evidence-old, as when it is found), or a block's parent is far below its slot.
+     */
+    uint64_t EvidenceWithin() const { return static_cast<uint64_t>(m_params.evidence_window_anchors) + 1; }
     /** The leader of `slot` on the active chain's tip. */
     SlotLeader ActiveLeaderOf(int64_t slot) const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
     /** Whether blocks of stake can be made now: the active chain has an active set for the current epoch. */

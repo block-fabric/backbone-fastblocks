@@ -269,7 +269,9 @@ bool FastBlocksHooks::CheckBlock(const CBlock& block, BlockValidationState& stat
     if (time > m_params.genesis_time && (time - m_params.genesis_time) % m_params.slot_seconds == 0 && Chainman()) {
         LOCK(::cs_main);
         if (const CBlockIndex* prev{Chainman()->m_blockman.LookupBlockIndex(block.hashPrevBlock)}) {
-            const SlotLeader leader{LeaderOf(*prev, SlotOf(time, m_params))};
+            // (Not walking down the whole chain for a block that names a slot far below its parent's: the
+            // header rules turn it away; noted when connected otherwise.)
+            const SlotLeader leader{LeaderOf(*prev, SlotOf(time, m_params), nullptr, EvidenceWithin())};
             if (leader.status == LeaderStatus::OK && CheckBlockSig(block, leader.pubkey, Genesis())) NoteAck(block.GetHash(), ack);
         }
     }
@@ -838,19 +840,26 @@ int64_t FastBlocksHooks::AnchorSlot(const CBlockIndex& anchor) const
 }
 
 std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& prev, int64_t epoch, const sidechain::StoreView* view, uint64_t* set_anchors,
-                                                            const CBlockIndex** anchor_out) const
+                                                            const CBlockIndex** anchor_out, std::optional<uint64_t> within) const
 {
     AssertLockHeld(::cs_main);
     // The newest anchor at or below prev whose slot is before the epoch before: the stake was fixed an
     // epoch before the seed of the epoch exists.
     const int64_t boundary{(epoch - 1) * m_params.slots_per_epoch};
+    uint64_t passed{0};
     for (const CBlockIndex* index{&prev}; index; index = index->pprev) {
         if (index->nHeight == 0) {
             if (set_anchors) *set_anchors = 0;
             return std::shared_ptr<const ValidatorSet>{std::shared_ptr<const ValidatorSet>{}, &m_genesis_set};
         }
         const bool anchor{!index->m_ext || index->nNonce != 0};
-        if (!anchor || SlotOf(index->nTime, m_params) >= boundary || AnchorSlot(*index) >= boundary) continue;
+        if (!anchor) continue;
+        if (SlotOf(index->nTime, m_params) >= boundary || AnchorSlot(*index) >= boundary) {
+            // (Each anchor counts one in the state: the set of one further down has more than `within`
+            // anchors after it, here.)
+            if (within && ++passed > *within) return nullptr;
+            continue;
+        }
         if (anchor_out) *anchor_out = index;
         if (view) return AnchorSetOf(index->GetBlockHash(), *view, set_anchors, /*from_state=*/true);
         ChainstateManager* chainman{Chainman()};
@@ -860,12 +869,12 @@ std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& p
     return nullptr;
 }
 
-FastBlocksHooks::SlotLeader FastBlocksHooks::LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view) const
+FastBlocksHooks::SlotLeader FastBlocksHooks::LeaderOf(const CBlockIndex& prev, int64_t slot, const sidechain::StoreView* view, std::optional<uint64_t> within) const
 {
     AssertLockHeld(::cs_main);
     SlotLeader leader;
     const int64_t epoch{EpochOf(slot, m_params)};
-    leader.set = SetFor(prev, epoch, view, &leader.set_anchors, &leader.set_anchor);
+    leader.set = SetFor(prev, epoch, view, &leader.set_anchors, &leader.set_anchor, within);
     if (!leader.set) {
         leader.status = LeaderStatus::SET_UNKNOWN;
         return leader;
@@ -924,8 +933,9 @@ std::optional<Offence> FastBlocksHooks::CheckChainEvidence(const DoubleProposal&
     if (!CheckEvidenceForm(proof, m_params, reason)) return std::nullopt;
     const int64_t offence_slot{SlotOf(proof.a.nTime, m_params)};
     if (offence_slot > slot) return fail("bad-pos-evidence-late");
-    // The leader of the slot on this chain.
-    const SlotLeader leader{LeaderOf(prev, offence_slot, &view)};
+    // The leader of the slot on this chain. (Not walking further down than the window reaches: a slot
+    // anyone can name, far below the block, would otherwise cost a walk down the whole chain.)
+    const SlotLeader leader{LeaderOf(prev, offence_slot, &view, EvidenceWithin())};
     switch (leader.status) {
     case LeaderStatus::SEED_UNKNOWN: return fail("pos-seed-unknown");
     case LeaderStatus::SET_UNKNOWN: return fail("bad-pos-evidence-old");
@@ -1296,7 +1306,9 @@ std::optional<Offence> FastBlocksHooks::AddEvidence(const DoubleProposal& proof,
                                                       chainman->ActiveChain().Tip()};
         for (const CBlockIndex* prev : prevs) {
             if (!prev) continue;
-            const SlotLeader leader{LeaderOf(*prev, slot)};
+            // (Within the window, as a block that carries it checks: a proof of an older slot is of no
+            // use, and anyone can name one, at the cost of a walk down the whole chain otherwise.)
+            const SlotLeader leader{LeaderOf(*prev, slot, nullptr, EvidenceWithin())};
             if (leader.status == LeaderStatus::SET_UNKNOWN || leader.status == LeaderStatus::SEED_UNKNOWN) unknown = true;
             if (leader.status != LeaderStatus::OK || checked.contains(leader.pubkey)) continue;
             checked.insert(leader.pubkey);
