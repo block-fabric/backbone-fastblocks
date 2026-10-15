@@ -546,9 +546,8 @@ class EstimateFeeTest(BitcoinTestFramework):
         high_feerate = Decimal("0.004")
         self.broadcast_and_maybe_mine(node0, high_feerate, TXS_COUNT, 6, miner)
         self.log.info("Test estimatesmartfee returns block policy estimator estimate when mempool is higher")
-        # Add large insane-feerate transactions enough to generate a block template
-        # (Chains: 11 rather than 10, so that each stays below the standard size.)
-        num_txs = 11
+        # Add 10 large insane-feerate transactions enough to generate a block template
+        num_txs = 10
         target_vsize = int(((MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT) / WITNESS_SCALE_FACTOR) / num_txs)
         utxos = [self.wallet.get_utxo(confirmed_only=True) for _ in range(num_txs)]
         insane_feerate = Decimal("0.01")
