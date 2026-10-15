@@ -147,6 +147,23 @@ public:
      * cannot check yet").
      */
     virtual UncheckedBudget UncheckedLimits() const { return {}; }
+    /**
+     * Whether a header the node can check (HeaderCheckable) is one of a kind it keeps no more of for
+     * good: the block index has as many like it as the chain's rules can need (say, a slot whose signer
+     * signed twice already, when a signature costs nothing). Such a header from a peer is taken only
+     * with a header on top of it in the same message (a branch some block builds on), and then as an
+     * unchecked one (held by that peer, within its budget, gone with it unless its block is connected);
+     * alone, it is refused (`header-spare`, BLOCK_HEADER_LOW_WORK: not punished, asked again once the
+     * tip moved). The node's own (source -1) are always taken. See doc/sidechain.md, "Spare headers".
+     * By default none. Called with cs_main held, before CheckHeader.
+     */
+    virtual bool HeaderSpare(const CBlockHeader& header, const CBlockIndex& prev) const { return false; }
+    /**
+     * `index` is in the block index for good: taken checked, its block connected (an unchecked one), or
+     * loaded from the block index database. What HeaderSpare counts. May be told twice of an entry.
+     * Called with cs_main held.
+     */
+    virtual void HeaderKept(const CBlockIndex& index) const {}
     /** Context free checks of a whole block, after Bitcoin's (CheckBlock). */
     virtual bool CheckBlock(const CBlock& block, BlockValidationState& state) const;
     /** What an extended header's hashSections must be for these sections (not empty). */
@@ -263,10 +280,19 @@ public:
     virtual bool ApplyTx(State& state, const CTransaction& tx, int height, bool peg_step, std::vector<CTxOut>& payouts, std::string& reject_reason) const;
     /**
      * Whether ApplyTx may refuse `tx` (it has outputs of the sidechain's own kinds): the mempool checks
-     * such transactions again after every change of its tip, and drops those the next block could no
-     * longer take (the state moved under them). By default none.
+     * such transactions again when the state moves under them (TxRuleKeys), and drops those the next
+     * block could no longer take. By default none.
      */
     virtual bool HasTxRules(const CTransaction& tx) const { return false; }
+    /**
+     * For a transaction with rules (HasTxRules): the keys of the state whose values alone decide
+     * whether ApplyTx takes it, whatever the height and the rest of the state. The mempool then checks
+     * it again only after a change of its tip that changed one of them (the work a block makes is that
+     * of what it changed, not that of the mempool: anyone can fill the mempool with such transactions,
+     * and their rules may cost signature checks), MAX_RULE_CHECKS_PER_TIP at a time. Nothing: again
+     * after every change of the tip (the default).
+     */
+    virtual std::optional<std::vector<std::vector<unsigned char>>> TxRuleKeys(const CTransaction& tx) const { return std::nullopt; }
     /**
      * Peg actions of the sidechain's own, first in a block that takes them: what it adds to
      * `owed_tx` is paid by the coinbase as refunds are. Block assembly calls it too, with the block

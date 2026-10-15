@@ -88,6 +88,10 @@ inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
  * A reorg deeper than this, like one past the blocks a pruned node keeps, cannot be made.
  */
 inline constexpr int DRIVECHAIN_UNDO_DEPTH{2880};
+/** Keys of the sidechain state noted as changed between two checks of the mempool, at most (Chainstate::NoteSideChanges): past it, all may have. */
+inline constexpr size_t MAX_SIDE_CHANGES_NOTED{100000};
+/** Transactions whose sidechain rules the mempool checks again at each change of the tip, at most (Chainstate::RemoveStaleDrivechainTxs): the others wait for the next. */
+inline constexpr size_t MAX_RULE_CHECKS_PER_TIP{500};
 /** How far the flushed block moves between two sweeps of the drivechain undo data (Chainstate::SweepDrivechainUndo). */
 inline constexpr int DRIVECHAIN_UNDO_SWEEP_INTERVAL{1000};
 static_assert(DRIVECHAIN_UNDO_DEPTH >= static_cast<int>(MIN_BLOCKS_TO_KEEP));
@@ -872,6 +876,15 @@ public:
 private:
     std::unique_ptr<sidechain::DbStore> m_side_db GUARDED_BY(::cs_main);
     std::unique_ptr<sidechain::StoreOverlay> m_side_cache GUARDED_BY(::cs_main);
+    /**
+     * The keys of the sidechain state that blocks connected or disconnected changed since the mempool
+     * last checked the sidechain's own rules again (RemoveStaleDrivechainTxs), or whether anything
+     * may have changed (the state loaded, wiped, or too much changed to note).
+     */
+    std::set<std::vector<unsigned char>> m_side_changed GUARDED_BY(::cs_main);
+    bool m_side_changed_all GUARDED_BY(::cs_main){true};
+    /** Note the keys of the sidechain state a block connected or disconnected changed (`changes`: those of its overlay). */
+    void NoteSideChanges(const std::map<std::vector<unsigned char>, std::optional<std::vector<unsigned char>>>& changes) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 public:
 
     /**
@@ -954,7 +967,10 @@ public:
      * Remove the mempool transactions that the drivechain rules no longer
      * allow in a block on top of the tip: requests for blind merged mining made
      * for another block, and deposits that do not follow from the current
-     * escrow output of their sidechain.
+     * escrow output of their sidechain. On a sidechain also refunds that can no
+     * longer be honoured, and transactions that no longer keep the sidechain's
+     * own rules: those whose state (ChainHooks::TxRuleKeys) changed since the
+     * last call (m_side_changed).
      */
     void RemoveStaleDrivechainTxs() EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_mempool->cs);
 
@@ -1198,13 +1214,16 @@ private:
      * known to be part of a sufficiently high-work chain (anti-dos check).
      * `source`: the peer it comes from (-1: none), which holds it if it is unchecked
      * (sidechain::ChainHooks::HeaderCheckable, m_unchecked).
+     * `continued`: the next header of the same message builds on this one (a spare header from a peer
+     * is taken only so: sidechain::ChainHooks::HeaderSpare).
      */
     bool AcceptBlockHeader(
         const CBlockHeader& block,
         BlockValidationState& state,
         CBlockIndex** ppindex,
         bool min_pow_checked,
-        int64_t source = -1) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        int64_t source = -1,
+        bool continued = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     friend Chainstate;
 
     /** Most recent headers presync progress update, for rate-limiting. */
@@ -1357,6 +1376,13 @@ public:
      * its own budget, whatever other peers hold. -1 always may.
      */
     bool AdmitUnchecked(const CBlockIndex& prev, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Whether a spare header (ChainHooks::HeaderSpare) on `prev` that comes alone from `source` is one the
+     * node may need now, and takes (unchecked) all the same: it would be the best header (more work, or
+     * the better key of the chain's own order, than any the node has), or it is a tip an outbound peer
+     * announces whose chain is better than the active one.
+     */
+    bool SpareWanted(const CBlockHeader& header, const CBlockIndex& prev, int64_t source) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** `source` holds `index`, an unchecked header (new or known), and those below it, if its budget allows. */
     void HoldUnchecked(CBlockIndex& index, int64_t source) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**

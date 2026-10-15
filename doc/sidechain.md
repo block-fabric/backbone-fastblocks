@@ -247,7 +247,8 @@ checks.
 | `Kind`, `CheckHeader` | `ContextualCheckBlockHeader`: a `PLUGIN` block has no proof of work and no BMM rule; the sidechain checks its header | every block is `BMM` |
 | `CheckBlock`, `SectionsHash` | `CheckBlock`; sections other than those the header commits to make the block mutated (`bad-sections-hash`) | no rules; tagged hash `sidechain/sections` |
 | `HeaderCheckable`, `UncheckedLimits` | `AcceptBlockHeader`: a header the node cannot check all of yet (a signature whose signer it knows only once it connected the chain below), and every header on top of one, is taken *unchecked*: held by the peers that send it, within each one's own budget (`unchecked-budget`, not punished), never written to the block index database, its block stored apart from the block files until connected, and both gone when no peer holds it; checked when its block is connected. See "Headers the node cannot check yet" | every header can be checked; budget 2000 headers and 32 MiB of blocks an outbound peer, 500 and 8 MiB an inbound one, 8 inbound peers holding any at once |
-| `CheckOtherExtension`, `ExtensionFailure` | `AcceptBlockHeader`, `AcceptBlock`, `ProcessNewBlock`, compact blocks: a header or block for an extended header the node has, with another extension. `EQUIVALENT` (another valid signature of the same block): taken with the extension the node has, which it keeps, and the peer is not punished; `REPLACE` (valid, and the one the node has is not: taken unchecked): replaces it (`Chainstate::ReplaceBlockExtension`; the stored block is written again with it, and a failure of the block with the old one taken back); `UNKNOWN`: the block is the same block, taken with its header's extension. A block whose extension fails when it is connected (`ExtensionFailure`), its header unchecked: the copy's fault (see below) | `INVALID`: a mutated block (`bad-blk-extension`); no extension failures |
+| `HeaderSpare`, `HeaderKept` | `AcceptBlockHeader`: a header of a kind the block index has as many of as the chain can need is taken from a peer only with a header on top of it in the same message, or alone if it would be the best header or is the better tip an outbound peer announces, and then unchecked; otherwise alone, refused (`header-spare`, not punished). See "Spare headers" | none |
+| `CheckOtherExtension`, `ExtensionFailure` | `AcceptBlockHeader`, `AcceptBlock`, `ProcessNewBlock` (not compact blocks: one with another extension is not reconstructed, nor judged -- a signature check for 200 bytes anyone can send for ever; the block comes whole): a header or block for an extended header the node has, with another extension. `EQUIVALENT` (another valid signature of the same block): taken with the extension the node has, which it keeps, and the peer is not punished; `REPLACE` (valid, and the one the node has is not: taken unchecked): replaces it (`Chainstate::ReplaceBlockExtension`; the stored block is written again with it, and a failure of the block with the old one taken back); `UNKNOWN`: the block is the same block, taken with its header's extension. A block whose extension fails when it is connected (`ExtensionFailure`), its header unchecked: the copy's fault (see below) | `INVALID`: a mutated block (`bad-blk-extension`); no extension failures |
 | `MaxFutureBlockTime` | `ContextualCheckBlockHeader`: how far ahead of the node's clock a block's time may be (`time-too-new`, a header that may come later) | two hours, as Bitcoin |
 | `CustomChainOrder`, `ChainWork` | `nChainWork` when a header is added or the index loaded, and for a block and all above it when the record takes back its failure (`ReconsiderRecordFailure`: a key that reads the record may have changed); with a chain order of its own, headers presync (a minimum of work) is skipped, and so is the anti-DoS work threshold near the tip (a compact block whose parent has a lower key is not low-work) | most work |
 | `PardonRecordFailures` | `AcceptBlockHeader`: a header of a block that failed against the record of the mainchain (`Mainchain::Failure::RECORD`, the block or the failed block it descends from), or on one, is `BLOCK_TIME_FUTURE` (`record-failed`) rather than `BLOCK_CACHED_INVALID`/`BLOCK_INVALID_PREV`: the peer is not punished, its record may be ahead; and a block that fails against the record when connected is `BLOCK_TIME_FUTURE` rather than `BLOCK_CONSENSUS`. `RecordIndependent` names the reasons of the sidechain's own rules that fail a block whatever the record says (not failures against the record) | on (off: punished as in Bitcoin); no reasons of its own |
@@ -256,7 +257,7 @@ checks.
 | `GetPegStep`, `BeforePegStep`, `AfterBlock`, `RefundsOnlyInPegSteps` | `State::ConnectBlock`, split into `ApplyPegStep` (mainchain events, bundle), `ApplyTxs` and `TakePayouts`. A block without a peg step pays nothing (what it owes is queued), cannot start a bundle (`bad-sc-bundle-not-peg`) and, with the switch, takes no refund request (`bad-sc-refund-not-peg`). `PegStep::max_withdrawal_height` limits the withdrawals a bundle takes; `PegStep::peg_height`, if set, is the height the peg actions count as at in place of the block's (the bundle's lock time, the height of a failure the retry delay counts from), so that blocks that take them for the same block build the same bundle. `AfterBlock` is told what the coinbase paid out (`minted`), and writes the sidechain's own tables through `State::Writable` | every block takes the peg actions as committed, with its parent as the bundle nonce |
 | `MergeMinedOutputs` | block assembly of a merged mined block (`SidechainAssembly::Peg::BMM`): outputs of the sidechain's own in the coinbase, after the payouts and the bundle commitment (proofs its rules take, say), given the state with the block so far | none |
 | `ApplyTx` | `State::ApplyTx`, after the template's rules for a transaction, on its own overlay (all or nothing; what it owes is paid as refunds are), so in blocks and block assembly; and the mempool (`DrivechainChecks`), on an overlay that is dropped, with the next block's height | no rules |
-| `HasTxRules` | `Chainstate::RemoveStaleDrivechainTxs`: after every change of the tip, the mempool's transactions it names (those `ApplyTx` may refuse) are checked again on the new tip, and dropped, with what spends them, if the next block could no longer take them | none |
+| `HasTxRules`, `TxRuleKeys` | `Chainstate::RemoveStaleDrivechainTxs`: after a change of the tip, the mempool's transactions `HasTxRules` names (those `ApplyTx` may refuse) are checked again on the new tip, and dropped, with what spends them, if the next block could no longer take them. Only those whose keys of the state (`TxRuleKeys`: those whose values alone decide) the blocks connected or disconnected changed (`Chainstate::NoteSideChanges`; all of them when the hooks cannot tell, or the state was loaded), and `MAX_RULE_CHECKS_PER_TIP` (500) at most per change of the tip, the rest queued for the next ones (`CTxMemPool::QueueRuleCheck`): the work is that of what blocks change, not that of the mempool, which anyone can fill with such transactions | none; keys: none (all, after every change of the tip) |
 | `node::SidechainAssembly` | `BlockAssembler`: a block with the template's peg actions, none, or those of a given `PegStep`, its sections, and a transaction filter. Assembly calls `BeforePegStep` as `ConnectBlock` does, with the block as far as it is known (parent, version, time, sections, and a coinbase paying the coinbase script), so that the coinbase pays what it owes; `AfterBlock` is for validation only | the template's block |
 | `FollowerRound`, `StartServices`, `StopServices` | the Follower's loop (in place of its merged mining), and node start and shutdown | the Follower mines; no services |
 | `ProcessMessage`; `PeerManager::SendSidechainMessage`, `BroadcastSidechainMessage` | message types Bitcoin does not know, after the handshake | ignored |
@@ -419,6 +420,42 @@ holds a header, and which copy of an extension it tries first. Tests:
 `extension_failure_not_the_peers_fault`, `unchecked_erased_while_used`,
 `extension_failure_asked_again_whatever_fails`) and the fuzz target
 `sidechain_unchecked`.
+
+## Spare headers
+
+Where a header costs nothing to make (a signature, not proof of work), its signer
+can make as many of one block as it likes (another merkle root each), and a node
+would keep each one for good in its block index (on disk, in memory) -- no anti-DoS
+work threshold applies to a chain whose order is not work (`CustomChainOrder`).
+`HeaderSpare` lets the sidechain say that the block index has as many headers like
+this one as the chain can need (FastBlocks: two of a slot, the first and the proof
+that its signer signed twice); `HeaderKept` tells it of every entry that is in the
+block index for good (taken checked, its block connected, loaded at startup).
+A spare header from a peer (`AcceptBlockHeader`):
+
+- **alone** (no next header of the same message on top of it): refused,
+  `header-spare` (`BLOCK_HEADER_LOW_WORK`: not the peer's fault, the peer is asked
+  again once the tip moved). A block whose header is spare and that the node does
+  not have comes in alone too (a block, a compact block): refused the same way.
+  But not one the node may need now (`ChainstateManager::SpareWanted`): one that
+  would be its best header (more work, or the better key of the chain's own order,
+  than any header it has), or the tip an outbound peer (one the node chose)
+  announces, of a chain better than the active one. New tips are announced alone (a
+  `headers` message of one header, a compact block), and the first headers like it
+  may be junk its signer signed: such a header is taken *unchecked* as below, and
+  its block fetched at once, not a block later.
+- **with a header on top of it** in the same message (a branch some block builds
+  on: a peer that sends a block on it answers `getheaders` from the fork, the spare
+  header and what is on it): taken *unchecked* (above): held by that peer within
+  its budget, not written to the block index database, gone with its holders, kept
+  for good once its block is connected. So a node never cuts itself off from the
+  branch the network builds on, and spare headers it keeps for good are those of
+  connected blocks.
+
+The node's own headers (source -1: its blocks, `-reindex`, `-loadblock`) are never
+spare. Not a rule of a block. Tests: `sidechain_hooks_tests.cpp`
+(`spare_headers_only_on_a_branch`, `spare_header_announced_by_an_outbound_peer`), and a sidechain's own (FastBlocks:
+`attack6_leader_signs_headers_without_bound`).
 
 ## Limits to know
 

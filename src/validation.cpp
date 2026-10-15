@@ -3021,7 +3021,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         Ticks<std::chrono::nanoseconds>(time_5 - time_start)
     );
 
-    if (side_store) block_store.MergeInto(*side_store);
+    if (side_store) {
+        // (What the mempool checks again: RemoveStaleDrivechainTxs.)
+        if (side_store == m_side_cache.get()) NoteSideChanges(block_store.Changes());
+        block_store.MergeInto(*side_store);
+    }
     if (!scdb_temporary) scdb_rollback.db = nullptr;
     return true;
 }
@@ -3346,6 +3350,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
             return false;
         }
         view.Flush(/*reallocate_cache=*/false); // local CCoinsViewCache goes out of scope
+        NoteSideChanges(side_store.Changes());
         side_store.MergeInto(SideCache());
         // The block's records stay (readers skip blocks out of the active chain; reconnected, it
         // writes them again): erasing them would not be crash-safe, the coins being flushed later.
@@ -4432,6 +4437,7 @@ void ChainstateManager::ReleaseUnchecked(CBlockIndex& index)
     m_unchecked.erase(&index);
     index.m_unchecked = false;
     m_blockman.m_dirty_blockindex.insert(&index);
+    sidechain::Hooks().HeaderKept(index);
 }
 
 bool ChainstateManager::PromoteUncheckedBlock(const CBlock& block, CBlockIndex& index)
@@ -5184,7 +5190,19 @@ static const char* PardonedFailure(const ChainstateManager& chainman, const CBlo
     return nullptr;
 }
 
-bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, int64_t source)
+bool ChainstateManager::SpareWanted(const CBlockHeader& header, const CBlockIndex& prev, int64_t source) const
+{
+    AssertLockHeld(cs_main);
+    const arith_uint256 work{sidechain::Hooks().CustomChainOrder() ? sidechain::Hooks().ChainWork(&prev, header) : prev.nChainWork + GetBlockProof(header)};
+    // The most work (or, with the chain's own order, the best key: more anchors, say): the best header.
+    if (m_best_header && work > m_best_header->nChainWork) return true;
+    // An announcement from an outbound peer: a tip better than the active chain's.
+    const bool outbound{m_unchecked_sources.contains(source) && !m_unchecked_inbound.contains(source)};
+    const CBlockIndex* tip{ActiveChain().Tip()};
+    return outbound && tip && work > tip->nChainWork;
+}
+
+bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked, int64_t source, bool continued)
 {
     AssertLockHeld(cs_main);
 
@@ -5246,9 +5264,25 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
         unchecked = pindexPrev->m_unchecked || !sidechain::Hooks().HeaderCheckable(block, *pindexPrev);
+        // One of a kind the block index has as many of as the chain can need (a signature that costs
+        // nothing, made again and again): from a peer, not kept for good (ChainHooks::HeaderSpare).
+        const bool spare{!unchecked && source != -1 && sidechain::Hooks().HeaderSpare(block, *pindexPrev)};
         if (!ContextualCheckBlockHeader(block, state, *this, pindexPrev)) {
             LogDebug(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
             return false;
+        }
+        if (spare) {
+            // Alone, nothing builds on it: refused (not the peer's fault) -- unless the node may need it
+            // now: it would be the node's best header (more work than any it has: the chain the node
+            // would follow, its block once it has it), or it is the tip an outbound peer (one the node
+            // chose) announces, of a branch with more work than the active chain. Those, and one with a
+            // header on top of it (the branch a block builds on), are taken as unchecked headers: the
+            // peer's, within its budget, and kept for good only once the block is connected.
+            if (!continued && !SpareWanted(block, *pindexPrev, source)) {
+                LogDebug(BCLog::VALIDATION, "%s: spare header %s from peer=%d, alone (header-spare)\n", __func__, hash.ToString(), source);
+                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "header-spare", "the node keeps no more headers like this one, but on the branch of a header on top of it");
+            }
+            unchecked = true;
         }
         if (unchecked && min_pow_checked && !AdmitUnchecked(*pindexPrev, source)) {
             LogDebug(BCLog::VALIDATION, "%s: unchecked header %s from peer=%d over the budget (unchecked-budget)\n", __func__, hash.ToString(), source);
@@ -5261,7 +5295,11 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     // (AdmitUnchecked may have made room: the parent is not among what went.)
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
-    if (unchecked) HoldUnchecked(*pindex, source);
+    if (unchecked) {
+        HoldUnchecked(*pindex, source);
+    } else {
+        sidechain::Hooks().HeaderKept(*pindex);
+    }
 
     if (ppindex)
         *ppindex = pindex;
@@ -5279,9 +5317,12 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
     std::optional<std::pair<int, NodeClock::time_point>> last_accepted;
     {
         LOCK(cs_main);
-        for (const CBlockHeader& header : headers) {
+        for (size_t i{0}; i < headers.size(); ++i) {
+            const CBlockHeader& header{headers[i]};
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked, source)};
+            // (A header with the next one on top of it: the branch that one builds on, HeaderSpare.)
+            const bool continued{i + 1 < headers.size() && headers[i + 1].hashPrevBlock == header.GetHash()};
+            bool accepted{AcceptBlockHeader(header, state, &pindex, min_pow_checked, source, continued)};
             CheckBlockIndex();
 
             if (!accepted) {
@@ -5771,9 +5812,25 @@ drivechain::SidechainDB Chainstate::GetMempoolSidechainDB(const std::set<drivech
     return scdb;
 }
 
+void Chainstate::NoteSideChanges(const std::map<std::vector<unsigned char>, std::optional<std::vector<unsigned char>>>& changes)
+{
+    AssertLockHeld(::cs_main);
+    // (Only for the mempool's checks: none without one.)
+    if (!m_mempool || m_side_changed_all) return;
+    for (const auto& [key, value] : changes) m_side_changed.insert(key);
+    // Bounded: past so many (blocks connected without a check between), all.
+    if (m_side_changed.size() > MAX_SIDE_CHANGES_NOTED) {
+        m_side_changed.clear();
+        m_side_changed_all = true;
+    }
+}
+
 void Chainstate::RemoveStaleDrivechainTxs()
 {
     AssertLockHeld(::cs_main);
+    // What changed since the last call: taken whatever happens next.
+    const std::set<std::vector<unsigned char>> changed{std::exchange(m_side_changed, {})};
+    const bool changed_all{std::exchange(m_side_changed_all, false)};
     if (!m_mempool) return;
     AssertLockHeld(m_mempool->cs);
     // (On a sidechain the hooks' own rules are checked again whatever else is in the mempool.)
@@ -5794,19 +5851,37 @@ void Chainstate::RemoveStaleDrivechainTxs()
         }
         // The sidechain's own rules (ChainHooks::HasTxRules), checked at entry against the tip then:
         // a block may have changed the state they read (a name or an asset taken by another transaction
-        // that was mined first, say). Such a transaction no block takes would
-        // otherwise hold its inputs, and the wallet that made it, until the mempool expires it.
+        // that was mined first, say). Such a transaction no block takes would otherwise hold its
+        // inputs, and the wallet that made it, until the mempool expires it. Only those whose state
+        // changed since the last check (TxRuleKeys; all of them if the hooks cannot tell, or the state
+        // was loaded): the work is that of what blocks changed, not that of the mempool, which anyone
+        // can fill with transactions whose rules cost signature checks. And at most
+        // MAX_RULE_CHECKS_PER_TIP at each change of the tip, the rest queued for the next ones: one
+        // who has a key that many transactions read change at every block (a bond of its own mined)
+        // makes no more work than that. (Only the mempool's upkeep: block assembly checks the rules
+        // of each transaction it takes anyway.)
+        for (const Txid& txid : m_mempool->m_rule_txs_any) m_mempool->QueueRuleCheck(txid);
+        if (changed_all) {
+            for (const auto& [txid, keys] : m_mempool->m_rule_keys_of) m_mempool->QueueRuleCheck(txid);
+        } else {
+            for (const auto& key : changed) {
+                if (const auto found{m_mempool->m_rule_txs.find(key)}; found != m_mempool->m_rule_txs.end()) {
+                    for (const Txid& txid : found->second) m_mempool->QueueRuleCheck(txid);
+                }
+            }
+        }
         const int next_height{m_chain.Height() + 1};
-        for (const CTxMemPoolEntryRef& entry : m_mempool->entryAll()) {
-            const CTransaction& tx{entry.get().GetTx()};
-            if (!sidechain::Hooks().HasTxRules(tx)) continue;
+        for (const Txid& txid : m_mempool->TakeRuleChecks(MAX_RULE_CHECKS_PER_TIP)) {
+            const CTransactionRef ptx{m_mempool->get(txid)};
+            if (!ptx) continue;
+            const CTransaction& tx{*ptx};
             sidechain::StoreOverlay scratch{side.View(), /*journal=*/false};
             sidechain::State scratch_state{scratch};
             std::vector<CTxOut> payouts;
             std::string reason;
             if (!sidechain::Hooks().ApplyTx(scratch_state, tx, next_height, /*peg_step=*/false, payouts, reason)) {
                 LogDebug(BCLog::MEMPOOL, "%s no longer keeps the rules of the sidechain (%s): out of the mempool\n", tx.GetHash().ToString(), reason);
-                stale.push_back(entry.get().GetSharedTx());
+                stale.push_back(ptx);
             }
         }
     }
@@ -5876,6 +5951,7 @@ util::Result<void> Chainstate::ResetDrivechainState()
 {
     AssertLockHeld(::cs_main);
     sidechain::StoreOverlay& cache{SideCache()};  // opens the store
+    m_side_changed_all = true;
     // Of another format, or derived under other parameters: wiped whole (the blocks found invalid
     // under the former parameters are judged again), and marked as of the current format at once:
     // what the blocks write from now on is of this one.
@@ -6074,6 +6150,7 @@ bool Chainstate::PrepareDrivechainDB(const CBlockIndex* rebuild_from, bilingual_
     db.Wipe();
     m_side_db->Reset();
     cache.Clear();
+    m_side_changed_all = true;
     // Without a chainstate to rebuild from (-reindex-chainstate, say), the blocks connected next
     // fill the database in the current format.
     if (!rebuild_from) db.WriteFormatVersion();
@@ -6091,6 +6168,7 @@ util::Result<void> Chainstate::LoadDrivechainState()
 
     drivechain::Database& db{*m_blockman.m_drivechain_db};
     sidechain::StoreOverlay& cache{SideCache()};
+    m_side_changed_all = true;
     // Of another format, or derived under other parameters: wiped, after checking that the blocks
     // it is derived again from are all there (nothing is wiped otherwise).
     const bool old_format{db.CheckFormat() != drivechain::Database::Format::CURRENT};
@@ -6245,6 +6323,7 @@ util::Result<void> Chainstate::RollForwardSidechainDB(drivechain::SidechainDB& s
     }
     // Brought forward for the chainstate itself: its store is written out as it goes.
     const bool own_cache{side_store && side_store == m_side_cache.get()};
+    if (own_cache) m_side_changed_all = true;
     for (int height{from->nHeight + 1}; height <= to->nHeight; ++height) {
         const CBlockIndex* next{to->GetAncestor(height)};
         CBlock block;
@@ -6605,6 +6684,7 @@ bool ChainstateManager::LoadBlockIndex()
 
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
+            sidechain::Hooks().HeaderKept(*pindex);
             if (pindex->nStatus & BLOCK_FAILED_VALID && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
@@ -6636,6 +6716,7 @@ bool ChainstateManager::LoadGenesisBlock()
             return false;
         }
         CBlockIndex* pindex{m_blockman.AddToBlockIndex(genesis_block, m_best_header)};
+        sidechain::Hooks().HeaderKept(*pindex);
         ReceivedBlockTransactions(genesis_block, pindex, blockPos);
     } catch (const std::runtime_error& e) {
         LogError("Failed to write genesis block: %s", e.what());
