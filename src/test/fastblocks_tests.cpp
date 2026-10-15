@@ -4586,4 +4586,70 @@ BOOST_AUTO_TEST_CASE(attack4_fresh_node_blames_honest_evidence_relay)
     BOOST_CHECK_MESSAGE(misbehaving.empty(), "attack works: an honest peer relaying a true proof is punished");
 }
 
+BOOST_FIXTURE_TEST_CASE(attack5_old_slot_evidence_walks_the_chain, FastBlocksSetup)
+{
+    // ATTACK (any inbound peer, no stake). A relayed proof is checked against the leader of its slot on
+    // the chain below either header and at the tip (AddEvidence), under cs_main. CheckEvidenceForm asks
+    // only that both headers sit at the start of one slot: a proof of slot 1 has LeaderOf walk SetFor
+    // from each prev down to genesis (no anchor is before the epoch before epoch 0). Its signatures then
+    // fail, which is not the peer's fault, so nothing is blamed, and each new connection has a fresh
+    // burst of EVIDENCE_CHECKS_BURST. The cost grows with the chain: a year of 30-second slots is about
+    // a million blocks. Here a chain of CHAIN headers (as an honest chain grows; added to the index
+    // directly, from genesis) stands for it.
+    StartPos();
+    const CBlock base{PosBlock(1)};
+    constexpr int CHAIN{200000};
+    const CBlockIndex* long_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        CBlockIndex* best{nullptr};
+        CBlockHeader header{Tip()->GetBlockHeader()};
+        header.nVersion = 0x20000000; // a BMM header: no extension
+        header.ext = {};
+        // From genesis, a block a slot (anchors throughout, as a real chain has): the walk for a slot of
+        // the last epochs stops at once, that for slot 1 goes down to genesis.
+        uint256 prev{Genesis()};
+        for (int i{0}; i < CHAIN; ++i) {
+            header.hashPrevBlock = prev;
+            header.nTime = static_cast<uint32_t>(pos::SlotTime(i + 1, Pos()));
+            header.hashMerkleRoot = ArithToUint256(arith_uint256{static_cast<uint64_t>(i + 1)});
+            CBlockIndex* index{Chainman().m_blockman.AddToBlockIndex(header, best)};
+            prev = index->GetBlockHash();
+            long_tip = index;
+        }
+    }
+    const auto proof_at{[&](int64_t slot, const uint256& prev_a, const uint256& prev_b, uint64_t salt) {
+        CBlock a{base}, b{base};
+        a.nTime = b.nTime = static_cast<uint32_t>(pos::SlotTime(slot, Pos()));
+        a.hashPrevBlock = prev_a;
+        b.hashPrevBlock = prev_b;
+        a.hashMerkleRoot = ArithToUint256(arith_uint256{2 * salt + 1});
+        b.hashMerkleRoot = ArithToUint256(arith_uint256{2 * salt + 2});
+        return pos::DoubleProposal{.a = a, .b = b};
+    }};
+    const auto send{[&](int64_t peer, const pos::DoubleProposal& proof) {
+        DataStream stream{};
+        stream << proof;
+        std::string misbehaving;
+        BOOST_CHECK(Hooks().ProcessMessage(peer, pos::MSG_EVIDENCE, stream, misbehaving));
+        return misbehaving;
+    }};
+    const uint256 tip_a{long_tip->GetBlockHash()}, tip_b{long_tip->pprev->GetBlockHash()};
+    const int64_t recent{pos::SlotOf(base.nTime, Pos())};
+    constexpr int PROOFS{32};
+    // Proofs of a recent slot, then of slot 1, from as many peers (each new: a fresh burst), same prevs.
+    const auto time{[&](int64_t slot, int64_t first_peer) {
+        const auto start{std::chrono::steady_clock::now()};
+        for (int i{0}; i < PROOFS; ++i) BOOST_CHECK_EQUAL(send(first_peer + i, proof_at(slot, tip_a, tip_b, first_peer + i)), "");
+        return Ticks<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+    }};
+    const auto recent_us{time(recent, 1000)};
+    const auto old_us{time(1, 2000)};
+    BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 0U);
+    BOOST_TEST_MESSAGE(PROOFS << " proofs of a recent slot: " << recent_us << " us; of slot 1, over a chain of " << CHAIN << " blocks: " << old_us
+                              << " us (cs_main held, no peer blamed; a peer's burst is " << pos::EVIDENCE_CHECKS_BURST << ")");
+    BOOST_CHECK_MESSAGE(old_us < 10 * recent_us + 20000, "attack works: a proof of an old slot costs a walk of the whole chain under cs_main, unblamed, "
+                                                         << old_us / PROOFS << " us each against " << recent_us / PROOFS << " us");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
