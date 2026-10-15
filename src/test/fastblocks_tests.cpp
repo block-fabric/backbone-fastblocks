@@ -4875,4 +4875,38 @@ BOOST_FIXTURE_TEST_CASE(attack5_ticket_cap_reset_by_reconnecting, FastBlocksSetu
                                                                                << taken << " taken and relayed, honest ticket pushed out: " << !honest_kept);
 }
 
+BOOST_FIXTURE_TEST_CASE(attack6_leader_signs_headers_without_bound, FastBlocksSetup)
+{
+    // ATTACK (a single malicious validator, or one that left: its key costs it nothing once unbonded or
+    // banned). The leader of a slot signs as many headers of that slot as it likes (another merkle root
+    // each), on the block before its slot, deep in the chain if it led a slot there. Each is checked
+    // (the node knows the leader), so no unchecked budget applies; the custom chain order skips the
+    // anti-DoS work threshold; and a second header of a slot is noted as a proof but still taken. Each
+    // header becomes a permanent entry of the block index (written to its database), on every node,
+    // at the cost of one signature for the attacker.
+    StartPos();
+    for (int i{1}; i <= 10; ++i) Take(PosBlock(i));
+    const CBlockIndex* victim{WITH_LOCK(::cs_main, return Tip()->GetAncestor(Tip()->nHeight - 7))};
+    BOOST_REQUIRE(victim->m_ext);
+    const CBlockHeader original{WITH_LOCK(::cs_main, return victim->GetBlockHeader())};
+    const int64_t slot{pos::SlotOf(original.nTime, Pos())};
+    const CKey& leader{Leader(slot)};
+    constexpr int HEADERS{2000};
+    const size_t index_before{WITH_LOCK(::cs_main, return Chainman().m_blockman.m_block_index.size())};
+    size_t taken{0};
+    const auto start{std::chrono::steady_clock::now()};
+    for (int n{0}; n < HEADERS; ++n) {
+        CBlock block{original};
+        block.hashMerkleRoot = ArithToUint256(arith_uint256{static_cast<uint64_t>(n + 1)} << 100);
+        BOOST_REQUIRE(pos::Producer::Sign(block, leader, Genesis()));
+        taken += HeaderReason({static_cast<const CBlockHeader&>(block)}, /*source=*/4).empty();
+    }
+    const auto elapsed_ms{Ticks<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)};
+    const size_t growth{WITH_LOCK(::cs_main, return Chainman().m_blockman.m_block_index.size()) - index_before};
+    const size_t unchecked{WITH_LOCK(::cs_main, return Chainman().UncheckedHeld(4))};
+    BOOST_TEST_MESSAGE(HEADERS << " headers one leader signed for slot " << slot << " (" << (Tip()->nHeight - victim->nHeight) << " blocks deep): " << taken
+                               << " taken, block index +" << growth << " (" << unchecked << " of them unchecked, the rest permanent), " << elapsed_ms << " ms");
+    BOOST_CHECK_MESSAGE(growth <= 16, "attack works: one validator key adds " << growth << " permanent block index entries for one slot, without bound");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
