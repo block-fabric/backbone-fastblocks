@@ -238,3 +238,25 @@ the label of a sent payment can be edited in the history).
 | T02 | Look selector in the sidebar and the menu; saved and applied at once | bitcoingui.cpp, theme.cpp | [x] |
 | T03 | Font family per look and a size adjustment (-6..+12) | theme.cpp `SaveFont` | [x] |
 | T04 | Custom combination of colours and font | optionsdialog.cpp | [x] Settings → Display: any colours with any font (Inter, Nunito, JetBrains Mono, the font of the desktop), lib/themes.ts `FONTS` |
+
+## S. The sidechain template (its Qt GUI, `sidechain-qt`)
+
+The template's Qt GUI was the one of chains-qt with the changes of a sidechain (`git show <"Remove the Qt
+GUI" commit>^:src/qt/...`). Its inventory, item by item, and where the app of a sidechain does each
+(the pages: doc/webui.md, "The app of a sidechain"):
+
+| ID | Function | Qt source | Status |
+|----|----------|-----------|--------|
+| S01 | Mainchain page, header: following the mainchain node at host:port, its height, the slot of this sidechain; "cannot be reached" with the error; "not running as a sidechain" | sidechainpage.cpp `refreshPage` | [x] pages/Peg.svelte: the peg drawn (the mainchain, the connection, its height and node; this chain, its slot, the mainchain block it acted on), the error, the stats; the home's Peg card; the connection also on the Merged mining page |
+| S02 | Deposit tab: instructions, "New deposit address" (getdepositaddress), copy | sidechainpage.cpp `createDepositTab` | [x] Peg → Deposit: the instructions, a new deposit address, copy, its QR code, the address it credits; and more: the deposit made by the wallet of the mainchain node (`peg.deposit`), the deposits to this chain credited or on their way, those to the wallet marked |
+| S03 | Withdraw tab: mainchain address, amount, mainchain fee, confirmation, createwithdrawal; the bundle status (pending, next, none, last failure); withdrawals table (status, amount, fee, block, refund address, txid, vout); take the selected one back (refundwithdrawal) | sidechainpage.cpp `createWithdrawTab`, `withdraw`, `refund` | [x] Peg → Withdraw: the address checked as an address of the mainchain (or one of the mainchain wallet a click away), amount, fee, what leaves the wallet, confirmation, the passphrase of a locked wallet for the call; the withdrawals not paid yet, those of the wallet marked and taken back (only those waiting); Peg → Bundle: the bundle and its state, and more: its votes on the mainchain against the score it needs, the blocks it has left, the bundles before it, paid or failed |
+| S04 | Mine tab: the address of the fees (new one of the wallet), start / stop automatic mining (setbmm), one block by hand for an offer (requestbmmblock), the status (requests, blocks, outbid, idle, last fees and offer, error) | sidechainpage.cpp `createMiningTab` | [x] pages/Bmm.svelte: the same, with "always" and its offer (setbmm's test mode), candidates, the blocks of the mainchain and what each committed to, the log of what happened since the start |
+| S05 | Mining in the sidebar: automatic mining on/off, one block by hand with its fee, a status line | sidebarmining.cpp | [x] the home's Merged mining card (on or off, blocks, requests, the share of mainchain blocks committed; the page a click away), the Merged mining page; the menu items of the chain (Peg, Deposit…, Withdraw…, Withdrawal bundle, Merged mining) and the palette |
+| S06 | Menu "Use <name>" with "Merged Mining"; the Mainchain page at Alt+5 | bitcoingui.cpp `createMenuBar` | [x] the menu of the chain (named after it), Alt+5 opens Peg |
+| S07 | No Sidechain Nodes, no solo mining in the toolbar or the menus, no sidechain proposals or votes | bitcoingui.cpp | [x] chain.json `drop`: the pages Sidechains, Sidechain nodes and Mine are not in the app of a sidechain (nor their menu items, quick actions, cards and RPC methods); the host does not register the sidechain nodes |
+| S08 | Names: window title, `<name>-Qt` settings, `<stem>:` URIs, the dummy address of the network | guiconstants.h, guiutil.cpp | [x] chain.json (name, bin, uriScheme, networks): the title, the settings file `<stem>-app.json`, the URIs, the example addresses of the fields |
+| S09 | The connection to the mainchain node: -mainchainrpc* in the configuration file only | (none in the Qt GUI) | [x] new: Settings → the mainchain (address, RPC port, wallet, user name; the cookie file and the password file from the file chooser) |
+
+L01–L05 (the sidechains of the mainchain, its proposals and votes, the sidechain nodes, solo mining)
+are the mainchain's: not in the app of a sidechain (S07). L06–L10 and every other section above hold
+for the app of a sidechain as they are.

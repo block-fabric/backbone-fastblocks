@@ -12,6 +12,14 @@ integrated title bar: [webui-layouts.md](webui-layouts.md).
 This document says how to build and run it, and how it is made, so that the
 sidechains can take it over for their own apps.
 
+> **In this tree (the sidechain template).** The kit is the one of `chains-app`, made configurable: the
+> program is `<stem>-app` (here `sidechain-app`, and `test_sidechain-app`), and what the app shows of its
+> chain is in one file, `src/webui/app/src/chain/chain.json`. The app of a sidechain has pages of its own
+> (Peg, Merged mining, its home, the Mainchain tab of Settings) in place of those of the mainchain
+> (Sidechains, Sidechain nodes, Solo mine). How, and how a sidechain adds its own pages so that the
+> merges of the template stay clean: [The app of a sidechain](#the-app-of-a-sidechain). The commands
+> below say `chains-app`; read `<stem>-app` (the CMake targets keep the names of chains-app).
+
 ## Build
 
 ```
@@ -263,20 +271,84 @@ Rules the code keeps:
 * **Long lists.** Keep them as raw state (`$state.raw`), replaced as a whole,
   and draw them with DataTable (only the rows in view).
 
-## Taking it over for a sidechain
+## The app of a sidechain
 
-What is generic, and moves as it is: the bridge (and its lanes, policy hook,
-UTF-8 repair), the events, the window and the tray of GTK, the assets and their
-policy, the settings file of the app, the single instance, the languages, the
-title bar, and in the interface: lib/ (bridge, state, i18n, windowframe, nav,
-keyboard, dialogs, units, format, commands, layout), the components, the
-themes, the layouts and the settings page.
+### The chain, in one place: chain.json
 
-What each chain sets: `CLIENT_NAME` and the scheme of its payment URIs
-(main.cpp), its RPC policy (rpcpolicy.cpp: the methods its pages call), its
-pages (src/webui/app/src/pages) and their menus (lib/commands.svelte.ts), its
-host methods (walletapi.cpp holds the ones of a Bitcoin-like wallet), and in
-`scripts/i18n.mjs` the name that takes the place of "Bitcoin" in the catalogs.
+`src/webui/app/src/chain/chain.json` says what the app shows of its chain. CMake reads it
+(src/webui/CMakeLists.txt makes `webui/chainconfig.h` of it for the host) and so does the interface
+(`src/chain/config.ts`, `CHAIN`). A chain made from the template changes this file, not the kit:
+
+| Field | What it sets |
+|---|---|
+| `name`, `bin` | The name users see and the stem of the programs: `CLIENT_NAME` and `CLIENT_BIN_NAME` of CMakeLists.txt, which must be the same (CMake stops otherwise; `contrib/sidechain/rename.py` sets both). The program is `<bin>-app`; its settings file `<bin>-app.json` in the folder `<name>` of the user's configuration; its desktop entry, tray, notifications, startup link, single-instance socket and WebView2 folder are named after them; the name takes the place of "Bitcoin" in the catalogs (`scripts/i18n.mjs`, `i18n.cpp`: run `npm run i18n` after a change) |
+| `role` | `sidechain` (its peg and merged mining pages, its home) or `mainchain` (the pages of Chains). C++: `WEBUI_SIDECHAIN` |
+| `coin` | The ticker and the name of the coin: the units (`CHN`, `mCHN`, `bits`, `sat` are the ids kept in the preferences; the names shown are the chain's) |
+| `uriScheme` | The scheme of its payment URIs (BIP 21): `sidechain:` here, `thunder:`, `bitnames:`... The links the app opens, hands over to the running app, registers on Windows and in the desktop entry |
+| `brand` | Its mark (`mark`: SVG paths on a 32 grid, drawn by components/Brand.svelte), the colour of the mark (`color`, the CSS variable `--brand`), the hue the icon of the app is turned by (`iconHue`, before the tint of a test network: icontint.cpp) |
+| `networks` | Per network (main, test, signet, regtest): the default ports (`p2p`, `rpc`) and the address prefixes (`hrp`, `pubkey`, `script`) the interface checks addresses with. `test_<bin>-app` (chainconfig_tests.cpp) checks them against the chain parameters |
+| `mainchain` | A sidechain: the name, ticker and URI scheme of its mainchain, and its networks (the RPC port, the default of the Mainchain settings; the address prefixes, for the withdrawals: `checkAddress(..., 'mainchain')`) |
+| `links` | Help links (`guide`, `website`, `source`, `issues`): items of the menu "This node" and the palette, opened in the browser of the desktop |
+| `drop` | Pages of the kit the chain does not have. A sidechain drops `sidechains`, `sidechain-nodes` and `mine` (no sidechains of its own, no proposals or votes, no solo mining): they leave the sidebars, the workspace, the menus, the palette and the quick actions (`chainHas`, `pageAvailable` in lib/commands.svelte.ts); the host does not register the sidechain nodes, and the RPC policy of a sidechain has none of their methods |
+
+### The pages of a sidechain
+
+| Page | What it does | Code |
+|---|---|---|
+| Home (the dashboard's) | Cards: Balance, Network, **Peg** (deposits on their way, withdrawals waiting, the bundle and its votes, the slot), **Merged mining** (on or off, blocks mined, requests, the share of the last 24 mainchain blocks that committed to this chain); the wallet balance; the blocks of the mainchain, lit when they committed; the tables (transactions, blocks, peers) | views/home/SideHome.svelte |
+| **Peg** (Chain section, Alt+5) | The peg drawn (the mainchain and this chain, the connection, the heights). Deposit: a deposit address of the wallet (copy, QR code) to give the wallet of the mainchain; the helper, which has the wallet of the mainchain node make the deposit (`peg.deposit`); the deposits of the last 2000 mainchain blocks, credited or on their way, those to this wallet marked. Withdraw: to an address of the mainchain (checked with its prefixes, or one of the mainchain wallet a click away), the fee for its miners; the withdrawals not paid yet, those of the wallet taken back while they wait. Bundle: the bundle the mainchain votes on, its votes (`listwithdrawalbundles` of the mainchain) against the score it needs and the blocks it has left; the bundles before it, paid or failed | pages/Peg.svelte |
+| **Merged mining** (Chain section) | Automatic mining on and off (`setbmm`), the address of the fees, "always" with its offer (tests); one block by hand (`requestbmmblock`); requests, blocks mined, outbids, candidates; the last mainchain blocks and the block of this chain each committed to, in this chain or not; the connection to the mainchain node; a log of what happened since the app started | pages/Bmm.svelte |
+| Settings → *the mainchain* | The connection to the mainchain node: its address, RPC port (empty for the default of the network), the wallet that pays for merged mining, the user name; the cookie file and the password file chosen in the file chooser of the desktop only (options.chooseFile), never typed; they wait for Apply and take effect after a restart | components/MainchainSettings.svelte, options.cpp |
+
+The state they share (the node's view every 3 seconds, the mainchain's when its tip moves, the events
+of its blocks fetched as they come) is in lib/sidestate.svelte.ts; what puts it together (the bundles
+and their history, the deposits, the blocks that committed) in lib/side.ts.
+
+The host side (src/webui/sidechainapi.cpp) reaches the mainchain node on the node's own connection
+(`sidechain::Follower`, -mainchainrpc*); the page never names the node or its credentials:
+
+| Host method | What |
+|---|---|
+| `peg.connection` | How the node reaches its mainchain node: connected or why not, host:port, the slot, the wallet, cookie or password (never the password) |
+| `peg.call {method, params}` | A method of the mainchain node, from a list that only reads (`getdrivechaininfo`, `listwithdrawalbundles`, `getsidechainevents`, `listsidechaindeposits`...) and of its wallet (`getbalances`, `getwalletinfo`, `getnewaddress`) |
+| `peg.deposit {destination, amount}` | The deposit helper: `createsidechaindeposit` of the mainchain wallet, only to a deposit address of this sidechain (its slot, its checksum, a valid address of this chain) |
+
+The RPC policy of a sidechain (rpcpolicy.cpp) adds its methods (`getmainchaininfo`, `getbmminfo`,
+`setbmm`, `requestbmmblock`, `listwithdrawals`, `getwithdrawalbundle`, `getdepositaddress`, and
+`createwithdrawal` and `refundwithdrawal`, which need the keys) and has none of the drivechain methods
+of the mainchain.
+
+The rules of the kit hold in these pages: text from the chain (addresses, hashes, errors of the
+mainchain node) is shown with `SafeText` or `translate="no"`; the app's own words go through `t()`;
+files only through the native chooser; amounts with `Amount`; tables in the colour tokens.
+
+### Pages of a chain of its own
+
+A sidechain made from the template (BitNames, BitAssets, Thunder...) adds its pages in three files the
+template keeps empty, and nowhere else, so that a merge of the template never conflicts with them:
+
+1. **src/webui/app/src/chain/local.ts**: an entry per page in `LOCAL_PAGES` (`id`, `title`, `icon`,
+   `summary`, `section`: `wallet`, `chain` or `tools`, `wallet: true` if it needs one, a `quick` action
+   of the home), and menu items in `LOCAL_COMMANDS`. The page then is in the sidebars (in its
+   section), the workspace (its area), the palette, the menus (those of `chain` in the menu of the
+   chain, before the tools: the `chainBeforeTools` tests check every list) and `go('<id>')` opens it.
+2. **src/webui/app/src/chain/LocalPages.svelte**: imports the page components (in
+   `src/chain/pages/`, say) and shows the one of `page`.
+3. **src/webui/local.cpp**: the RPC methods the pages call (`RpcMethods`, added to the page's
+   allowlist; those that need the keys in `KeyedRpcMethods`) and the host methods they need
+   (`RegisterHost`, after the kit's).
+
+```ts
+// chain/local.ts
+export const LOCAL_PAGES = [
+  { id: 'names', title: 'Names', icon: 'book', section: 'chain', summary: 'Register names and their records', wallet: true, quick: { label: 'Register a name' } },
+] as const satisfies readonly LocalPage[];
+```
+
+Its own words follow the rules of the kit (`t()` for the app's words; `SafeText` for a name read from
+the chain); its tests go in `src/chain/` too (`*.test.ts` are found anywhere under src). Nothing in
+`lib/`, `components/`, `pages/` or `views/` needs to change; when a page needs something the kit does
+not offer, make it a change of the template (generic, behind `chain.json`), and merge it.
 
 ## Tests
 
@@ -291,12 +363,16 @@ host methods (walletapi.cpp holds the ones of a Bitcoin-like wallet), and in
 | `e2e/run_node.py` | The node and Chains pages, with a pretend desktop (tray, notifications) and a second node |
 | `e2e/run_audit.py` | The fixes of the audit: the sync overlay, a block built by hand with a title that is not UTF-8, long calls, a history kept up to date in parts, a proof with a locked wallet, contrast measured on what the page draws, aligned tables, the title bar of the desktop or the integrated one, settings that wait for Apply (and the next start), `-disablewallet`, windows 700 and 480 px wide, a hardware wallet (the mock signer of the functional tests), `-lang=fr` |
 | `e2e/run_layouts.py` | The three layouts, the palette, the detail panel, the integrated title bar and the refresh (layouts.js, titlebar.js, refresh.js); pictures of each layout |
-| `e2e/run_windows.py` | From WSL, on the Windows of the machine (`--app build_win/bin/chains-app.exe --unit build_win/bin/test_chains-app.exe --shots <dir>`, in a folder of the Windows temporary folder, removed at the end): the unit tests, then smoke.js, layouts.js and titlebar.js |
+| `e2e/run_windows.py` | From WSL, on the Windows of the machine (`--app build_win/bin/chains-app.exe --unit build_win/bin/test_chains-app.exe --shots <dir>`, in a folder `<stem>-app-test` of the Windows temporary folder, removed at the end): the unit tests, then smoke.js, layouts.js and titlebar.js; for a sidechain sidechain.js, the app on Windows following a regtest mainchain run in WSL |
+| `e2e/run_sidechain.py` | A sidechain (`webui_e2e_sidechain`, with `WEBUI_MAINCHAIN_BIN_DIR` or `MAINCHAIN_BIN_DIR` naming the folder of `chainsd`): a regtest mainchain started and mining a block every second, the sidechain activated in its slot, the app following it with a user name and a password file; through the page: a deposit address, the deposit made by the helper, merged mining on, the deposit credited, a withdrawal to an address of the mainchain wallet, its bundle voted on and paid (checked on the mainchain); pictures of the pages of the sidechain in the layouts and looks |
+| `test_<stem>-app`: chainconfig_tests, sidechainapi_tests | chain.json against the chain parameters (names, unit, ports, prefixes); the methods of the mainchain the pages may call, the deposit helper refusing what is not a deposit address of this sidechain, the RPC policy of a sidechain |
+| `npm test`: test/sidechain.test.ts | The chain of chain.json (units, URIs, addresses of both chains), the pages dropped, Peg and Merged mining in the Chain section and the menus, the events of the mainchain kept up to date across a reorganisation, the bundles, deposits and commitments, the log of merged mining, and the pages driven: the deposit helper, a withdrawal and its refund, the votes of the bundle, merged mining on and off and one block by hand, the cards of the home, the Mainchain settings |
 
 Each e2e script takes `--app build/bin/chains-app --tmp <dir> --shots <dir>`;
 all are CTest tests (`webui_tests`, `webui_frontend_tests`,
 `webui_frontend_types`, `webui_e2e_smoke`, `webui_e2e_wallet`,
-`webui_e2e_node`, `webui_e2e_audit`).
+`webui_e2e_node`, `webui_e2e_audit`). In the app of a sidechain the end-to-end tests of the mainchain
+(they mine their own blocks) are not registered: `webui_e2e_sidechain` is.
 
 ## Credits
 
