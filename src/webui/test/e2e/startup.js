@@ -27,8 +27,10 @@
     }
     await snapshot(`startup-${STEP}`);
     if (STEP === 'first') {
-      // A chain to load at the next start (as a data directory in use has).
-      await E2E.rpc('generatetoaddress', [150, 'rchn1qyvyz4rr5nhdhfyuek4ef8jcvjqy33vrels9sxr']);
+      // A chain to load at the next start (as a data directory in use has). Not on a sidechain: its blocks are
+      // merged mined by the mainchain, which this test does not run (and its addresses are not those of Chains).
+      const sidechain = String(await E2E.rpc('help', ['getmainchaininfo'])).startsWith('getmainchaininfo');
+      if (!sidechain) await E2E.rpc('generatetoaddress', [150, 'rchn1qyvyz4rr5nhdhfyuek4ef8jcvjqy33vrels9sxr']);
     }
     if (STEP === 'nowallet' && LAST) {
       // For the next start: a wallet loaded with the node.
