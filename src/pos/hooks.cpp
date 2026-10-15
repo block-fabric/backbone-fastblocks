@@ -700,6 +700,7 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
 bool FastBlocksHooks::ApplyTx(sidechain::State& state, const CTransaction& tx, int height, bool, std::vector<CTxOut>&, std::string& reject_reason) const
 {
     // Bonds and unbonds: an unbond is paid unbonding_anchors after the anchors of the chain so far.
+    ++m_tx_rule_checks;
     return m_staking.ApplyTx(state.Writable(), tx, height, FAST_STATE.Get(state.View()).anchors, reject_reason);
 }
 
@@ -903,6 +904,7 @@ std::shared_ptr<const ValidatorSet> FastBlocksHooks::SetFor(const CBlockIndex& p
     const int64_t boundary{(epoch - 1) * m_params.slots_per_epoch};
     uint64_t passed{0};
     for (const CBlockIndex* index{&prev}; index; index = index->pprev) {
+        ++m_index_walks;
         if (index->nHeight == 0) {
             if (set_anchors) *set_anchors = 0;
             return std::shared_ptr<const ValidatorSet>{std::shared_ptr<const ValidatorSet>{}, &m_genesis_set};

@@ -4395,22 +4395,25 @@ BOOST_FIXTURE_TEST_CASE(evidence_pool_of_a_banned_validator, FastBlocksSetup)
     int m{static_cast<int>(slot - base_slot)};
     while (XOnly(Leader(base_slot + m)) == offender) ++m;
 
-    // A merged mined block: no proof in its coinbase.
+    // A merged mined block: no proof in its coinbase, and no signature checked (the work counted, not timed).
     {
         LOCK(::cs_main);
-        const auto start{std::chrono::steady_clock::now()};
+        const uint64_t sigs_before{pos::BlockSigChecks()};
         const auto outputs{Hooks().MergeMinedOutputs(Chain().SideCache(), *Tip(), pos::SlotTime(base_slot + m, Pos()))};
-        const auto took{std::chrono::steady_clock::now() - start};
-        BOOST_TEST_MESSAGE("MergeMinedOutputs with " << pos::MAX_EVIDENCE << " proofs against a banned validator: " << Ticks<std::chrono::microseconds>(took) << " us");
+        const uint64_t sigs{pos::BlockSigChecks() - sigs_before};
+        BOOST_TEST_MESSAGE("MergeMinedOutputs with " << pos::MAX_EVIDENCE << " proofs against a banned validator: " << sigs << " signatures checked");
         BOOST_CHECK(outputs.empty());
+        BOOST_CHECK_EQUAL(sigs, 0U);
     }
-    // A block of stake (with an acknowledgement: the slot is far past the last anchor): none in its sections.
+    // A block of stake (with an acknowledgement: the slot is far past the last anchor): none in its
+    // sections, and no signature of a proof checked (the block's own are its producer's).
     Anchor(Ticket(Tip()->GetBlockHash(), script));
     std::string error;
-    const auto start{std::chrono::steady_clock::now()};
+    const uint64_t pool_sigs_before{Hooks().Evidence().SigChecks()};
     BOOST_REQUIRE_MESSAGE(producer->Produce(Slot(m), error), error);
-    const auto took{std::chrono::steady_clock::now() - start};
-    BOOST_TEST_MESSAGE("Produce with " << pos::MAX_EVIDENCE << " proofs against a banned validator: " << Ticks<std::chrono::microseconds>(took) << " us");
+    const uint64_t pool_sigs{Hooks().Evidence().SigChecks() - pool_sigs_before};
+    BOOST_TEST_MESSAGE("Produce with " << pos::MAX_EVIDENCE << " proofs against a banned validator: " << pool_sigs << " signatures of proofs checked");
+    BOOST_CHECK_EQUAL(pool_sigs, 0U);
     CBlock made;
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return Chainman().m_blockman.ReadBlock(made, *Tip())));
     pos::PosSections sections;
@@ -4705,18 +4708,19 @@ BOOST_FIXTURE_TEST_CASE(attack5_old_slot_evidence_walks_the_chain, FastBlocksSet
     const int64_t recent{pos::SlotOf(base.nTime, Pos())};
     constexpr int PROOFS{32};
     // Proofs of a recent slot, then of slot 1, from as many peers (each new: a fresh burst), same prevs.
-    const auto time{[&](int64_t slot, int64_t first_peer) {
-        const auto start{std::chrono::steady_clock::now()};
+    // The work counted (block index entries the walks for validator sets pass), not timed.
+    const auto walks{[&](int64_t slot, int64_t first_peer) {
+        const uint64_t before{Hooks().IndexWalks()};
         for (int i{0}; i < PROOFS; ++i) BOOST_CHECK_EQUAL(send(first_peer + i, proof_at(slot, tip_a, tip_b, first_peer + i)), "");
-        return Ticks<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+        return Hooks().IndexWalks() - before;
     }};
-    const auto recent_us{time(recent, 1000)};
-    const auto old_us{time(1, 2000)};
+    const uint64_t recent_walks{walks(recent, 1000)};
+    const uint64_t old_walks{walks(1, 2000)};
     BOOST_CHECK_EQUAL(Hooks().Evidence().Size(), 0U);
-    BOOST_TEST_MESSAGE(PROOFS << " proofs of a recent slot: " << recent_us << " us; of slot 1, over a chain of " << CHAIN << " blocks: " << old_us
-                              << " us (cs_main held, no peer blamed; a peer's burst is " << pos::EVIDENCE_CHECKS_BURST << ")");
-    BOOST_CHECK_MESSAGE(old_us < 10 * recent_us + 20000, "attack works: a proof of an old slot costs a walk of the whole chain under cs_main, unblamed, "
-                                                         << old_us / PROOFS << " us each against " << recent_us / PROOFS << " us");
+    BOOST_TEST_MESSAGE(PROOFS << " proofs of a recent slot: " << recent_walks << " block index entries walked; of slot 1, over a chain of " << CHAIN << " blocks: " << old_walks
+                              << " (cs_main held, no peer blamed; a peer's burst is " << pos::EVIDENCE_CHECKS_BURST << ")");
+    BOOST_CHECK_MESSAGE(old_walks < 10 * recent_walks + PROOFS * 100, "attack works: a proof of an old slot costs a walk of the whole chain under cs_main, unblamed, "
+                                                                        << old_walks / PROOFS << " entries each against " << recent_walks / PROOFS);
 }
 
 BOOST_FIXTURE_TEST_CASE(attack5_mempool_staking_recheck_per_block, FastBlocksSetup)
@@ -4748,21 +4752,22 @@ BOOST_FIXTURE_TEST_CASE(attack5_mempool_staking_recheck_per_block, FastBlocksSet
     }
     BOOST_REQUIRE_EQUAL(m_node.mempool->size(), static_cast<size_t>(N));
     const size_t usage{WITH_LOCK(m_node.mempool->cs, return m_node.mempool->DynamicMemoryUsage())};
-    int64_t best_us{std::numeric_limits<int64_t>::max()};
+    // The work counted (transactions the staking rules are applied to again, each a key recovery and a
+    // BIP340 check), not timed: at each block, at most so many, whatever the mempool holds.
+    uint64_t most{0};
     for (int run{0}; run < 3; ++run) {
         LOCK2(::cs_main, m_node.mempool->cs);
-        const auto start{std::chrono::steady_clock::now()};
+        const uint64_t before{Hooks().TxRuleChecks()};
         Chain().RemoveStaleDrivechainTxs();
-        best_us = std::min<int64_t>(best_us, Ticks<std::chrono::microseconds>(std::chrono::steady_clock::now() - start));
+        most = std::max(most, Hooks().TxRuleChecks() - before);
     }
     BOOST_REQUIRE_EQUAL(m_node.mempool->size(), static_cast<size_t>(N));
     // A mempool of the default size (-maxmempool 300 MB) of such bonds.
     const double full{300.0 * 1000 * 1000 / (static_cast<double>(usage) / N)};
-    const double full_seconds{static_cast<double>(best_us) / N * full / 1e6};
-    BOOST_TEST_MESSAGE("recheck of " << N << " bonds in the mempool at each block: " << best_us << " us under cs_main; a full mempool (" << static_cast<int64_t>(full)
-                                     << " bonds) would take " << full_seconds << " s each block");
-    BOOST_CHECK_MESSAGE(full_seconds < 1.0, "attack works: each block rechecks the signatures of every bond in the mempool under cs_main: " << full_seconds
-                                                                                    << " s a block with a full mempool (slots are 30 s on main)");
+    BOOST_TEST_MESSAGE("recheck of " << N << " bonds in the mempool at each block: " << most << " rechecked at most under cs_main; a full mempool holds "
+                                     << static_cast<int64_t>(full) << " bonds");
+    BOOST_CHECK_MESSAGE(most <= MAX_RULE_CHECKS_PER_TIP, "attack works: each block rechecks the signatures of every bond in the mempool under cs_main: " << most
+                                                                                                                                                      << " a block, of " << N);
 }
 
 namespace {
@@ -4811,8 +4816,9 @@ BOOST_FIXTURE_TEST_CASE(attack5_compact_block_forged_extension_unpunished, FastB
         BOOST_REQUIRE(Chainman().m_blockman.ReadBlock(tip_block, *Chain().m_chain.Tip()));
     }
     constexpr int MESSAGES{3000};
+    // The work counted (signatures of blocks of stake checked), not timed.
     const auto flood{[&](bool forged) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
-        const auto start{std::chrono::steady_clock::now()};
+        const uint64_t before{pos::BlockSigChecks()};
         for (int i{0}; i < MESSAGES; ++i) {
             CBlock copy{tip_block};
             if (forged) {
@@ -4824,14 +4830,14 @@ BOOST_FIXTURE_TEST_CASE(attack5_compact_block_forged_extension_unpunished, FastB
             attacker.Send(connman, NetMsg::Make(NetMsgType::CMPCTBLOCK, cmpct));
         }
         m_node.peerman->SendMessages(attacker.node);
-        return Ticks<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+        return pos::BlockSigChecks() - before;
     }};
-    const auto honest_us{flood(false)};
-    const auto forged_us{flood(true)};
+    const uint64_t honest_sigs{flood(false)};
+    const uint64_t forged_sigs{flood(true)};
     const bool disconnected{attacker.node.fDisconnect};
-    BOOST_TEST_MESSAGE(MESSAGES << " compact blocks of the tip: " << honest_us << " us with its signature, " << forged_us << " us with forged ones; peer disconnected: " << disconnected);
-    BOOST_CHECK_MESSAGE(disconnected || forged_us < 2 * honest_us, "attack works: a compact block of a known header with a forged signature costs a signature check under cs_main, unpunished: "
-                                                                       << (forged_us - honest_us) / MESSAGES << " us more each");
+    BOOST_TEST_MESSAGE(MESSAGES << " compact blocks of the tip: " << honest_sigs << " signatures checked with its signature, " << forged_sigs << " with forged ones; peer disconnected: " << disconnected);
+    BOOST_CHECK_MESSAGE(disconnected || forged_sigs <= honest_sigs, "attack works: a compact block of a known header with a forged signature costs a signature check under cs_main, unpunished: "
+                                                                        << forged_sigs - honest_sigs << " signatures checked for " << MESSAGES << " messages");
     m_node.peerman->FinalizeNode(attacker.node);
 }
 
@@ -4954,6 +4960,7 @@ BOOST_FIXTURE_TEST_CASE(slot_spare_header_taken_on_a_branch, FastBlocksSetup)
         Chainman().UncheckedSourceAdded(4);
     }
 }
+
 
 namespace {
 /** A `headers` message of these headers (each a block without transactions: an extended one, no sections). */

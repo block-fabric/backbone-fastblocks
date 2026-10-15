@@ -10,6 +10,7 @@
 #include <script/solver.h>
 #include <streams.h>
 
+#include <atomic>
 #include <ios>
 
 namespace pos {
@@ -84,8 +85,15 @@ uint256 BlockSigHash(const CBlockHeader& header, const uint256& genesis)
     return (TaggedHash("hpos/block") << header.GetHash() << genesis).GetSHA256();
 }
 
+namespace {
+std::atomic<uint64_t> g_block_sig_checks{0};
+} // namespace
+
+uint64_t BlockSigChecks() { return g_block_sig_checks.load(); }
+
 bool CheckBlockSig(const CBlockHeader& header, const uint256& xonly_pubkey, const uint256& genesis)
 {
+    ++g_block_sig_checks;
     const XOnlyPubKey key{std::span<const unsigned char>{xonly_pubkey.begin(), xonly_pubkey.end()}};
     if (!key.IsFullyValid()) return false;
     return key.VerifySchnorr(BlockSigHash(header, genesis), header.ext.sig);

@@ -375,6 +375,10 @@ public:
      * follower's round.
      */
     void CheckSeeds() const EXCLUSIVE_LOCKS_REQUIRED(!m_sets_mutex);
+    /** Block index entries the walks for validator sets (SetFor) passed, since the hooks were made (the work done: tests). */
+    uint64_t IndexWalks() const { return m_index_walks.load(); }
+    /** Transactions the staking rules were applied to (ApplyTx), since the hooks were made (tests). */
+    uint64_t TxRuleChecks() const { return m_tx_rule_checks.load(); }
     /** Why the block producer the options ask for could not start; empty if it did, or none was asked for. */
     std::string ProducerError() const { return m_producer_error; }
 
@@ -403,6 +407,8 @@ private:
     const Staking m_staking;
     const uint32_t m_pos_bits;
     std::atomic<ChainstateManager*> m_chainman{nullptr};
+    mutable std::atomic<uint64_t> m_index_walks{0};
+    mutable std::atomic<uint64_t> m_tx_rule_checks{0};
     //! Whether the set the newest anchor of the active chain made is active, as of the tip m_staking_for.
     mutable Mutex m_staking_mutex;
     mutable bool m_staking_seen GUARDED_BY(m_staking_mutex){false};

@@ -104,6 +104,8 @@ uint256 SectionsHash(std::span<const unsigned char> sections);
 uint256 BlockSigHash(const CBlockHeader& header, const uint256& genesis);
 /** The leader's signature is valid for this header, on the chain of `genesis`. */
 bool CheckBlockSig(const CBlockHeader& header, const uint256& xonly_pubkey, const uint256& genesis);
+/** Signatures of blocks of stake CheckBlockSig checked since the program started (the work done: tests). */
+uint64_t BlockSigChecks();
 
 /** The script of a coinbase output that puts coins in the fee pot. */
 CScript PotScript();
