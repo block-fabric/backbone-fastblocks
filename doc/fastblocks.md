@@ -1613,7 +1613,7 @@ The security review of the attack8 fix found two issues in `BlocksCommittedBy`
   `review8_ack_below_a_bmm_block_committed_lower_taken_back`.
 - **A denial of service.** Every call read from disk, under `cs_main`, each
   acknowledgement of the active chain at or above the height (a mainchain reorg
-  of N blocks: N^2/2 reads) and each block failed against the record, which are
+  of N blocks: N^2/2 reads) and each block failed against the record, which were
   never forgotten and cost no commitment (a leader makes two of each slot it
   leads, acknowledging at the height of any commitment on record a ticket nobody
   committed). It is called for each commitment the mainchain makes or drops, and
@@ -1623,6 +1623,13 @@ The security review of the attack8 fix found two issues in `BlocksCommittedBy`
   only those are read, the others are passed over from the block index. (The
   failures are still all looked up in memory; `NextAck` counts only one at the
   height, whatever this node noted.)
+  The failures against the record are bounded: those of blocks that leave the
+  active chain where no reorg can take a block back any more
+  (`DRIVECHAIN_UNDO_DEPTH` below the flushed block) are forgotten when the node
+  sweeps its drivechain undo data (`Chainstate::ForgetUnreachableRecordFailures`,
+  the template's). What is left is the failures within reach of a reorg; the
+  blocks forgotten stay failed, as they would have for good.
+  `record_failures_bounded`.
   `review8_blocks_committed_by_reads_only_the_candidates`.
 - **At startup** (`Follower::CheckActiveChain`, for a node that stopped between
   learning of a change of the mainchain and acting on it) only blocks without a

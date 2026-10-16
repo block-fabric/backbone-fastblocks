@@ -5825,8 +5825,8 @@ BOOST_FIXTURE_TEST_CASE(review8_ack_below_a_bmm_block_committed_lower_taken_back
 BOOST_FIXTURE_TEST_CASE(review8_blocks_committed_by_reads_only_the_candidates, FastBlocksSetup)
 {
     // REVIEW 8 (attack8's fix, a denial of service). Finding the blocks resting on a commitment read
-    // from disk, under cs_main, every block that failed against the record (which never go: a
-    // leader makes two of each slot it leads at no cost, acknowledging a ticket nobody committed) and
+    // from disk, under cs_main, every block that failed against the record (which went only once out of
+    // reach of any reorg, record_failures_bounded: a leader makes two of each slot it leads at no cost, acknowledging a ticket nobody committed) and
     // every acknowledgement of the active chain above the height -- for every commitment the mainchain
     // makes (the follower), drops (the follower), and every ticket a producer may acknowledge, each
     // slot (NextAck). With the noted acknowledgements pushed out (attack8), each is a read. Only an
@@ -5859,6 +5859,76 @@ BOOST_FIXTURE_TEST_CASE(review8_blocks_committed_by_reads_only_the_candidates, F
     const auto dropped{Hooks().BlocksCommittedBy(first.ticket.Hash(), first.main_height)};
     BOOST_CHECK(std::find(dropped.begin(), dropped.end(), first_block) != dropped.end());
     BOOST_CHECK_LE(FloodPushedOut(flood), 1U);
+}
+
+BOOST_FIXTURE_TEST_CASE(record_failures_bounded, FastBlocksSetup)
+{
+    // The blocks that failed against the record, which BlocksCommittedBy scans for every commitment the
+    // mainchain makes or drops: a leader makes two of each slot it leads at no cost, each acknowledging
+    // a ticket nobody committed to. They are kept only while a reorg can reach them: those that leave
+    // the active chain where nothing can be taken back any more (DRIVECHAIN_UNDO_DEPTH below the flushed
+    // block, SweepDrivechainUndo) are forgotten. Whatever the flood below that, what is kept is the
+    // same, and so is everything the node decides.
+    StartPos();
+    Take(PosBlock(1));
+    const int base{WITH_LOCK(::cs_main, return Chain().m_chain.Height())};
+    Commit(uint256{0xc0});
+    const int other{Record().Height()};
+    uint8_t salt{0};
+    const auto failing{[&](int i) {
+        const pos::AnchorTicket ticket{Ticket(uint256{++salt}, script)};
+        const CBlock failed{WithAck(PosBlock(i), pos::AnchorAck{.ticket = ticket, .main_height = other})};
+        Submit(failed);
+        BOOST_REQUIRE(Record().GetFailure(failed.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+        return std::make_pair(failed.GetHash(), ticket.Hash());
+    }};
+    // The flood, on the tip (at `base`).
+    constexpr int FLOOD{40};
+    std::vector<std::pair<uint256, uint256>> old_failures;
+    for (int i{2}; i < 2 + FLOOD; ++i) old_failures.push_back(failing(i));
+    // The chain goes on, and a few blocks fail on its tip.
+    for (int i{2 + FLOOD}; i < 2 + FLOOD + 4; ++i) Take(PosBlock(i));
+    const int tip_height{WITH_LOCK(::cs_main, return Chain().m_chain.Height())};
+    BOOST_REQUIRE_EQUAL(tip_height, base + 4);
+    std::vector<std::pair<uint256, uint256>> recent;
+    for (int i{2 + FLOOD + 4}; i < 2 + FLOOD + 7; ++i) recent.push_back(failing(i));
+    BOOST_REQUIRE_EQUAL(Record().RecordFailures().size(), static_cast<size_t>(FLOOD + 3));
+
+    // What the node decides of the blocks within reach, and its chain, before.
+    const auto resting{[&](const std::vector<std::pair<uint256, uint256>>& failures) {
+        std::vector<std::vector<uint256>> found;
+        for (const auto& [_, commitment] : failures) {
+            auto blocks{Hooks().BlocksCommittedBy(commitment, other)};
+            std::sort(blocks.begin(), blocks.end());
+            found.push_back(std::move(blocks));
+        }
+        return found;
+    }};
+    const auto before{resting(recent)};
+    for (size_t n{0}; n < recent.size(); ++n) BOOST_CHECK(std::find(before[n].begin(), before[n].end(), recent[n].first) != before[n].end());
+    const uint256 tip{Tip()->GetBlockHash()};
+
+    // Nothing at base + 1 or below can be taken back any more: the flood, off the chain at `base`, goes.
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return Chain().ForgetUnreachableRecordFailures(base + 1)), static_cast<size_t>(FLOOD));
+    // Bounded: what is left is the failures within reach, however large the flood was.
+    BOOST_CHECK_EQUAL(Record().RecordFailures().size(), recent.size());
+    for (const auto& [hash, _] : recent) BOOST_CHECK(Record().GetFailure(hash) == sidechain::Mainchain::Failure::RECORD);
+    // Unchanged: the blocks resting on the commitments of those within reach, the chain, and the
+    // flood's blocks, failed for good either way.
+    BOOST_CHECK(resting(recent) == before);
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
+    {
+        LOCK(::cs_main);
+        for (const auto& [hash, _] : old_failures) {
+            const CBlockIndex* index{Index(hash)};
+            BOOST_REQUIRE(index);
+            BOOST_CHECK(index->nStatus & BLOCK_FAILED_VALID);
+            BOOST_CHECK(!Chain().m_chain.Contains(*index));
+        }
+    }
+    BlockValidationState state;
+    BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    BOOST_CHECK(Tip()->GetBlockHash() == tip);
 }
 
 BOOST_FIXTURE_TEST_CASE(review8_forged_signature_failing_against_the_record, FastBlocksSetup)
