@@ -536,9 +536,9 @@ export function plainStatusText(r: Pick<TxRecord, 'status' | 'depth' | 'maturesI
     case 'confirmed':
       return t('Final');
     case 'conflicted':
-      return t('Replaced: will not happen');
+      return t('Will not happen');
     case 'immature':
-      return tn('Mined: usable in %n block(s)', r.maturesIn);
+      return tn('Usable in %n block(s)', r.maturesIn);
     case 'notaccepted':
       return t('Mined, but not accepted');
   }

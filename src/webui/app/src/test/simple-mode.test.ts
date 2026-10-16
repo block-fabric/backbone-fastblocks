@@ -198,8 +198,8 @@ describe('the status of a transaction', () => {
     expect(statusText(r('unconfirmed', 0))).toBe('Waiting for the next block');
     expect(statusText(r('confirming', 2))).toBe('Confirmed');
     expect(statusText(r('confirmed', 9))).toBe('Final');
-    expect(statusText(r('immature', 10, 350))).toBe('Mined: usable in 350 blocks');
-    expect(plainStatusText(r('immature', 359, 1))).toBe('Mined: usable in 1 block');
+    expect(statusText(r('immature', 10, 350))).toBe('Usable in 350 blocks');
+    expect(plainStatusText(r('immature', 359, 1))).toBe('Usable in 1 block');
     prefs.uiMode = 'advanced';
     expect(statusText(r('confirmed', 9))).toBe('Confirmed (9 confirmations)');
     expect(statusText(r('unconfirmed', 0))).toBe('Unconfirmed');

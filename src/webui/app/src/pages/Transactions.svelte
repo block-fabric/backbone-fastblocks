@@ -146,7 +146,7 @@
       : [
           // Simple mode: the status in plain words beside its ring (waiting for the next block, confirmed, final).
           simple
-            ? { key: 'status', label: 'Status', value: (r) => r.sortKey, width: '13rem', noFilter: true }
+            ? { key: 'status', label: 'Status', value: (r) => r.sortKey, width: '15.5rem', noFilter: true }
             : { key: 'status', label: '', value: (r) => r.sortKey, width: '2.6rem', align: 'center', noFilter: true },
           { key: 'date', label: 'Date', value: (r) => r.time, width: '11.5rem' },
           { key: 'type', label: 'Type', value: (r) => typeText(r.type, r.role), width: '10rem' },
