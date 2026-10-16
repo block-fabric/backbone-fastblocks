@@ -9,6 +9,7 @@ import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { dialogs } from '../lib/dialogs.svelte';
 import { nav } from '../lib/nav.svelte';
 import { app, node, prefs, wallets } from '../lib/state.svelte';
+import { SIDECHAIN } from '../chain/config';
 
 beforeAll(() => {
   const proto = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
@@ -140,7 +141,8 @@ describe('Move coins (the Sidechains page in Simple mode)', () => {
   });
 });
 
-describe('Home in Simple mode', () => {
+// Chains' own Home (a sidechain has its own, tested in sidechain.test.ts).
+describe.skipIf(SIDECHAIN)('Home in Simple mode', () => {
   function chain() {
     return host({
       getblockheader: () => ({ height: 130, time: 1_700_000_000, nTx: 1 }),
