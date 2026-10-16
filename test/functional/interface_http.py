@@ -812,7 +812,9 @@ class HTTPBasicsTest (BitcoinTestFramework):
         # Request the big block JSON once to check its size and establish the connection
         URI = f"/rest/block/{big_block_hash}.json"
         response_body_size = len(conn.get(URI).read())
-        assert response_body_size > 7 * 1024 * 1024, f"Big block JSON response size is {response_body_size} bytes"
+        # (FastBlocks: a block of 1.5 million weight, its coinbase's script of OP_NOPs at about 11 bytes of
+        # JSON each, some 4 MB rather than Bitcoin's 7 MiB; the server still stalls only past MAX_BODY_SIZE.)
+        assert response_body_size > 4 * 1000 * 1000, f"Big block JSON response size is {response_body_size} bytes"
 
         # Prepare a batch of requests. We want to fill up at
         # least one server-side read operation (about 65kB, see HTTPRemoteClient::Receive()).

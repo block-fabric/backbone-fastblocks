@@ -31,6 +31,7 @@ import time
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.messages import (
     COIN,
+    FASTBLOCKS_MAX_BLOCK_WEIGHT,
 )
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -62,7 +63,8 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
 
         # Node3 is a normal node with default args, except will mine full blocks
         # and txs with "dust" outputs
-        self.node3_args = ["-blockmaxweight=4000000", "-dustrelayfee=0"]
+        # (FastBlocks: blocks of FASTBLOCKS_MAX_BLOCK_WEIGHT at most; the miner keeps to the transactions' part.)
+        self.node3_args = [f"-blockmaxweight={FASTBLOCKS_MAX_BLOCK_WEIGHT}", "-dustrelayfee=0"]
         self.extra_args = [self.node0_args, self.node1_args, self.node2_args, self.node3_args]
 
     def setup_network(self):

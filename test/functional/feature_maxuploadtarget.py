@@ -131,9 +131,10 @@ class MaxUploadTest(BitcoinTestFramework):
 
         # Requesting the current block on p2p_conns[1] should succeed indefinitely,
         # even when over the max upload target.
-        # We'll try 800 times
+        # We'll try 800 times (FastBlocks: as many as make 800 blocks of Bitcoin's 1 MB, its largest
+        # block being smaller)
         getdata_request.inv = [CInv(MSG_BLOCK, big_new_block)]
-        for i in range(800):
+        for i in range(800 * 1_000_000 // old_block_size):
             p2p_conns[1].send_and_ping(getdata_request)
             assert_equal(p2p_conns[1].block_receive_map[big_new_block], i+1)
 

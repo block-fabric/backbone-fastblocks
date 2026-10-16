@@ -1189,9 +1189,9 @@ after every step:
 | `feature_fastblocks_staking.py` | No validators (merged mined only); bonds (one with a proof of possession made by the test); blocks of stake from the epoch after next; a key that runs nowhere is jailed, its coins kept; a stranger's top-up of a satoshi refused, the owner's taken; an unbond of all paid unbonding_anchors anchors later |
 | `feature_fastblocks_p2p.py` | Peers of the test framework that misbehave: forged signatures sent first to a node catching up, then the honest nodes (it reaches their tip; the honest blocks are not fetched again and again meanwhile); 5000 unsigned siblings of its newest header, and a message padded with more (the peer's budget taken, no more); about 70 unsigned acknowledging headers from deep in the chain, on a validator that knows the sets (`bad-pos-sig`) and on one restarted whose state pruned them (`bad-pos-fork-too-deep`: no new tip, no reorg); 5000 siblings of a deep block; tickets 8 a peer per mainchain block; `fbgettickets` of 17 entries (misbehaving); one proof sent 200 times (kept once, the peer kept) |
 | `feature_fastblocks_fork.py` | A fork whose overtaking block a node has the header of with a forged signature, and cannot check before it connects the fork: it syncs, the leader's signature replacing the forged one |
-| `feature_fastblocks_idle.py` | Validators only, no fees, no `setbmm`, 30-second slots on mock time: an hour and more of blocks of stake and anchors; mainchain blocks in pairs, a commitment in at least 90 % of them, each acknowledged; staking off everywhere, the validators merge mine; restarted, they bid again |
+| `feature_fastblocks_idle.py` | Validators only, no fees, no `setbmm`, 15-second slots (the networks') on mock time: an hour and more of blocks of stake and anchors; mainchain blocks in pairs, a commitment in at least 90 % of them, each acknowledged; staking off everywhere, the validators merge mine; restarted, they bid again |
 | `feature_fastblocks_restart.py` | A validator restarted refuses a BMM block 30 minutes ahead as the others do; every validator restarted while a committed ticket waits asks for it and acknowledges it; a validator whose data directory is wiped does not sign a slot it signed again; one killed between signing and relaying (`-posfaultaftersign`) does not sign that slot again |
-| `feature_fastblocks_soak.py` (extended) | 30-second slots (`-posslotseconds=30`), `--duration` minutes of rounds: restarts and kills, partitions, mainchain reorgs, bonds, unbonds, payments, withdrawals; after each, one tip, `pegbalance`, no node down, few failed slots |
+| `feature_fastblocks_soak.py` (extended) | 15-second slots (`-posslotseconds=15`, the networks'), `--duration` minutes of rounds: restarts and kills, partitions, mainchain reorgs, bonds, unbonds, payments, withdrawals; after each, one tip, `pegbalance`, no node down, few failed slots |
 | `feature_fastblocks_slashing.py` | Bonded validators; a leader signs twice; the proof in a block: 10 % gone, banned, the rest unbonded; the banned validator leads no more from the next block; a proof of another of its offences takes nothing; a leader that carries the proof against itself gets no reward; a BMM block carries a proof (all validators stopped), its payee rewarded; the reward paid at the next peg step to the block that carried it; a forged proof refused; the offender out of the sets |
 | `feature_fastblocks_window.py` | Observer with small budgets of headers it cannot check (`-posuncheckedheaders`, `-posuncheckedbytes`): a partition branch several budgets long, synced in windows from one outbound peer while inbound attackers hold their whole budgets; a branch whose part before it leads exceeds the budgets (both sides anchored): not followed; the operator's `invalidateblock` of its side's first block after the fork, then `reconsiderblock`, takes it |
 
@@ -1313,6 +1313,21 @@ safe across the change on the test network: its genesis time is the same, so
 the slot of a moment under 15-second slots is twice its slot under 30-second
 ones, above any slot signed before; a node that never signs a slot at or below
 the one it signed last refuses nothing it should sign now.
+
+Tests inherited from Bitcoin run on regtest, which has these blocks too: they
+fill blocks to `MAX_BLOCK_TX_WEIGHT` (the transactions) and `FASTBLOCKS_MAX_BLOCK_WEIGHT`
+(the coinbase taking the rest), as the test framework names them
+(`messages.py`; `MAX_BLOCK_WEIGHT` stays Bitcoin's, the bound of a
+transaction's size): `feature_block` (blocks at both limits, one past each;
+P2SH sigops from 100-sigop outputs so that a block of them fits),
+`p2p_segwit`, `feature_segwit`, `mining_basic` (a lower `-blockreservedweight`
+leaves the transactions the same room: it comes on top of their limit),
+`mining_prioritisetransaction`, `feature_fee_estimation`,
+`mempool_updatefromblock`, `feature_maxuploadtarget`, `interface_http`
+(`mine_large_block`: a block of 1.5 million weight, its coinbase the bulk),
+`p2p_private_broadcast_cap`, `feature_dbcrash`, `interface_ipc_mining`.
+`feature_pruning` (extended) still mines blocks of 950 kB, which no longer
+fit: its heights and block files are counted for them, and it needs a rework.
 
 ## The decisions of 2026-10-12
 

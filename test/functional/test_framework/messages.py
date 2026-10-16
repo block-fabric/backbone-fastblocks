@@ -35,7 +35,11 @@ from test_framework.util import (
 )
 
 MAX_LOCATOR_SZ = 101
-MAX_BLOCK_WEIGHT = 4000000
+MAX_BLOCK_WEIGHT = 4000000  # Bitcoin's (consensus.h MAX_BLOCK_WEIGHT; still the bound of a transaction's size)
+# FastBlocks, every network: the weight of a whole block (consensus.max_block_weight) and of its
+# transactions other than the coinbase (consensus.max_block_tx_weight); the rest is the coinbase's.
+FASTBLOCKS_MAX_BLOCK_WEIGHT = 1_500_000
+MAX_BLOCK_TX_WEIGHT = 400_000
 MAX_BLOCK_SIGOPS_COST = 80000
 DEFAULT_BLOCK_RESERVED_WEIGHT = 8000
 MINIMUM_BLOCK_RESERVED_WEIGHT = 2000

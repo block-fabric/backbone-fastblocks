@@ -10,15 +10,16 @@ import time
 from test_framework.blocktools import NORMAL_GBT_REQUEST_PARAMS
 from test_framework.messages import (
     COIN,
-    MAX_BLOCK_WEIGHT,
+    CTxOut,
+    MAX_BLOCK_TX_WEIGHT,
 )
+from test_framework.script import CScript, OP_RETURN
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_not_equal,
     assert_equal,
     assert_raises_rpc_error,
     create_lots_of_big_transactions,
-    gen_return_txouts,
 )
 from test_framework.wallet import MiniWallet
 
@@ -231,7 +232,9 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
         self.test_replacement()
         self.test_diamond()
 
-        self.txouts = gen_return_txouts()
+        # FastBlocks: transactions of about 6,800 vbytes rather than Bitcoin's 67,000 (gen_return_txouts):
+        # as many of them fill the 400,000 weight of a block's transactions as of those a block of Bitcoin.
+        self.txouts = [CTxOut(nValue=0, scriptPubKey=CScript([OP_RETURN, b'\x01' * 6700]))]
         self.relayfee = self.nodes[0].getnetworkinfo()['relayfee']
 
         utxo_count = 90
@@ -257,7 +260,7 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
                 utxos[start_range:end_range])
 
         # Make sure that the size of each group of transactions exceeds
-        # MAX_BLOCK_WEIGHT // 4 -- otherwise the test needs to be revised to
+        # MAX_BLOCK_TX_WEIGHT // 4 (FastBlocks: the transactions' part of a block) -- otherwise the test needs to be revised to
         # create more transactions.
         mempool = self.nodes[0].getrawmempool(True)
         sizes = [0, 0, 0]
@@ -265,7 +268,7 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
             for j in txids[i]:
                 assert j in mempool
                 sizes[i] += mempool[j]['vsize']
-            assert sizes[i] > MAX_BLOCK_WEIGHT // 4  # Fail => raise utxo_count
+            assert sizes[i] > MAX_BLOCK_TX_WEIGHT // 4  # Fail => raise utxo_count
 
         assert_equal(self.nodes[0].getprioritisedtransactions(), {})
         # add a fee delta to something in the cheapest bucket and make sure it gets mined

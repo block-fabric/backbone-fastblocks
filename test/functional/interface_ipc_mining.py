@@ -23,7 +23,7 @@ from test_framework.messages import (
     CTxOut,
     DEFAULT_BLOCK_RESERVED_WEIGHT,
     MAX_BLOCK_SIGOPS_COST,
-    MAX_BLOCK_WEIGHT,
+    FASTBLOCKS_MAX_BLOCK_WEIGHT,
     from_hex,
     msg_headers,
     ser_uint256,
@@ -328,7 +328,7 @@ class IPCMiningTest(BitcoinTestFramework):
         # value that would result in empty blocks to verify this. IPC clients set
         # blockReservedWeight per template request and are unaffected; later in
         # the test the IPC template includes a mempool transaction.
-        self.restart_node(0, extra_args=[f"-blockreservedweight={MAX_BLOCK_WEIGHT}"])
+        self.restart_node(0, extra_args=[f"-blockreservedweight={FASTBLOCKS_MAX_BLOCK_WEIGHT}"])
         self.miniwallet.rescan_utxos()
 
         async def async_routine():
@@ -343,7 +343,7 @@ class IPCMiningTest(BitcoinTestFramework):
                 assert_equal(len(block.vtx), 2)
 
                 self.log.debug("Use absurdly large reserved weight to force an empty template")
-                opts.blockReservedWeight = MAX_BLOCK_WEIGHT
+                opts.blockReservedWeight = FASTBLOCKS_MAX_BLOCK_WEIGHT
                 empty_template = await mining_create_block_template(mining, stack, ctx, opts)
                 assert empty_template is not None
                 empty_block = await mining_get_block(empty_template, ctx)
@@ -358,9 +358,9 @@ class IPCMiningTest(BitcoinTestFramework):
             self.log.debug("Enforce maximum reserved weight for IPC clients too")
             ctx, mining = await make_mining_ctx(self)
             opts = self.capnp_modules['mining'].BlockCreateOptions()
-            opts.blockReservedWeight = MAX_BLOCK_WEIGHT + 1
+            opts.blockReservedWeight = FASTBLOCKS_MAX_BLOCK_WEIGHT + 1
             await assert_create_new_block_fails(ctx, mining, opts,
-                f"block_reserved_weight ({MAX_BLOCK_WEIGHT + 1}) exceeds consensus maximum block weight ({MAX_BLOCK_WEIGHT})")
+                f"block_reserved_weight ({FASTBLOCKS_MAX_BLOCK_WEIGHT + 1}) exceeds consensus maximum block weight ({FASTBLOCKS_MAX_BLOCK_WEIGHT})")
 
         async def async_routine_check_sigops_limit():
             self.log.debug("Enforce sigops limit for IPC clients too")
@@ -433,7 +433,7 @@ class IPCMiningTest(BitcoinTestFramework):
         self.log.info("Running block_max_weight test")
 
         # Cap that leaves room for only a handful of mempool transactions
-        # above DEFAULT_BLOCK_RESERVED_WEIGHT (8000). Well below MAX_BLOCK_WEIGHT
+        # above DEFAULT_BLOCK_RESERVED_WEIGHT (8000). Well below FASTBLOCKS_MAX_BLOCK_WEIGHT
         # (4_000_000), so any truncation observed here is attributable to the
         # cap, not to consensus limits or wallet chain limits.
         small_cap = DEFAULT_BLOCK_RESERVED_WEIGHT + 4000

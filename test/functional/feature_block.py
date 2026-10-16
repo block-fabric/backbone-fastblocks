@@ -22,7 +22,8 @@ from test_framework.messages import (
     CTransaction,
     CTxIn,
     CTxOut,
-    MAX_BLOCK_WEIGHT,
+    FASTBLOCKS_MAX_BLOCK_WEIGHT,
+    MAX_BLOCK_TX_WEIGHT,
     SEQUENCE_FINAL,
     uint256_from_compact,
     uint256_from_str,
@@ -352,28 +353,30 @@ class FullBlockTest(BitcoinTestFramework):
         #                                          \-> b12 (3) -> b13 (4) -> b15 (5) -> b23 (6)
         #                                                                           \-> b24 (6) -> b25 (7)
         #                      \-> b3 (1) -> b4 (2)
+        # (FastBlocks: of the block's weight, the transactions other than the coinbase take
+        # MAX_BLOCK_TX_WEIGHT at most; b23 is at both limits, its coinbase takes the rest.)
         self.log.info("Accept a block of weight MAX_BLOCK_WEIGHT")
         self.move_tip(15)
         b23 = self.next_block(23, spend=out[6])
-        tx = CTransaction()
-        script_length = (MAX_BLOCK_WEIGHT - b23.get_weight() - 276) // 4
-        script_output = CScript([b'\x00' * script_length])
-        tx.vout.append(CTxOut(0, script_output))
-        tx.vin.append(CTxIn(COutPoint(b23.vtx[1].txid_int, 0)))
-        b23 = self.update_block(23, [tx])
+        b23 = self.fill_block(23, block_weight=FASTBLOCKS_MAX_BLOCK_WEIGHT)
         # Make sure the math above worked out to produce a max-weighted block
-        assert_equal(b23.get_weight(), MAX_BLOCK_WEIGHT)
+        assert_equal(b23.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT)
+        assert_equal(sum(tx.get_weight() for tx in b23.vtx[1:]), MAX_BLOCK_TX_WEIGHT)
         self.send_blocks([b23], True)
         self.save_spendable_output()
+
+        self.log.info("Reject a block whose transactions other than the coinbase weigh MAX_BLOCK_TX_WEIGHT + 4")
+        self.move_tip(15)
+        b23t = self.next_block("23t", spend=out[6])
+        b23t = self.fill_block("23t", tx_weight=MAX_BLOCK_TX_WEIGHT + 4)
+        assert_greater_than(FASTBLOCKS_MAX_BLOCK_WEIGHT, b23t.get_weight())
+        self.send_blocks([b23t], success=False, reject_reason='bad-blk-tx-weight', reconnect=True)
 
         self.log.info("Reject a block of weight MAX_BLOCK_WEIGHT + 4")
         self.move_tip(15)
         b24 = self.next_block(24, spend=out[6])
-        script_length = (MAX_BLOCK_WEIGHT - b24.get_weight() - 276) // 4
-        script_output = CScript([b'\x00' * (script_length + 1)])
-        tx.vout = [CTxOut(0, script_output)]
-        b24 = self.update_block(24, [tx])
-        assert_equal(b24.get_weight(), MAX_BLOCK_WEIGHT + 1 * 4)
+        b24 = self.fill_block(24, block_weight=FASTBLOCKS_MAX_BLOCK_WEIGHT + 4)
+        assert_equal(b24.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT + 1 * 4)
         self.send_blocks([b24], success=False, reject_reason='bad-blk-length', reconnect=True)
 
         b25 = self.next_block(25, spend=out[7])
@@ -495,19 +498,22 @@ class FullBlockTest(BitcoinTestFramework):
         #   13 (4) -> b15 (5) -> b23 (6) -> b30 (7) -> b31 (8) -> b33 (9) -> b35 (10) -> b39 (11) -> b41 (12)
         #                                                                                        \-> b40 (12)
         #
-        # b39 - create some P2SH outputs that will require 6 sigops to spend:
+        # b39 - create some P2SH outputs that will require 100 sigops to spend:
         #
-        #           redeem_script = COINBASE_PUBKEY, (OP_2DUP+OP_CHECKSIGVERIFY) * 5, OP_CHECKSIG
+        #           redeem_script = COINBASE_PUBKEY, (OP_2DUP+OP_CHECKSIGVERIFY) * 99, OP_CHECKSIG
+        #
+        # (FastBlocks: 100 rather than Bitcoin's 6, so that the spends that reach MAX_BLOCK_SIGOPS fit in
+        # the MAX_BLOCK_TX_WEIGHT of a block's transactions.)
         #           p2sh_script = OP_HASH160, ripemd160(sha256(script)), OP_EQUAL
         #
         self.log.info("Check P2SH SIGOPS are correctly counted")
         self.move_tip(35)
         self.next_block(39)
         b39_outputs = 0
-        b39_sigops_per_output = 6
+        b39_sigops_per_output = 100
 
         # Build the redeem script, hash it, use hash to create the p2sh script
-        redeem_script = CScript([self.coinbase_pubkey] + [OP_2DUP, OP_CHECKSIGVERIFY] * 5 + [OP_CHECKSIG])
+        redeem_script = CScript([self.coinbase_pubkey] + [OP_2DUP, OP_CHECKSIGVERIFY] * 99 + [OP_CHECKSIG])
         p2sh_script = script_to_p2sh_script(redeem_script)
 
         # Create a transaction that spends one satoshi to the p2sh_script, the rest to OP_TRUE
@@ -520,14 +526,15 @@ class FullBlockTest(BitcoinTestFramework):
         b39_outputs += 1
 
         # Until block is full, add tx's with 1 satoshi to p2sh_script, the rest to OP_TRUE
+        # (FastBlocks: full as far as its transactions go, MAX_BLOCK_TX_WEIGHT.)
         tx_new = None
         tx_last = tx
-        total_weight = b39.get_weight()
-        while total_weight < MAX_BLOCK_WEIGHT:
+        total_weight = sum(tx.get_weight() for tx in b39.vtx[1:])
+        while total_weight < MAX_BLOCK_TX_WEIGHT:
             tx_new = self.create_tx(tx_last, 1, 1, p2sh_script)
             tx_new.vout.append(CTxOut(tx_last.vout[1].nValue - 1, CScript([OP_TRUE])))
             total_weight += tx_new.get_weight()
-            if total_weight >= MAX_BLOCK_WEIGHT:
+            if total_weight >= MAX_BLOCK_TX_WEIGHT:
                 break
             b39.vtx.append(tx_new)  # add tx to block
             tx_last = tx_new
@@ -538,7 +545,7 @@ class FullBlockTest(BitcoinTestFramework):
         # Make sure we didn't accidentally make too big a block. Note that the
         # size of the block has non-determinism due to the ECDSA signature in
         # the first transaction.
-        while b39.get_weight() >= MAX_BLOCK_WEIGHT:
+        while b39.get_weight() >= FASTBLOCKS_MAX_BLOCK_WEIGHT or sum(tx.get_weight() for tx in b39.vtx[1:]) > MAX_BLOCK_TX_WEIGHT:
             del b39.vtx[-1]
 
         b39 = self.update_block(39, [])
@@ -548,6 +555,7 @@ class FullBlockTest(BitcoinTestFramework):
         # Test sigops in P2SH redeem scripts
         #
         # b40 creates 3333 tx's spending the 6-sigop P2SH outputs from b39 for a total of 19998 sigops.
+        # (FastBlocks: 199 spending the 100-sigop outputs, 19900 sigops.)
         # The first tx has one sigop and then at the end we add 2 more to put us just over the max.
         #
         # b41 does the same, less one, so it has the maximum sigops permitted.
@@ -917,6 +925,7 @@ class FullBlockTest(BitcoinTestFramework):
 
         #  This checks that a block with a bloated VARINT between the block_header and the array of tx such that
         #  the block is > MAX_BLOCK_WEIGHT with the bloated varint, but <= MAX_BLOCK_WEIGHT without the bloated varint,
+        #  (FastBlocks: FASTBLOCKS_MAX_BLOCK_WEIGHT)
         #  does not cause a subsequent, identical block with canonical encoding to be rejected.  The test does not
         #  care whether the bloated block is accepted or rejected; it only cares that the second block is accepted.
         #
@@ -941,12 +950,8 @@ class FullBlockTest(BitcoinTestFramework):
         tx = CTransaction()
 
         # use canonical serialization to calculate size
-        script_length = (MAX_BLOCK_WEIGHT - 4 * len(b64a.normal_serialize()) - 276) // 4
-        script_output = CScript([b'\x00' * script_length])
-        tx.vout.append(CTxOut(0, script_output))
-        tx.vin.append(CTxIn(COutPoint(b64a.vtx[1].txid_int, 0)))
-        b64a = self.update_block("64a", [tx])
-        assert_equal(b64a.get_weight(), MAX_BLOCK_WEIGHT + 8 * 4)
+        b64a = self.fill_block("64a", block_weight=FASTBLOCKS_MAX_BLOCK_WEIGHT, measure=lambda b: 4 * len(b.normal_serialize()))
+        assert_equal(b64a.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT + 8 * 4)
         self.send_blocks([b64a], success=False, reject_reason='non-canonical ReadCompactSize()')
 
         # bitcoind doesn't disconnect us for sending a bloated block, but if we subsequently
@@ -960,7 +965,7 @@ class FullBlockTest(BitcoinTestFramework):
         b64 = CBlock(b64a)
         b64.vtx = copy.deepcopy(b64a.vtx)
         assert_equal(b64.hash_hex, b64a.hash_hex)
-        assert_equal(b64.get_weight(), MAX_BLOCK_WEIGHT)
+        assert_equal(b64.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT)
         self.blocks[64] = b64
         b64 = self.update_block(64, [])
         self.send_blocks([b64], True)
@@ -1299,13 +1304,8 @@ class FullBlockTest(BitcoinTestFramework):
             spend = out[32]
             for i in range(89, LARGE_REORG_SIZE + 89):
                 b = self.next_block(i, spend)
-                tx = CTransaction()
-                script_length = (MAX_BLOCK_WEIGHT - b.get_weight() - 276) // 4
-                script_output = CScript([b'\x00' * script_length])
-                tx.vout.append(CTxOut(0, script_output))
-                tx.vin.append(CTxIn(COutPoint(b.vtx[1].txid_int, 0)))
-                b = self.update_block(i, [tx])
-                assert_equal(b.get_weight(), MAX_BLOCK_WEIGHT)
+                b = self.fill_block(i, block_weight=FASTBLOCKS_MAX_BLOCK_WEIGHT)
+                assert_equal(b.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT)
                 blocks.append(b)
                 self.save_spendable_output()
                 spend = self.get_spendable_output()
@@ -1336,6 +1336,30 @@ class FullBlockTest(BitcoinTestFramework):
 
     def add_transactions_to_block(self, block, tx_list):
         block.vtx.extend(tx_list)
+
+    def fill_block(self, block_number, *, block_weight=None, tx_weight=MAX_BLOCK_TX_WEIGHT, measure=None):
+        """FastBlocks: a block's transactions other than the coinbase weigh MAX_BLOCK_TX_WEIGHT at most,
+        the rest of its weight is the coinbase's. Add a transaction that spends the output of the
+        block's second, with an output of data that brings the transactions' weight to `tx_weight`;
+        then, if `block_weight` is given, an output of data in the coinbase that brings the block's
+        weight (as `measure` says, get_weight() by default) to it. Both exact."""
+        block = self.blocks[block_number]
+        measure = measure or (lambda b: b.get_weight())
+        current = sum(tx.get_weight() for tx in block.vtx[1:])
+        tx = CTransaction()
+        tx.vin.append(CTxIn(COutPoint(block.vtx[1].txid_int, 0)))
+        length = (tx_weight - current) // 4 - 100
+        tx.vout = [CTxOut(0, CScript([b'\x00' * length]))]
+        length += (tx_weight - current - tx.get_weight()) // 4
+        tx.vout = [CTxOut(0, CScript([b'\x00' * length]))]
+        assert_equal(current + tx.get_weight(), tx_weight)
+        block.vtx.append(tx)
+        if block_weight is not None:
+            length = (block_weight - measure(block)) // 4 - 100
+            block.vtx[0].vout.append(CTxOut(0, CScript([b'\x00' * length])))
+            block.vtx[0].vout[-1] = CTxOut(0, CScript([b'\x00' * (length + (block_weight - measure(block)) // 4)]))
+            assert_equal(measure(block), block_weight)
+        return self.update_block(block_number, [])
 
     # this is a little handier to use than the version in blocktools.py
     def create_tx(self, spend_tx, n, value, output_script=None):
