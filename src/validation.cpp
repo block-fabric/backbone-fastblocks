@@ -8196,8 +8196,9 @@ std::pair<int, int> Chainstate::GetPruneRange(int last_height_can_prune) const
         prune_start = Assert(SnapshotBase())->nHeight + 1;
     }
 
+    // (On a sidechain, the blocks any reorg can take back: MinBlocksToKeep.)
     int max_prune = std::max<int>(
-        0, m_chain.Height() - static_cast<int>(MIN_BLOCKS_TO_KEEP));
+        0, m_chain.Height() - MinBlocksToKeep(m_chainman.GetConsensus()));
 
     // last block to prune is the lesser of (caller-specified height, MIN_BLOCKS_TO_KEEP from the tip)
     //

@@ -142,6 +142,30 @@ Options: `-mainchainrpcconnect`, `-mainchainrpcport`, `-mainchainrpcuser`,
 `-mainchainrpcwallet`. Without user and password, the cookie file of the
 mainchain node is used, looked for in `~/.chains`.
 
+## Pruning
+
+A sidechain node keeps a good history. `-prune` below 5000 MiB
+(`MIN_SIDECHAIN_PRUNE_TARGET` in `src/validation.h`) refuses to start
+("-prune must be at least 5000 MiB on a sidechain"); `-prune=0` (off) and
+`-prune=1` (manual pruning) are taken, and `pruneblockchain` then removes the
+oldest block files only as long as 5000 MiB of them are left. Pruning goes by
+whole block files with a margin for the next ones, so what is kept is never less
+than 5000 MiB less a block file and that margin: more than 5 GB of the most
+recent blocks and their undo data.
+
+Whatever the size, a pruned sidechain node also keeps the blocks of the last
+`DRIVECHAIN_UNDO_DEPTH` (2880) heights, not only Bitcoin's 288
+(`MinBlocksToKeep`): every block a reorg can take back, as deep as the
+drivechain undo data goes. So a reorg a node that does not prune can make, a
+pruned one can make too, and code that reads a block that may lose its
+commitment (the Follower taking back blocks whose commitment the mainchain
+dropped; a sidechain whose hooks read a block's commitment from its data, as
+FastBlocks' `CommitmentOf` reads a block of stake's acknowledgement) finds it on
+disk rather than having to fall back on the record, which no longer has the
+commitment. A block deeper than that can be taken back by no reorg. Regtest
+without `-sidechainslot` is not a sidechain and keeps Bitcoin's rules (550 MiB,
+288 blocks) for the tests it inherits.
+
 ## Trying it on regtest
 
 On regtest the chain is an ordinary chain unless `-sidechainslot=<n>` is
