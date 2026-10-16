@@ -70,7 +70,7 @@ constexpr auto SHUTDOWN_POLL{200ms};
 
 int64_t PruneGBtoMiB(int64_t gb) { return gb * GB_BYTES / (1024 * 1024); }
 int PruneMiBtoGB(int64_t mib) { return (mib * 1024 * 1024 + GB_BYTES - 1) / GB_BYTES; }
-//! The least prune size in GB the chain takes (MinPruneTarget: 5000 MiB, so 6 GB, on a sidechain).
+//! The least prune size in GB the chain takes (MinPruneTarget: 10000 MiB, so 11 GB, on a sidechain).
 int MinPruneGB() { return static_cast<int>((MinPruneTarget(Params().GetConsensus()) + GB_BYTES - 1) / GB_BYTES); }
 
 std::thread::id g_ui_thread;
@@ -232,6 +232,18 @@ void App::UpdateTitle()
         if (const std::string label{NetworkLabel(m_network)}; !label.empty()) title += " [" + label + "]";
     }
     m_window->Post([this, title] { m_window->SetTitle(title); });
+}
+
+void App::Inform(UniValue dialog)
+{
+    {
+        LOCK(m_mutex);
+        const int64_t id{m_next_dialog++};
+        dialog.pushKV("id", id);
+        m_dialogs[id] = dialog;
+        m_informs.insert(id);
+    }
+    m_hub->Emit("dialog", dialog);
 }
 
 UniValue App::Ask(UniValue dialog, UniValue fallback)
@@ -547,6 +559,19 @@ bool App::StartNode()
         }
     }
 
+    // A prune size saved below the least of the chain (an older version offered 2 GB): raised to it, said
+    // once, rather than a node that refuses to start.
+    if (const auto low{NodeOptions::RaiseLowPrune(*m_node, m_args)}) {
+        UniValue dialog{UniValue::VOBJ};
+        dialog.pushKV("kind", "message");
+        dialog.pushKV("level", "info");
+        dialog.pushKV("title", "Prune size raised");
+        dialog.pushKV("message", strprintf("The prune size was %d MiB, below the least this chain allows (%d MiB). It is now %d GB: the node keeps that much of the most recent blocks.",
+                                           *low, MinPruneTarget(CreateChainParams(m_args, m_args.GetChainType())->GetConsensus()) / (1024 * 1024),
+                                           PruneMiBtoGB(SettingTo<int64_t>(m_node->getPersistentSetting("prune"), 0))));
+        Inform(std::move(dialog));
+    }
+
     if (!m_node->baseInitialize()) {
         // The error was shown, as a message of the node.
         LOCK(m_mutex);
@@ -667,7 +692,10 @@ std::optional<std::string> App::Choose(const Window::FileDialog& dialog)
 #endif
     if (!from_test) {
         auto done{std::make_shared<std::promise<std::optional<std::string>>>()};
-        m_window->Post([this, dialog, done] { m_window->ChooseFile(dialog, [done](std::optional<std::string> path) { done->set_value(std::move(path)); }); });
+        // Dark or light as the app is (the chooser is the system's).
+        Window::FileDialog shown{dialog};
+        shown.scheme = dialog::SchemeOf(NetworkPrefs());
+        m_window->Post([this, dialog = std::move(shown), done] { m_window->ChooseFile(dialog, [done](std::optional<std::string> path) { done->set_value(std::move(path)); }); });
         auto future{done->get_future()};
         // The user takes the time needed; the app may stop meanwhile.
         while (future.wait_for(200ms) != std::future_status::ready) {
@@ -684,27 +712,50 @@ std::optional<std::string> App::Choose(const Window::FileDialog& dialog)
     return chosen;
 }
 
-bool App::Confirm(const Window::ConfirmDialog& dialog)
+dialog::Request App::DialogRequest(const Window::ConfirmDialog& confirm)
 {
+    dialog::Request request;
+    request.title = confirm.title;
+    request.message = confirm.message;
+    request.details = confirm.details;
+    request.accept = confirm.accept;
+    request.level = confirm.level;
+    std::string language;
+    {
+        LOCK(m_mutex);
+        language = m_language;
+    }
+    bool rtl{false};
+    if (auto catalog{LoadCatalog(BuiltinAssets(), language)}) rtl = catalog->find_value("rtl").isTrue();
+    request.look = dialog::Look(NetworkPrefs(), rtl, language);
+    return request;
+}
+
+bool App::Confirm(const Window::ConfirmDialog& confirm)
+{
+    dialog::Request request{DialogRequest(confirm)};
 #ifdef WEBUI_TEST_HOOKS
     {
         LOCK(m_mutex);
         if (!m_test_confirms.empty()) {
-            const bool answer{m_test_confirms.front()};
+            const TestConfirm answer{m_test_confirms.front()};
             m_test_confirms.pop_front();
-            m_test_confirmed.push_back(dialog);
-            return answer;
-        }
-        if (!m_test_script.empty()) {
+            m_test_confirmed.push_back(confirm);
+            // Answered here, or shown (in the dialog window, or in the dialog of the system as when that window cannot be made).
+            if (answer == TestConfirm::YES || answer == TestConfirm::NO) return answer == TestConfirm::YES;
+            request.test_fallback = answer == TestConfirm::FALLBACK;
+        } else if (!m_test_script.empty()) {
             // A test that did not expect the question: declined, and kept for test.confirmed (never a dialog
             // on the desktop of whoever runs the tests).
-            m_test_confirmed.push_back(dialog);
+            m_test_confirmed.push_back(confirm);
             return false;
         }
     }
 #endif
     auto done{std::make_shared<std::promise<bool>>()};
-    m_window->Post([this, dialog, done] { m_window->Confirm(dialog, [done](bool yes) { done->set_value(yes); }); });
+    m_window->Post([this, request = std::move(request), done] {
+        m_window->Ask(request, [done](dialog::Answer answer) { done->set_value(answer.accepted); });
+    });
     auto future{done->get_future()};
     while (future.wait_for(200ms) != std::future_status::ready) {
         LOCK(m_mutex);
@@ -936,6 +987,10 @@ void App::RegisterHostMethods()
         {
             LOCK(m_mutex);
             if (!m_dialogs.contains(id.getInt<int64_t>())) return UniValue{false};
+            if (m_informs.erase(id.getInt<int64_t>())) {
+                m_dialogs.erase(id.getInt<int64_t>());
+                return UniValue{true};
+            }
             m_answers[id.getInt<int64_t>()] = Param(params, "answer");
         }
         m_cv.notify_all();
@@ -1375,13 +1430,49 @@ void App::RegisterHostMethods()
             return UniValue{true};
         });
         b.RegisterHost("test.confirmAnswer", [this](const UniValue& params) {
-            // The answer of the next confirmation of the desktop (Window::Confirm): true for accepted.
+            // The next confirmation of the host (App::Confirm): {yes} answers it here (true for accepted); {show: true}
+            // shows it in the dialog window, {fallback: true} in the dialog of the system, as when that window cannot be
+            // made; the test then answers it there (test.dialog).
             const UniValue& yes{Param(params, "yes")};
-            if (!yes.isBool()) throw HostError(BRIDGE_INVALID_REQUEST, "yes: true or false");
+            const bool show{Param(params, "show").isTrue()};
+            const bool fallback{Param(params, "fallback").isTrue()};
+            if (!yes.isBool() && !show && !fallback) throw HostError(BRIDGE_INVALID_REQUEST, "yes: true or false; or show: true; or fallback: true");
             LOCK(m_mutex);
-            m_test_confirms.push_back(yes.get_bool());
+            m_test_confirms.push_back(fallback ? TestConfirm::FALLBACK : show ? TestConfirm::SHOW : yes.get_bool() ? TestConfirm::YES : TestConfirm::NO);
             return UniValue{true};
         });
+        b.RegisterHost("test.dialog", [this](const UniValue& params) {
+            // The dialog shown now (a confirmation the test let show): {action: "kind"}, {action: "eval", script},
+            // {action: "snapshot", name} (in -webuitestshots), {action: "native", arg: "state", "accept" or "cancel"}.
+            const std::string action{ParamStr(params, "action")};
+            std::string arg;
+            if (action == "eval") {
+                arg = ParamStr(params, "script");
+            } else if (action == "snapshot") {
+                const std::string name{ParamStr(params, "name")};
+                if (name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != std::string::npos) {
+                    throw HostError(BRIDGE_INVALID_REQUEST, "name: letters, digits, '.', '_' and '-'");
+                }
+                const fs::path dir{fs::PathFromString(m_test_shots)};
+                if (dir.empty()) throw HostError("No -webuitestshots folder");
+                fs::create_directories(dir);
+                arg = fs::PathToString(dir / fs::PathFromString(name + ".png"));
+            } else if (action == "native") {
+                arg = ParamStr(params, "arg");
+            } else if (action != "kind") {
+                throw HostError(BRIDGE_INVALID_REQUEST, "action: kind, eval, snapshot or native");
+            }
+            auto done{std::make_shared<std::promise<std::optional<std::string>>>()};
+            m_window->Post([this, action, arg, done] { m_window->TestDialog(action, arg, [done](std::optional<std::string> out) { done->set_value(std::move(out)); }); });
+            auto future{done->get_future()};
+            if (future.wait_for(30s) != std::future_status::ready) throw HostError("The dialog did not answer");
+            const auto out{future.get()};
+            if (!out) return UniValue{};
+            UniValue value;
+            if (!value.read(*out)) return UniValue{*out};
+            if (action == "snapshot" && value.isTrue()) return UniValue{arg};
+            return value;
+        }, Bridge::Thread::LONG);
         b.RegisterHost("test.refused", [this](const UniValue&) {
             // The RPC methods the policy refused to the pages (a page that calls one fails in a release).
             UniValue out{UniValue::VARR};

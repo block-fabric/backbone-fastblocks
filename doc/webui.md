@@ -220,8 +220,9 @@ Rules the code keeps:
 
 * **Programs run only on the user's word, given to the desktop.** Whatever
   makes the app run a program (a sidechain downloaded from Sidechain Nodes, the
-  external signer `-signer`) goes through `Window::Confirm`, a dialog of the
-  window system that the page can neither draw nor answer, and a program path
+  external signer `-signer`) goes through `App::Confirm`, a dialog of the
+  host that the page can neither draw nor answer (see "The dialogs of the
+  host" below), and a program path
   only comes from the file chooser of the desktop. Downloads are https only,
   with no user name before the host (`https://a@b/` is refused), with a
   SHA-256 checked before anything is unpacked; the releases built into the app
@@ -249,6 +250,37 @@ Rules the code keeps:
     and where its credentials go (doc/sidechain.md).
   A test that did not queue an answer (`test.confirmAnswer`) gets "no", never
   a dialog on the desktop.
+* **The dialogs of the host** (dialog.h, audit port-1 #4). These confirmations
+  are shown in a window of the host, in the look of the app, never in the page:
+  a small modal window over the main one (transient for it, centred on it; the
+  main window takes no input meanwhile), without the frame of the system, with
+  a web view of its own (WebKitGTK; WebView2 on Windows). It shows a page built
+  into the program (dialog.html, src/webui/app/src/dialog, built apart by
+  vite.dialog.config.ts) under an origin of its own (`chains-dialog://dialog`,
+  `https://dialog.chains-app.invalid` on Windows), which serves that page, its
+  script and style sheet and the fonts, nothing of the main page: no storage,
+  script or bridge of the main page reaches it, and the main page has no handle
+  on it. Its bridge, `__chainsDialog`, is that web view's only: `hello` gives
+  the text to show (put in with `textContent`, the marks that turn text around
+  written out as `[U+202E]` by the host and again by the page), `ready` its
+  size (the window shows then), `answer` the user's choice, once
+  (`dialog::Session`). It is drawn in the theme of the app as the host keeps it
+  (the preferences of the network: a built-in theme, or a theme of the user,
+  checked by the page as strictly as a theme file, and drawn as its base when
+  its text could not be read on the dialog), with the fonts built in and the
+  text size of the app. Escape cancels, Enter does what the focus is on (Cancel
+  at first: the safe default), Tab stays in the dialog, and the button that
+  accepts takes no click or key for 400 ms after the window shows. One dialog at
+  a time: the ones asked meanwhile wait their turn (`dialog::Pending`). Without
+  the window (its web view cannot be made, its page fails or says nothing in 10
+  s), the same question is asked in the dialog of the system: never an answer
+  the user did not give. File choosers stay the system's (the page reads files
+  only through them), dark or light as the app (GTK's prefer-dark setting while
+  one shows; on Windows the preferred mode of the app, uxtheme's
+  SetPreferredAppMode). The tests let a question show (`test.confirmAnswer`
+  `{show: true}`, or `{fallback: true}` for the dialog of the system) and answer
+  it in that window (`test.dialog`: keys and clicks in its page, its picture),
+  never through the page (run_audit.py, audit_dialog.js).
 * **Direction.** Text from outside is isolated as to direction: SafeText is
   `dir="auto"`, every `translate="no"` is `unicode-bidi: isolate`, and a value
   that can turn the text (a letter of a right-to-left script, a mark of
@@ -296,6 +328,38 @@ Rules the code keeps:
   that opens inside the window; tables can `fit` the width.
 * **Long lists.** Keep them as raw state (`$state.raw`), replaced as a whole,
   and draw them with DataTable (only the rows in view).
+
+## Simple and Advanced modes
+
+The app has two modes (user decision, 2026-10-16), a preference kept per
+network (`prefs.uiMode`): **Simple**, the default, shows what a beginner needs
+in plain words; **Advanced** shows every section of every page, as before. The
+switch is in the foot of the dashboard's sidebar, beside A− / A+
+(`components/ModeSwitch.svelte`), and in the palette ("Switch to Advanced
+mode"). `lib/uimode.svelte.ts` holds it:
+
+* `simpleMode()` in a template or a `$derived` follows the preference. A page
+  may hide sections, tabs or columns in Simple mode, never what a beginner
+  needs; a page with no simple variant shows the same in both.
+* Pages marked `advanced: true` in `PAGES` (the advanced transactions, the
+  tools, the node window, solo mining, the kit) leave the sidebar, the
+  workspace tabs and Home's quick actions in Simple mode; the palette and links
+  still reach them.
+* `components/Term.svelte` (`<Term id="bmm">merge-mined</Term>`) explains a word
+  of the trade from `lib/glossary.ts` on hover, focus or a tap; a chain adds
+  its own words with `addTerms()`.
+* `components/FirstRunTips.svelte` shows three first steps on Home in Simple
+  mode until dismissed (`prefs.tipsDone`); the steps are the chain's own
+  (`chain/firststeps.ts` of each chain; Chains' in `lib/firststeps.ts`).
+* `statusText()` of a transaction is in plain words in Simple mode (waiting for
+  the next block, confirmed, final).
+
+Chains' own: the Sidechains page is "Move coins" in Simple mode
+(`pages/MoveCoins.svelte`: which sidechain, how much, the deposit address from
+the sidechain's app, confirm; and how coins come back), with the sidechain apps
+beside it; Home says merged mining in one line, its meters on demand, and has
+no mining card. The vitest tests run in Advanced (`test/setup.ts`) unless they
+switch; the e2e scripts too (`common.js`), except `run_simple.py`.
 
 ## The app of a sidechain
 
@@ -439,6 +503,7 @@ not offer, make it a change of the template (generic, behind `chain.json`), and 
 | `e2e/run_node.py` | The node and Chains pages, with a pretend desktop (tray, notifications) and a second node |
 | `e2e/run_audit.py` | The fixes of the audit: the sync overlay, a block built by hand with a title that is not UTF-8, long calls, a history kept up to date in parts, a proof with a locked wallet, contrast measured on what the page draws, aligned tables, the title bar of the desktop or the integrated one, settings that wait for Apply (and the next start), `-disablewallet`, windows 700 and 480 px wide, a hardware wallet (the mock signer of the functional tests), `-lang=fr` |
 | `e2e/run_layouts.py` | The three layouts, the palette, the detail panel, the integrated title bar and the refresh (layouts.js, titlebar.js, refresh.js); pictures of each layout |
+| `e2e/run_simple.py` | Simple mode, the default of a first start (simple.js): Home with its first steps, the sidebar without the pages of Advanced, Send, the history, Move coins through its four steps to a real deposit, a word of the glossary, in Midnight and Light; the switch to Advanced and back. The other scripts run in Advanced (common.js) |
 | `e2e/run_windows.py` | From WSL, on the Windows of the machine (`--app build_win/bin/chains-app.exe --unit build_win/bin/test_chains-app.exe --shots <dir>`, in a folder `<stem>-app-test` of the Windows temporary folder, removed at the end): the unit tests, then smoke.js, layouts.js and titlebar.js; for a sidechain sidechain.js, the app on Windows following a regtest mainchain run in WSL |
 | `e2e/run_sidechain.py` | A sidechain (`webui_e2e_sidechain`, with `WEBUI_MAINCHAIN_BIN_DIR` or `MAINCHAIN_BIN_DIR` naming the folder of `chainsd`): a regtest mainchain started and mining a block every second, the sidechain activated in its slot, the app following it with a user name and a password file; through the page: a deposit address, the deposit made by the helper, merged mining on, the deposit credited, a withdrawal to an address of the mainchain wallet, its bundle voted on and paid (checked on the mainchain); pictures of the pages of the sidechain in the layouts and looks |
 | `e2e/run_release.py` | The release as a user gets it (`deploy-app`, built with `WEBUI_TEST_HOOKS=OFF`; `--windows` for the zip, run on the Windows of the machine): what the package holds and SHA256SUMS, no hooks of the tests in the app; the app run with no test script on regtest against a live mainchain, its node answering the command line program of the package, following the mainchain in its slot, and stopping cleanly |

@@ -18,7 +18,8 @@ import { buildCommands, chainHas, menuSections, pageAvailable } from '../lib/com
 import { dialogs } from '../lib/dialogs.svelte';
 import { handleShortcut } from '../lib/keyboard';
 import { AREAS, chainBeforeTools, HOME_QUICK_ACTIONS, NAV_SECTIONS } from '../lib/layout';
-import { go, nav, type PageId } from '../lib/nav.svelte';
+import { go, nav, PAGES, type PageId } from '../lib/nav.svelte';
+import { FIRST_STEPS } from '../lib/firststeps';
 import type { NodeOptions } from '../lib/rpc';
 import { bmmBlocks, bmmShare, bundleHistory, depositsOf, depositTarget, EventLog, voteProgress, type SideEvent } from '../lib/side';
 import { noteBmm, side, stopSide } from '../lib/sidestate.svelte';
@@ -395,5 +396,62 @@ describe.runIf(SIDECHAIN)('the pages of a sidechain', () => {
     await fireEvent.click(screen.getAllByRole('button', { name: 'Choose…' })[0]);
     await waitFor(() => expect(calls.find((c) => c.method === 'options.chooseFile')?.params).toEqual({ name: 'mainchainrpccookiefile' }));
     await waitFor(() => expect(chosen).not.toBeNull());
+  });
+});
+
+// Simple mode (lib/uimode.svelte.ts, user decision 2026-10-16): coins in and back in plain words, the bundle
+// and merged mining in Advanced; the same calls as Advanced.
+describe('Simple mode on a sidechain', () => {
+  beforeEach(() => {
+    prefs.uiMode = 'simple';
+    prefs.loaded = true;
+    prefs.tipsDone = false;
+  });
+
+  it('the home: its first steps, merged mining in a line, no card of merged mining', async () => {
+    go('home');
+    render(SideHome);
+    expect(screen.getByRole('heading', { name: `Welcome to ${CHAIN.name}` })).toBeTruthy();
+    expect(document.querySelectorAll('.tips li').length).toBe(3);
+    expect(screen.queryByRole('heading', { name: 'Merged mining' })).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('bmm-line').textContent).toMatch(/merge-mined by/));
+    // The quick actions leave merged mining out; Drivechains stays.
+    const quick = screen.getByRole('navigation', { name: 'Quick actions' });
+    expect(within(quick).queryByRole('button', { name: /Merged mining/ })).toBeNull();
+    expect(within(quick).getByRole('button', { name: /Bring coins in/ })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    await waitFor(() => expect(document.querySelector('.side-blocks')).toBeTruthy());
+    // A step of the tips opens its page (the chain's own steps, chain/firststeps.ts).
+    const step = FIRST_STEPS.find((s) => s.action && !s.action.panel)!.action!;
+    await fireEvent.click(within(document.querySelector('.tips') as HTMLElement).getByRole('button', { name: new RegExp(step.label) }));
+    expect(nav.page).toBe(PAGES[step.page as PageId].tabOf?.page ?? step.page);
+  });
+
+  it('Drivechains: two tabs in plain words, the withdrawal with the call of Advanced', async () => {
+    go('peg', 'withdraw');
+    render(Peg);
+    render(DialogHost);
+    expect(screen.getAllByRole('tab').map((x) => x.textContent?.trim().replace(/\d+$/, '').trim())).toEqual(['Bring coins in', 'Send coins back']);
+    expect(document.querySelector('.side-stats')).toBeNull();
+    const address = await waitFor(() => screen.getByLabelText(`Address of ${CHAIN.mainchain?.name}`));
+    await fireEvent.input(address, { target: { value: mainAddress } });
+    await fireEvent.input(screen.getByLabelText('Amount'), { target: { value: '0.3' } });
+    await new Promise((r) => setTimeout(r, 300));
+    await fireEvent.click(screen.getByRole('button', { name: /^Withdraw$/ }));
+    await answer('yes');
+    await waitFor(() => expect(calls.find((c) => c.method === 'createwithdrawal')?.params).toEqual([mainAddress, '0.3', '0.0001']));
+    // The withdrawals waiting, without blocks and ids; how far the votes are, in a line.
+    const table = await waitFor(() => screen.getByRole('table', { name: 'Withdrawals not paid yet' }));
+    expect(within(table).queryByText('Block')).toBeNull();
+    await waitFor(() => screen.getByText(/The withdrawals being voted on are 10% approved, 57 blocks left/));
+  });
+
+  it('Drivechains: the bundle when asked for, and every tab in Advanced', async () => {
+    go('peg', 'bundle');
+    render(Peg);
+    await waitFor(() => screen.getByText('3 of 30'));
+    prefs.uiMode = 'advanced';
+    await waitFor(() => expect(screen.getAllByRole('tab').length).toBe(4));
+    expect(document.querySelector('.side-stats')).toBeTruthy();
   });
 });

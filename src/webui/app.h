@@ -98,14 +98,25 @@ private:
      * answer it in place of the user. The page may use the file afterwards.
      */
     std::optional<std::string> Choose(const Window::FileDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
-    /** Ask the user in a dialog of the desktop (Window::Confirm), not of the page; false when cancelled or quitting. */
+    /**
+     * Ask the user in the dialog window of the host (Window::Ask: in the look of the app, never of the page), not on a
+     * thread of the UI; false when cancelled or quitting.
+     */
     bool Confirm(const Window::ConfirmDialog& dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** A confirmation as the dialog window shows it: its text, and the look of the app now (the preferences of the network shown). */
+    dialog::Request DialogRequest(const Window::ConfirmDialog& confirm) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
      * Show a dialog in the page and wait for its answer (on a thread that is not the UI thread).
      * Without an answer (the app stops), `fallback`.
      */
     UniValue Ask(UniValue dialog, UniValue fallback) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Show a message in the page without waiting for it (any thread): kept with the dialogs that wait, so
+     * that a page loaded later shows it too, until it is answered.
+     */
+    void Inform(UniValue dialog) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Take back the changes of the options never applied (OptionsJournal), with the restart flag they set. */
     void UndoOptions(interfaces::Node& node, const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -157,6 +168,8 @@ private:
     bool m_intro_cancelled GUARDED_BY(m_mutex){false};
     //! Dialogs waiting for an answer of the page, by id, and their answers.
     std::map<int64_t, UniValue> m_dialogs GUARDED_BY(m_mutex);
+    //! The dialogs of m_dialogs that nobody waits for (Inform): an answer removes them.
+    std::set<int64_t> m_informs GUARDED_BY(m_mutex);
     std::map<int64_t, UniValue> m_answers GUARDED_BY(m_mutex);
     int64_t m_next_dialog GUARDED_BY(m_mutex){1};
     bool m_node_started GUARDED_BY(m_mutex){false};
@@ -166,8 +179,10 @@ private:
     std::set<std::string> m_writable GUARDED_BY(m_mutex);
     //! Answers of the file choosers given by the tests (-webuitestscript), in place of the user.
     std::deque<UniValue> m_test_files GUARDED_BY(m_mutex);
-    //! Answers of the confirmations of the desktop given by the tests (-webuitestscript), and what they asked.
-    std::deque<bool> m_test_confirms GUARDED_BY(m_mutex);
+    //! Answers of the confirmations of the host given by the tests (-webuitestscript), and what they asked: an answer
+    //! given here, or the dialog shown (the dialog window, or the dialog of the system), for the test to answer there.
+    enum class TestConfirm { YES, NO, SHOW, FALLBACK };
+    std::deque<TestConfirm> m_test_confirms GUARDED_BY(m_mutex);
     std::vector<Window::ConfirmDialog> m_test_confirmed GUARDED_BY(m_mutex);
     //! The notifications sent to the desktop, for the tests.
     std::vector<UniValue> m_notifications GUARDED_BY(m_mutex);

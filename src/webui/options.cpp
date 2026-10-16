@@ -60,9 +60,11 @@ constexpr bool DEFAULT_SPEND_ZEROCONF{true};
 
 int64_t PruneGBtoMiB(int64_t gb) { return gb * GB_BYTES / (1024 * 1024); }
 int PruneMiBtoGB(int64_t mib) { return (mib * 1024 * 1024 + GB_BYTES - 1) / GB_BYTES; }
-//! The least prune size in GB the chain takes (MinPruneTarget: 5000 MiB, so 6 GB, on a sidechain).
+//! The least prune size in GB the chain takes (MinPruneTarget: 10000 MiB, so 11 GB, on a sidechain).
 int MinPruneGB() { return static_cast<int>((MinPruneTarget(Params().GetConsensus()) + GB_BYTES - 1) / GB_BYTES); }
 int DefaultPruneGB() { return std::max(DEFAULT_PRUNE_TARGET_GB, MinPruneGB()); }
+//! The least -prune target of the chain of these arguments, in bytes (before the chain is selected).
+uint64_t MinPruneBytes(const ArgsManager& args) { return MinPruneTarget(CreateChainParams(args, args.GetChainType())->GetConsensus()); }
 
 //! -prune=1 is the manual pruning mode: not pruning, as far as the settings are concerned.
 bool PruneEnabled(const common::SettingsValue& prune) { return SettingTo<int64_t>(prune, 0) > 1; }
@@ -333,6 +335,18 @@ bool NodeOptions::SetStartAtLogin(ArgsManager& args, bool start)
     (void)start;
     return false;
 #endif
+}
+
+std::optional<int64_t> NodeOptions::RaiseLowPrune(interfaces::Node& node, const ArgsManager& args)
+{
+    if (node.isSettingIgnored("prune")) return std::nullopt;
+    const int64_t mib{SettingTo<int64_t>(node.getPersistentSetting("prune"), 0)};
+    const uint64_t least{MinPruneBytes(args)};
+    if (mib <= 1 || static_cast<uint64_t>(mib) * 1024 * 1024 >= least) return std::nullopt;
+    const common::SettingsValue raised{PruneGBtoMiB(static_cast<int64_t>((least + GB_BYTES - 1) / GB_BYTES))};
+    node.updateRwSetting("prune", raised);
+    node.forceSetting("prune", raised);
+    return mib;
 }
 
 UniValue NodeOptions::Get()
