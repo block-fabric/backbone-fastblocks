@@ -3,8 +3,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyDialogLook, ARM_MS, readData, readable, render, start, wire, type DialogData } from './dialog';
-import { baseColors } from '../lib/customthemes';
+import { applyDialogLook, ARM_MS, DIALOG_TOKENS, dialogColors, legible, MIN_TEXT_CONTRAST, MIN_UI_CONTRAST, readData, render, start, TEXT_PAIRS, UI_PAIRS, wire, type DialogData, type DialogToken } from './dialog';
+import { BASE_THEMES, contrastOf, parseColor } from '../lib/customthemes';
 
 function data(over: Partial<DialogData> = {}): DialogData {
   return readData({
@@ -109,8 +109,9 @@ describe('the look of the app', () => {
   it('draws a theme of the user, its colours set one by one on known tokens', () => {
     const custom = { id: 'custom-mine', name: 'Mine', base: 'dracula', colors: { accent: '#b3125a', bg: '#101010' } };
     const out = applyDialogLook(document, data({ look: { theme: 'custom-mine', custom } as never }).look, false);
-    expect(out).toEqual({ choice: 'custom-mine', replaced: false });
+    expect(out).toEqual({ choice: 'custom-mine', replaced: [] });
     expect(document.documentElement.dataset.theme).toBe('dracula');
+    expect(document.documentElement.dataset.themeChoice).toBe('custom');
     expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#b3125a');
   });
 
@@ -122,13 +123,64 @@ describe('the look of the app', () => {
     }
   });
 
-  it('draws a theme of the user whose text cannot be read as its base: what is asked is read', () => {
-    const custom = { id: 'custom-hide', name: 'Hide', base: 'light', colors: { text: '#ffffff', surface: '#ffffff' } };
-    const out = applyDialogLook(document, data({ look: { theme: 'custom-hide', custom } as never }).look, false);
-    expect(out).toEqual({ choice: 'light', replaced: true });
-    expect(document.documentElement.style.getPropertyValue('--text')).toBe('');
-    // Every built-in theme can be read.
-    for (const base of ['midnight', 'light', 'dark', 'ocean', 'matrix', 'qdarkstyle', 'mocha', 'dracula'] as const) expect(readable(baseColors(base)), base).toBe(true);
+  /** The colours the dialog is drawn with now, read from the document. */
+  const drawn = () => Object.fromEntries(DIALOG_TOKENS.map((t) => [t, document.documentElement.style.getPropertyValue(`--${t}`)])) as Record<DialogToken, string>;
+  /** Every pair the dialog draws at its threshold, and every colour opaque. */
+  const expectLegible = (colors: Record<DialogToken, string>) => {
+    for (const t of DIALOG_TOKENS) expect(parseColor(colors[t])?.a, t).toBe(1);
+    for (const [fg, bg] of TEXT_PAIRS) expect(contrastOf(colors[fg], colors[bg]), `${fg} on ${bg}`).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);
+    for (const [fg, bg] of UI_PAIRS) expect(contrastOf(colors[fg], colors[bg]), `${fg} on ${bg}`).toBeGreaterThanOrEqual(MIN_UI_CONTRAST);
+  };
+
+  it('every built-in theme is legible on the dialog as it is', () => {
+    for (const base of BASE_THEMES) {
+      expect(legible(dialogColors(base, null).colors), base).toBe(true);
+      expect(dialogColors(base, null).replaced, base).toEqual([]);
+      applyDialogLook(document, data({ look: { theme: base } as never }).look, false);
+      expectLegible(drawn());
+    }
+  });
+
+  it('a theme of the user never makes the dialog illegible: what fails gives way to its base', () => {
+    const themes: Record<string, Record<string, string>> = {
+      'near-invisible text': { text: '#1a1a1a', 'text-muted': '#1c1c1c', surface: '#181818', 'surface-2': '#191919' },
+      'text = background': { text: '#ffffff', surface: '#ffffff', 'surface-2': '#ffffff', raised: '#ffffff' },
+      'transparent backgrounds': { surface: 'rgba(0, 0, 0, 0)', 'surface-2': '#00000000', raised: 'hsla(0, 0%, 50%, 0.1)', text: 'rgb(255 255 255 / 50%)' },
+      'low-contrast buttons': { accent: '#202020', 'on-accent': '#262626', negative: '#2a2a2a', focus: '#1d1d1d' },
+      'invisible marks': { surface: '#202020', warning: '#202020', 'accent-fg': '#212121', negative: '#222222' },
+      'everything one colour': Object.fromEntries(DIALOG_TOKENS.map((t) => [t, '#777777'])),
+    };
+    for (const [name, colors] of Object.entries(themes)) {
+      for (const base of ['midnight', 'light'] as const) {
+        const custom = { id: 'custom-bad', name: 'Bad', base, colors };
+        const out = applyDialogLook(document, data({ look: { theme: 'custom-bad', custom } as never }).look, false);
+        expect(out.replaced.length, name).toBeGreaterThan(0);
+        expectLegible(drawn());
+        expect(legible(dialogColors(base, custom).colors), name).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the colours of the user that are legible, gives way only where needed', () => {
+    const out = dialogColors('midnight', { colors: { accent: '#b5f27e', text: '#191d1b' } });
+    // The text the colour of the surface: text (and the surface it fails on) are the base's; the accent stays.
+    expect(out.replaced).toContain('text');
+    expect(out.colors.text).toBe(dialogColors('midnight', null).colors.text);
+    expect(out.colors.accent).toBe('#b5f27e');
+  });
+
+  it('draws only with the tokens it checks: opaque backgrounds, no gradient, no other token', () => {
+    const used = new Set([...css.matchAll(/var\(--([a-z0-9-]+)\)/g)].map((m) => m[1]).filter((t) => !t.startsWith('font-') && !t.startsWith('radius-')));
+    expect([...used].filter((t) => !(DIALOG_TOKENS as readonly string[]).includes(t))).toEqual([]);
+    expect(css.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/gradient|opacity: 0\.[0-4]|transparent|rgba|hsla/);
+  });
+
+  it('marks a danger and the button that accepts not by colour alone', () => {
+    const danger = render(document, data({ level: 'danger' }));
+    expect(danger.accept.querySelector('svg.icon')).not.toBeNull();
+    expect(danger.accept.textContent).toBe('Run');
+    expect(css).toMatch(/\.btn\.danger \{[^}]*border: 2px solid/);
+    expect(css).toMatch(/\.btn\.primary \{[^}]*background: var\(--accent\)[^}]*font-weight: 650/);
   });
 
   it('takes the text size, the font and the direction of the language', () => {

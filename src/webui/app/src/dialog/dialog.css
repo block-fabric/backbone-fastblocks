@@ -1,5 +1,6 @@
 /* The page of the dialogs of the host (dialog.ts): the whole window is the dialog, drawn as the dialogs of the
-   interface (components/Dialog.svelte), in the colour tokens of themes.css only. */
+   interface (components/Dialog.svelte), with the tokens of DIALOG_TOKENS only (dialog.ts checks every pair of them
+   it draws, TEXT_PAIRS and UI_PAIRS): opaque backgrounds, no gradient, no transparency. */
 
 *,
 *::before,
@@ -20,7 +21,7 @@ body {
 }
 
 body {
-  background: linear-gradient(180deg, var(--card-top), transparent 10rem), var(--surface);
+  background: var(--surface);
   color: var(--text);
   font-family: var(--font-ui);
   font-size: 1rem;
@@ -41,8 +42,8 @@ body.loading {
   flex-direction: column;
   width: 100vw;
   height: 100vh;
-  border: 1px solid var(--line-strong);
-  background: linear-gradient(180deg, var(--card-top), transparent 10rem), var(--surface);
+  border: 1px solid var(--text-muted);
+  background: var(--surface);
 }
 
 /* While the page measures what it needs: its own width, the height of its content. */
@@ -109,7 +110,7 @@ body.loading {
 .details {
   margin: 0.75rem 0 0;
   padding: 0.6rem 0.75rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--text-muted);
   border-radius: var(--radius-s);
   background: var(--surface-2);
   font-family: var(--font-mono);
@@ -130,7 +131,7 @@ body.loading {
 .field input {
   min-height: 2.3rem;
   padding: 0 0.7rem;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--text-muted);
   border-radius: var(--radius-m);
   background: var(--surface-2);
   color: var(--text);
@@ -148,7 +149,7 @@ body.loading {
   flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.85rem 1.25rem;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--text-muted);
   background: var(--surface-2);
 }
 
@@ -158,8 +159,9 @@ body.loading {
   justify-content: center;
   min-height: 2.3rem;
   min-width: 6rem;
+  gap: 0.4rem;
   padding: 0 0.95rem;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--text-muted);
   border-radius: var(--radius-m);
   background: var(--surface-2);
   color: var(--text);
@@ -181,10 +183,12 @@ body.loading {
   cursor: default;
 }
 
+/* The button that accepts: filled (the other is outlined), heavier. */
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent);
+  font-weight: 650;
 }
 
 .btn.primary:hover:not(:disabled) {
@@ -192,9 +196,17 @@ body.loading {
   filter: brightness(1.04);
 }
 
+/* A danger: its mark (dialog.ts) and a heavy border, not its colour alone. */
 .btn.danger {
   color: var(--negative);
-  border-color: var(--negative);
+  border: 2px solid var(--negative);
+  font-weight: 650;
+}
+
+.btn .icon {
+  width: 1.15rem;
+  height: 1.15rem;
+  stroke: currentColor;
 }
 
 :focus-visible {
@@ -203,8 +215,8 @@ body.loading {
 }
 
 ::selection {
-  background: var(--accent-soft);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 :root[data-theme='matrix'] body {

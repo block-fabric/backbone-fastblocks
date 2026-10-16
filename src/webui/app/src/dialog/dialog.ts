@@ -7,9 +7,9 @@
 // It draws the look of the app: the theme the host passes (a built-in one, or a theme of the user checked here as
 // strictly as a theme file, lib/customthemes.ts), its fonts (built in) and text size. A theme of the user whose text
 // cannot be read on the dialog is drawn as its base: what is asked is read before it is answered.
-import { applyLook, checkStoredThemes, contrastOf, effectiveColors, isThemeChoice, type CustomTheme } from '../lib/customthemes';
+import { baseColors, checkStoredThemes, contrastOf, isDarkColor, isThemeChoice, parseColor, type BaseTheme, type CustomTheme, type TokenName } from '../lib/customthemes';
 import { revealBidi } from '../lib/format';
-import { clampFontAdjust, DEFAULT_THEME, type FontChoice } from '../lib/themes';
+import { applyTheme, clampFontAdjust, DEFAULT_THEME, isTheme, resolveTheme, type FontChoice } from '../lib/themes';
 
 export type Level = 'info' | 'warning' | 'danger';
 
@@ -39,8 +39,9 @@ export type DialogBridge = (method: string, params?: Record<string, unknown>) =>
 
 /** How long after the window shows the button that accepts takes no click or key (a click or Enter meant for the main window). */
 export const ARM_MS = 400;
-/** The least contrast of the text of the dialog on its backgrounds with a theme of the user (else its base is drawn). */
-export const MIN_CONTRAST = 3;
+/** The least contrast of text on its background (WCAG AA), and of what is not text (icons, the focus ring, the fill of a button). */
+export const MIN_TEXT_CONTRAST = 4.5;
+export const MIN_UI_CONTRAST = 3;
 
 const FONTS: readonly FontChoice[] = ['', 'inter', 'nunito', 'mono', 'system'];
 
@@ -76,39 +77,108 @@ export function readData(raw: unknown): DialogData {
   };
 }
 
-/** The pairs of colours the dialog draws text with: each at least MIN_CONTRAST. */
-const DIALOG_PAIRS = [
+/**
+ * The colour tokens the dialog draws with (dialog.css uses no other): opaque backgrounds only (no gradient, no
+ * transparency), text and marks over them.
+ */
+export const DIALOG_TOKENS = ['surface', 'surface-2', 'raised', 'text', 'text-muted', 'accent', 'on-accent', 'negative', 'warning', 'accent-fg', 'focus'] as const satisfies readonly TokenName[];
+export type DialogToken = (typeof DIALOG_TOKENS)[number];
+
+/**
+ * Every pair of text and background the dialog draws (dialog.css): the title, the text and the details on the
+ * surface, the footer and the details on surface-2, a button under the pointer on raised, the field's label in
+ * text-muted, the borders of the buttons and of the field in text-muted, the button that accepts (on-accent on
+ * accent), the one of a danger (negative, on surface-2 and raised).
+ */
+export const TEXT_PAIRS: readonly (readonly [DialogToken, DialogToken])[] = [
   ['text', 'surface'],
   ['text', 'surface-2'],
+  ['text', 'raised'],
   ['text-muted', 'surface'],
+  ['text-muted', 'surface-2'],
+  ['text-muted', 'raised'],
   ['on-accent', 'accent'],
   ['negative', 'surface-2'],
-] as const;
+  ['negative', 'raised'],
+];
+/**
+ * What is not text: the icons of the levels and the focus ring. (The button that accepts is told by its label,
+ * on-accent on accent above, and by being filled where the other is outlined in text-muted.)
+ */
+export const UI_PAIRS: readonly (readonly [DialogToken, DialogToken])[] = [
+  ['warning', 'surface'],
+  ['negative', 'surface'],
+  ['accent-fg', 'surface'],
+  ['focus', 'surface'],
+  ['focus', 'surface-2'],
+];
 
-/** Whether every text of the dialog can be read with these colours. */
-export function readable(colors: Record<string, string>): boolean {
-  return DIALOG_PAIRS.every(([fg, bg]) => {
-    const ratio = contrastOf(colors[fg] ?? '', colors[bg] ?? '');
-    return ratio !== null && ratio >= MIN_CONTRAST;
-  });
+function failing(colors: Record<DialogToken, string>): (readonly [DialogToken, DialogToken])[] {
+  const below = (min: number) => ([fg, bg]: readonly [DialogToken, DialogToken]) => {
+    const ratio = contrastOf(colors[fg], colors[bg]);
+    return ratio === null || ratio < min;
+  };
+  return [...TEXT_PAIRS.filter(below(MIN_TEXT_CONTRAST)), ...UI_PAIRS.filter(below(MIN_UI_CONTRAST))];
+}
+
+/** Whether every pair the dialog draws is legible with these colours (and every one of them opaque). */
+export function legible(colors: Record<DialogToken, string>): boolean {
+  return DIALOG_TOKENS.every((t) => parseColor(colors[t])?.a === 1) && failing(colors).length === 0;
 }
 
 /**
- * Put the look of the app on the dialog: the theme chosen (one of the user's only once checked, and drawn as its base
- * when its text cannot be read), the font and the size, the language and its direction. What is drawn: the choice,
- * and whether a theme of the user was replaced by its base.
+ * The colours of the dialog for a look: those of the built-in base, with the user's own where they are opaque
+ * colours and every pair stays legible. A colour of the user that is transparent, or in a pair that fails, gives way
+ * to the base's (both colours of the pair); when that is not enough, every colour is the base's. Never a failing pair.
  */
-export function applyDialogLook(doc: Document, look: DialogLook, prefersDark: boolean): { choice: string; replaced: boolean } {
-  const customs: CustomTheme[] = look.custom ? checkStoredThemes([look.custom]) : [];
-  let choice = isThemeChoice(look.theme, customs) ? look.theme : DEFAULT_THEME;
-  let replaced = false;
-  const custom = customs.find((c) => c.id === choice);
-  if (custom && !readable(effectiveColors(custom))) {
-    choice = custom.base;
-    replaced = true;
+export function dialogColors(base: BaseTheme, custom: Pick<CustomTheme, 'colors'> | null): { colors: Record<DialogToken, string>; replaced: DialogToken[] } {
+  const fallback = baseColors(base) as Record<DialogToken, string>;
+  const colors = {} as Record<DialogToken, string>;
+  const replaced = new Set<DialogToken>();
+  for (const t of DIALOG_TOKENS) {
+    const own = custom?.colors[t];
+    if (own !== undefined && parseColor(own)?.a === 1) colors[t] = own.trim();
+    else {
+      colors[t] = fallback[t];
+      if (own !== undefined) replaced.add(t);
+    }
   }
-  applyLook(doc, choice, customs, null, look.fontAdjust, prefersDark, look.fontFamily, look.moneyFont);
+  for (let pass = 0; pass < 3; pass++) {
+    const bad = failing(colors);
+    if (!bad.length) break;
+    for (const [fg, bg] of bad) {
+      for (const t of [fg, bg]) {
+        if (colors[t] !== fallback[t]) replaced.add(t);
+        colors[t] = fallback[t];
+      }
+    }
+  }
+  if (!legible(colors)) {
+    for (const t of DIALOG_TOKENS) {
+      if (colors[t] !== fallback[t]) replaced.add(t);
+      colors[t] = fallback[t];
+    }
+  }
+  return { colors, replaced: DIALOG_TOKENS.filter((t) => replaced.has(t)) };
+}
+
+/**
+ * Put the look of the app on the dialog: the theme chosen (one of the user's only once checked as a theme file), its
+ * colours for the dialog's tokens only as dialogColors keeps them legible, the font and the size, the language and its
+ * direction. What is drawn: the choice, and the colours of the user that gave way to the base's.
+ */
+export function applyDialogLook(doc: Document, look: DialogLook, prefersDark: boolean): { choice: string; replaced: DialogToken[] } {
+  const customs: CustomTheme[] = look.custom ? checkStoredThemes([look.custom]) : [];
+  const choice = isThemeChoice(look.theme, customs) ? look.theme : DEFAULT_THEME;
+  const custom = customs.find((c) => c.id === choice) ?? null;
+  const base: BaseTheme = custom ? custom.base : resolveTheme(isTheme(choice) ? choice : DEFAULT_THEME, prefersDark);
+  applyTheme(doc, base, look.fontAdjust, prefersDark, look.fontFamily, look.moneyFont);
   const root = doc.documentElement;
+  const { colors, replaced } = dialogColors(base, custom);
+  // Every colour of the dialog set one by one on its known token (never CSS text of a theme).
+  for (const t of DIALOG_TOKENS) root.style.setProperty(`--${t}`, colors[t]);
+  if (custom) root.dataset.themeChoice = 'custom';
+  root.style.colorScheme = isDarkColor(colors.surface) ? 'dark' : 'light';
   root.lang = look.lang ? look.lang.replace('_', '-') : 'en';
   root.dir = look.rtl ? 'rtl' : 'ltr';
   return { choice, replaced };
@@ -200,8 +270,11 @@ export function render(doc: Document, data: DialogData): Rendered {
   const footer = el(doc, 'footer');
   const cancel = el(doc, 'button', { id: 'dialog-cancel', className: 'btn', text: revealBidi(data.cancel) });
   cancel.type = 'button';
-  const accept = el(doc, 'button', { id: 'dialog-accept', className: `btn ${data.level === 'danger' ? 'danger' : 'primary'}`, text: revealBidi(data.accept) });
+  const accept = el(doc, 'button', { id: 'dialog-accept', className: `btn ${data.level === 'danger' ? 'danger' : 'primary'}` });
   accept.type = 'button';
+  // A danger is told by its mark and its heavy border too, not by its colour alone.
+  if (data.level === 'danger') accept.append(icon(doc, 'danger'));
+  accept.append(el(doc, 'span', { text: revealBidi(data.accept) }));
   footer.append(cancel, accept);
 
   root.append(header, body, footer);
