@@ -4,10 +4,10 @@
   // first steps again" brings them back).
   import { t } from '../lib/i18n.svelte';
   import Icon from './Icon.svelte';
-  import { FIRST_STEPS, FIRST_STEPS_TITLE, type FirstStep } from '../lib/firststeps';
+  import { FIRST_STEPS, type FirstStep } from '../lib/firststeps';
   import { go } from '../lib/nav.svelte';
   import { openQuick } from '../lib/quick.svelte';
-  import { prefs, savePrefs } from '../lib/state.svelte';
+  import { app, prefs, savePrefs } from '../lib/state.svelte';
   import { pageDisabled } from '../lib/commands.svelte';
   import { simpleMode } from '../lib/uimode.svelte';
 
@@ -20,7 +20,7 @@
 {#if simpleMode() && prefs.loaded && !prefs.tipsDone}
   <section class="tips panel" aria-labelledby="tips-title">
     <header>
-      <h2 id="tips-title">{t(FIRST_STEPS_TITLE)}</h2>
+      <h2 id="tips-title">{t('Welcome to %1', app.info?.name ?? 'Chains')}</h2>
       <p class="muted">Three first steps. Underlined words explain themselves: point at them, or tap them.</p>
       <button type="button" class="btn ghost small icon close" aria-label="Hide the first steps" title="Hide the first steps" onclick={() => savePrefs({ tipsDone: true })}><Icon name="x" size={16} /></button>
     </header>
