@@ -234,6 +234,18 @@ void App::UpdateTitle()
     m_window->Post([this, title] { m_window->SetTitle(title); });
 }
 
+void App::Inform(UniValue dialog)
+{
+    {
+        LOCK(m_mutex);
+        const int64_t id{m_next_dialog++};
+        dialog.pushKV("id", id);
+        m_dialogs[id] = dialog;
+        m_informs.insert(id);
+    }
+    m_hub->Emit("dialog", dialog);
+}
+
 UniValue App::Ask(UniValue dialog, UniValue fallback)
 {
     if (std::this_thread::get_id() == g_ui_thread) {
@@ -545,6 +557,19 @@ bool App::StartNode()
                 m_node->updateRwSetting("prune", chosen);
             }
         }
+    }
+
+    // A prune size saved below the least of the chain (an older version offered 2 GB): raised to it, said
+    // once, rather than a node that refuses to start.
+    if (const auto low{NodeOptions::RaiseLowPrune(*m_node, m_args)}) {
+        UniValue dialog{UniValue::VOBJ};
+        dialog.pushKV("kind", "message");
+        dialog.pushKV("level", "info");
+        dialog.pushKV("title", "Prune size raised");
+        dialog.pushKV("message", strprintf("The prune size was %d MiB, below the least this chain allows (%d MiB). It is now %d GB: the node keeps that much of the most recent blocks.",
+                                           *low, MinPruneTarget(CreateChainParams(m_args, m_args.GetChainType())->GetConsensus()) / (1024 * 1024),
+                                           PruneMiBtoGB(SettingTo<int64_t>(m_node->getPersistentSetting("prune"), 0))));
+        Inform(std::move(dialog));
     }
 
     if (!m_node->baseInitialize()) {
@@ -962,6 +987,10 @@ void App::RegisterHostMethods()
         {
             LOCK(m_mutex);
             if (!m_dialogs.contains(id.getInt<int64_t>())) return UniValue{false};
+            if (m_informs.erase(id.getInt<int64_t>())) {
+                m_dialogs.erase(id.getInt<int64_t>());
+                return UniValue{true};
+            }
             m_answers[id.getInt<int64_t>()] = Param(params, "answer");
         }
         m_cv.notify_all();
