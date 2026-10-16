@@ -208,7 +208,8 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         utxo_list = []
         for _ in range(5):
             utxo_list.extend(self.wallet.send_self_transfer_multi(from_node=self.nodes[3], num_outputs=1000)['new_utxos'])
-        self.generate(self.nodes[3], 1, sync_fun=self.no_op)
+        # (FastBlocks: a block's transactions weigh 400,000 at most: three blocks take them.)
+        self.generate(self.nodes[3], 3, sync_fun=self.no_op)
         assert_equal(len(self.nodes[3].getrawmempool()), 0)
         self.log.info(f"Prepped {len(utxo_list)} utxo entries")
 
@@ -252,6 +253,10 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
                     address=getnewdestination()[2],
                     sync_fun=self.no_op,
                 ))
+            # FastBlocks: the transactions of the iteration take more than a block (their weight is
+            # limited to 400,000): mine them all, as one block of Bitcoin did.
+            while self.nodes[3].getmempoolinfo()["size"] > 0:
+                block_hashes.extend(self.generatetoaddress(self.nodes[3], nblocks=1, address=getnewdestination()[2], sync_fun=self.no_op))
             self.log.debug(f"Syncing {len(block_hashes)} new blocks...")
             self.sync_node3blocks(block_hashes)
             self.wallet.rescan_utxos()
