@@ -16,6 +16,8 @@
   import { clock, startClock } from './fb/clock.svelte';
   import { incomeOf, midnightOf, nodeState, nodeStateText, shortKey, slotsLed, stateTone, untilText } from './fb/model';
   import { fb, followTip, startFb } from './fb/store.svelte';
+  import { simpleMode } from '../lib/uimode.svelte';
+  import { simpleState, simpleTone } from './fb/model';
 
   $effect(() => startFb());
   $effect(() => startClock());
@@ -42,10 +44,39 @@
   const anchors = $derived(fb.anchors);
   const tip = $derived(node.tip?.height ?? fb.height);
   const waiting = $derived(anchors && tip >= 0 ? Math.max(0, tip - Math.max(anchors.anchoredheight, -1)) : 0);
+  // Simple mode: one card, in words (fb/SimpleStaking says the rest).
+  const simple = $derived(simpleMode());
+  const plain = $derived(simpleState(state));
+  const PLAIN: Record<string, string> = {
+    earning: 'Earning',
+    joining: 'Waiting to join',
+    'paused-off': 'Paused: staking is off',
+    'paused-jailed': 'Paused: missed its turns',
+    banned: 'Stopped for good',
+    stopping: 'Stopping',
+    low: 'Not enough staked yet',
+    notstaking: 'Not staking yet',
+    error: 'Paused: the block maker stopped',
+    nokey: 'Not set up',
+  };
   const sinceSlots = $derived(pos && pos.firstunanchoredslot >= 0 ? pos.slot - pos.firstunanchoredslot : null);
 </script>
 
-{#if fb.loaded && !fb.error && pos}
+{#if fb.loaded && !fb.error && pos && simple}
+  <div class="fb-cards">
+    <Card title="Stake and earn" icon="stake" open={() => go('staking')} openLabel="Open Staking" stat>
+      <span class="value"><span class="status {simpleTone(plain)}" id="fb-home-simple-state">{t(PLAIN[plain])}</span></span>
+      <dl class="pairs">
+        {#if wallets.current !== null}<dt>Staked</dt><dd><Amount sats={walletBonded} /></dd>{/if}
+        <dt>Earned today</dt><dd>{#if income}<Amount sats={income.today.staked + income.today.bmm + income.today.slashing} />{:else}–{/if}</dd>
+        <dt>Earned in all</dt><dd>{#if income}<Amount sats={income.staked + income.bmm + income.slashing} />{:else}–{/if}</dd>
+      </dl>
+      {#snippet actions()}
+        <button type="button" class="btn grow" onclick={() => go('staking')}><Icon name="stake" size={15} /> {walletBonded > 0n ? 'Manage staking' : 'Start staking'}</button>
+      {/snippet}
+    </Card>
+  </div>
+{:else if fb.loaded && !fb.error && pos}
   <div class="fb-cards">
     <Card title="Staking" icon="stake" open={() => go('staking')} openLabel="Open Staking" stat>
       <span class="value"><span class="status {tone}">{nodeStateText(state)}</span></span>

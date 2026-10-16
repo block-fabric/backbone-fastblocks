@@ -212,6 +212,8 @@ Window::ConfirmDialog UnbondConfirmation(const std::string& wallet, const std::s
                                "slot can still take a share of them.",
                                guard::OneLine(wallet, 64), what, Grouped(key), owner.isStr() ? guard::OneLine(owner.get_str(), 90) : std::string{"this wallet"}, unbonding_anchors);
     dialog.accept = "Unbond";
+    // The stake leaves the validator at once and earns nothing until it is paid back (user decision: danger).
+    dialog.level = dialog::Level::DANGER;
     return dialog;
 }
 
@@ -223,6 +225,8 @@ Window::ConfirmDialog StopStakingConfirmation()
                      "restarts).\n\nA validator that misses its slots is jailed for a while: left out of the validator sets of the next "
                      "epochs. No coins are lost, but it earns nothing meanwhile.";
     dialog.accept = "Stop staking";
+    // A validator that misses its slots is jailed (user decision: danger).
+    dialog.level = dialog::Level::DANGER;
     return dialog;
 }
 

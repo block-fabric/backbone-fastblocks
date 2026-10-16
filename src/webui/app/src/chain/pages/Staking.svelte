@@ -22,6 +22,8 @@
   import NodeTab from '../fb/NodeTab.svelte';
   import ScheduleTab from '../fb/ScheduleTab.svelte';
   import ValidatorsTab from '../fb/ValidatorsTab.svelte';
+  import SimpleStaking from '../fb/SimpleStaking.svelte';
+  import { simpleMode } from '../../lib/uimode.svelte';
 
   $effect(() => startFb());
   $effect(() => startClock());
@@ -42,6 +44,9 @@
     { id: 'schedule', label: 'Schedule' },
   ];
   const tab = $derived(TABS.some((x) => x.id === nav.tab) ? nav.tab : 'node');
+  // Simple mode (lib/uimode.svelte.ts): one card (fb/SimpleStaking) for this node and the wallet's stake; the
+  // validators and the schedule when asked for (a link, the palette).
+  const simpleCard = $derived(simpleMode() && (tab === 'node' || tab === 'bonds'));
 
   const pos = $derived(fb.pos);
   const staking = $derived(fb.staking);
@@ -79,6 +84,13 @@
     <p class="side-note side-warn" role="status">No blocks of stake lately: merged mined blocks carry the transactions.</p>
   {/if}
 
+  {#if simpleCard}
+    {#if !fb.loaded}
+      <p class="muted"><Icon name="clock" size={15} /> Asking the node…</p>
+    {:else}
+      <SimpleStaking {income} />
+    {/if}
+  {:else}
   <section class="side-stats" aria-label="This node as a validator">
     <div class="panel side-stat">
       <span class="muted">This node</span>
@@ -122,5 +134,6 @@
     <ValidatorsTab />
   {:else}
     <ScheduleTab />
+  {/if}
   {/if}
 </div>

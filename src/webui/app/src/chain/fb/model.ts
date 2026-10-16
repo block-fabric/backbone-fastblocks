@@ -374,3 +374,63 @@ export function bondProblem(action: BondAction, key: string, sats: bigint | null
 export function shortKey(key: string): string {
   return key.length > 20 ? `${key.slice(0, 10)}…${key.slice(-8)}` : key;
 }
+
+// --- Simple mode: staking in plain words ---
+
+/** The state of this node's staking as Simple mode says it. */
+export type SimpleState = 'earning' | 'joining' | 'paused-off' | 'paused-jailed' | 'banned' | 'stopping' | 'low' | 'notstaking' | 'nokey' | 'error';
+
+export function simpleState(state: NodeState): SimpleState {
+  switch (state) {
+    case 'active':
+      return 'earning';
+    case 'joining':
+      return 'joining';
+    case 'off':
+      return 'paused-off';
+    case 'jailed':
+      return 'paused-jailed';
+    case 'banned':
+      return 'banned';
+    case 'unbonding':
+      return 'stopping';
+    case 'low':
+      return 'low';
+    case 'none':
+      return 'notstaking';
+    case 'error':
+      return 'error';
+    case 'nokey':
+      return 'nokey';
+  }
+}
+
+/** The tone of a state in Simple mode: the colour of its pill. */
+export function simpleTone(s: SimpleState): 'ok' | 'wait' | 'bad' {
+  if (s === 'earning') return 'ok';
+  if (s === 'paused-jailed' || s === 'banned' || s === 'error' || s === 'paused-off') return 'bad';
+  return 'wait';
+}
+
+/**
+ * Seconds until a slot of an epoch to come, from the set of the current epoch (its first slot) and the length
+ * of an epoch in slots: when a key that is waiting joins (the epoch after next), when a jail ends.
+ */
+export function secondsUntilEpoch(epoch: number, current: { epoch: number; firstslot: number }, epochSlots: number, slot: number, slotSeconds: number): number {
+  if (epochSlots <= 0 || epoch <= current.epoch) return 0;
+  const first = current.firstslot + (epoch - current.epoch) * epochSlots;
+  return Math.max(0, (first - slot) * slotSeconds);
+}
+
+/**
+ * About what a stake would earn a day, in satoshis: its share of the total stake (with it), of the blocks of a
+ * day (one a slot), of the producer's share of their fees (at most half: the rest goes to the pot), at the average
+ * fees of the latest blocks. An estimate: fees change, a validator misses slots, the set changes.
+ */
+export function dailyEstimate(stake: bigint, otherStake: bigint, slotSeconds: number, avgFeeSats: number, producerShare = 0.5): bigint {
+  const total = stake + otherStake;
+  if (stake <= 0n || total <= 0n || slotSeconds <= 0 || avgFeeSats <= 0) return 0n;
+  const blocksPerDay = 86400 / slotSeconds;
+  const share = Number((stake * 1_000_000n) / total) / 1_000_000;
+  return BigInt(Math.round(share * blocksPerDay * avgFeeSats * producerShare));
+}

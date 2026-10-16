@@ -37,6 +37,7 @@ import {
   type WalletBond,
 } from './fb/model';
 import { fb, refreshFb, resetFb } from './fb/store.svelte';
+import { dailyEstimate, secondsUntilEpoch, simpleState } from './fb/model';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
@@ -657,5 +658,97 @@ describe('the host side of the pages (local.cpp)', () => {
       expect(body.indexOf(`executeRpc("${rpc}"`)).toBeGreaterThan(ask);
     }
     expect(local).toMatch(/if \(!enabled\.get_bool\(\)\) Ask\(confirm, StopStakingConfirmation\(\)/);
+  });
+});
+
+// Simple mode (lib/uimode.svelte.ts, user decision 2026-10-16): staking as one card, in words; the same host
+// methods as the Bonds tab; the home's one card.
+describe('Staking in Simple mode', () => {
+  beforeEach(() => {
+    prefs.uiMode = 'simple';
+  });
+
+  it('says the state in words, and estimates what a stake earns a day', () => {
+    expect(simpleState('active')).toBe('earning');
+    expect(simpleState('joining')).toBe('joining');
+    expect(simpleState('jailed')).toBe('paused-jailed');
+    expect(simpleState('off')).toBe('paused-off');
+    expect(simpleState('nokey')).toBe('nokey');
+    // A quarter of the stake, a block every 15 s (5760 a day), 10 000 sat of fees a block, half to the producer.
+    expect(dailyEstimate(100_000_000n, 300_000_000n, 15, 10_000)).toBe(7_200_000n);
+    expect(dailyEstimate(0n, 300_000_000n, 15, 10_000)).toBe(0n);
+    expect(dailyEstimate(100_000_000n, 0n, 15, 0)).toBe(0n);
+    // The epoch after next, 20 slots an epoch, from slot 1000 of epoch 50 (first slot 1000): 40 slots of 15 s.
+    expect(secondsUntilEpoch(52, { epoch: 50, firstslot: 1000 }, 20, 1000, 15)).toBe(600);
+    expect(secondsUntilEpoch(50, { epoch: 50, firstslot: 1000 }, 20, 1000, 15)).toBe(0);
+  });
+
+  it('one card: earning, staked, an estimate, Add more and Stop staking with the calls of Advanced', async () => {
+    render(Staking);
+    render(DialogHost);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('#fb-simple-state')?.textContent).toBe('Earning'));
+    expect(screen.queryByRole('tab', { name: /Validators/ })).toBeNull();
+    expect(document.querySelector('.side-stats')).toBeNull();
+    await fireEvent.input(document.querySelector('#fb-simple-amount')!, { target: { value: '1' } });
+    await waitFor(() => expect(document.querySelector('#fb-simple-estimate')?.textContent).toMatch(/You'd earn about .* a day\. An estimate/));
+    const stake = document.querySelector<HTMLButtonElement>('#fb-simple-stake')!;
+    expect(stake.textContent).toMatch(/Add more/);
+    await waitFor(() => expect(stake.disabled).toBe(false));
+    await fireEvent.click(stake);
+    await waitFor(() => expect(called('fastblocks.bond').length).toBe(1));
+    expect(called('fastblocks.bond')[0].params).toEqual({ wallet: 'w', pubkey: K1, amount: '1' });
+    await waitFor(() => expect(document.querySelector<HTMLButtonElement>('#fb-simple-stop')?.disabled).toBe(false));
+    await fireEvent.click(document.querySelector('#fb-simple-stop')!);
+    await waitFor(() => expect(called('fastblocks.unbond').length).toBe(1));
+    expect(called('fastblocks.unbond')[0].params).toEqual({ wallet: 'w', pubkey: K1, amount: 'all' });
+    expect(called('createbond')).toHaveLength(0);
+  });
+
+  it('a first stake is Start staking; the validators when asked for', async () => {
+    bonds = [];
+    render(Staking);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('#fb-simple-stake')?.textContent).toMatch(/Start staking/));
+    expect(document.querySelector('#fb-simple-stop')).toBeNull();
+    nav.tab = 'validators';
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Validators/ }).getAttribute('aria-selected')).toBe('true'));
+  });
+
+  it('not set up, paused or jailed, in words', async () => {
+    staking = { ...staking, validator: false, keys: [] };
+    const first = render(Staking);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('#fb-simple-state')?.textContent).toBe('Not set up: this node has no validator key'));
+    expect(document.querySelector('#fb-simple-amount')).toBeNull();
+    first.unmount();
+    resetFb();
+    staking = { ...staking, validator: true, enabled: false, keys: [{ pubkey: K1, inset: true, stake: 100_000_000, bond: bond({ bonded: 1 }) }] };
+    const second = render(Staking);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('#fb-simple-state')?.textContent).toBe('Paused: staking is turned off'));
+    await fireEvent.click(document.querySelector('#fb-simple-start-again')!);
+    await waitFor(() => expect(called('fastblocks.staking')[0]?.params).toEqual({ enabled: true }));
+    second.unmount();
+    resetFb();
+    staking = { ...staking, enabled: true, keys: [{ pubkey: K1, inset: false, stake: 0, bond: bond({ bonded: 1, jaileduntilepoch: 52 }) }] };
+    render(Staking);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('#fb-simple-state')?.textContent).toBe('Paused: your node missed its turns'));
+  });
+
+  it('the home: one card, in words', async () => {
+    render(LocalCards);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('#fb-home-simple-state')?.textContent).toBe('Earning'));
+    expect(document.querySelectorAll('.fb-cards .card').length).toBe(1);
+    expect(document.querySelector('.fb-cards')!.textContent).not.toMatch(/block 18/);
+  });
+
+  it('Finality and Slashing leave the navigation; Staking stays', () => {
+    const pages = LOCAL_PAGES as readonly LocalPage[];
+    expect(pages.find((p) => p.id === 'finality')?.advanced).toBe(true);
+    expect(pages.find((p) => p.id === 'slashing')?.advanced).toBe(true);
+    expect(pages.find((p) => p.id === 'staking')?.advanced).toBeFalsy();
   });
 });

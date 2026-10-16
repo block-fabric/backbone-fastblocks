@@ -32,9 +32,9 @@ export interface LocalPage {
 }
 
 export const LOCAL_PAGES = [
-  { id: 'staking', title: 'Staking', icon: 'stake', section: 'chain', shortcut: 'Alt+6', summary: 'This node as a validator, the bonds of the wallet, the validator sets and the leader schedule', keywords: 'fastblocks stake bond unbond validator epoch slot leader schedule jail income pos', quick: { label: 'Stake', icon: 'stake', tab: 'bonds' } },
-  { id: 'finality', title: 'Finality & BMM', icon: 'finality', section: 'chain', shortcut: 'Alt+7', summary: 'How far the chain is BMM-confirmed and final, the BMM blocks, the fee pot and the bids', keywords: 'fastblocks bmm anchor acknowledgement ticket final finality confirmed pot bid validatoranchorbid' },
-  { id: 'slashing', title: 'Slashing & jail', icon: 'gavel', section: 'chain', shortcut: 'Alt+8', summary: 'Proofs that a leader signed twice, and the validators jailed or banned', keywords: 'fastblocks slash slashing evidence proof double sign jail jailed banned penalty' },
+  { id: 'staking', title: 'Staking', icon: 'stake', section: 'chain', shortcut: 'Alt+6', summary: 'This node as a validator, the bonds of the wallet, the validator sets and the leader schedule', keywords: 'fastblocks stake bond unbond validator epoch slot leader schedule jail income pos', quick: { label: 'Stake', icon: 'stake', tab: 'bonds', simpleLabel: 'Stake and earn' } },
+  { id: 'finality', title: 'Finality & BMM', icon: 'finality', section: 'chain', shortcut: 'Alt+7', summary: 'How far the chain is BMM-confirmed and final, the BMM blocks, the fee pot and the bids', keywords: 'fastblocks bmm anchor acknowledgement ticket final finality confirmed pot bid validatoranchorbid', advanced: true },
+  { id: 'slashing', title: 'Slashing & jail', icon: 'gavel', section: 'chain', shortcut: 'Alt+8', summary: 'Proofs that a leader signed twice, and the validators jailed or banned', keywords: 'fastblocks slash slashing evidence proof double sign jail jailed banned penalty', advanced: true },
 ] as const satisfies readonly LocalPage[];
 
 export type LocalPageId = (typeof LOCAL_PAGES)[number]['id'];

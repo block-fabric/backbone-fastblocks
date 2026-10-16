@@ -66,6 +66,7 @@ struct Host {
     std::atomic<int> asked{0};
     std::atomic<bool> yes{false};
     std::string shown;
+    webui::dialog::Level level{webui::dialog::Level::INFO};
     int next{0};
     Host()
     {
@@ -79,6 +80,7 @@ struct Host {
             [this](const webui::Window::ConfirmDialog& dialog) {
                 ++asked;
                 shown = dialog.title + "\n" + dialog.message;
+                level = dialog.level;
                 return yes.load();
             });
     }
@@ -127,6 +129,8 @@ BOOST_AUTO_TEST_CASE(staking_off_waits_for_the_desktop)
     BOOST_CHECK_EQUAL(host.node_asked.load(), 0);
     BOOST_CHECK(host.shown.starts_with("Stop staking"));
     BOOST_CHECK(host.shown.find("jailed") != std::string::npos);
+    // A danger: the validator is jailed if it misses its slots (user decision).
+    BOOST_CHECK(host.level == webui::dialog::Level::DANGER);
     // Off, accepted: the node.
     host.yes = true;
     BOOST_CHECK_EQUAL(host.Code("fastblocks.staking", Obj({{"enabled", UniValue{false}}})), -4242);
