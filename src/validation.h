@@ -951,6 +951,18 @@ public:
      * those not in the active chain.
      */
     void SweepDrivechainUndo(const CBlockIndex& flushed) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Forget the failures against the record (sidechain::Mainchain::Failure::RECORD) of the blocks no
+     * reorg can bring to the active chain any more: those that leave it at or below `last`, the height
+     * below which no block of it can be taken back (DRIVECHAIN_UNDO_DEPTH below the flushed block; its
+     * drivechain undo data is gone). Such a failure is never taken back to any effect: the block stays
+     * marked failed, as it would have for good, and a commitment that comes back for it changes
+     * nothing either way. What is left is the failures of the blocks within reach of a reorg, which
+     * the rules of headers bound (a sidechain whose blocks cost nothing to make, FastBlocks, scans
+     * them for every commitment the mainchain makes or drops). Called by SweepDrivechainUndo.
+     * @return how many were forgotten.
+     */
+    size_t ForgetUnreachableRecordFailures(int last) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Height of the flushed block of the last SweepDrivechainUndo.
     int m_drivechain_undo_swept_height GUARDED_BY(::cs_main){-1};
 
