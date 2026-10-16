@@ -16,6 +16,8 @@
   import { pendingNow } from '../lib/settingsdraft.svelte';
   import { clampFontAdjust, THEMES } from '../lib/themes';
   import ThemePicker from './ThemePicker.svelte';
+  import ModeSwitch from './ModeSwitch.svelte';
+  import { pageShown } from '../lib/uimode.svelte';
   import { isThemeChoice } from '../lib/customthemes';
   import { frame } from '../lib/windowframe.svelte';
 
@@ -23,7 +25,7 @@
 
   const sections = $derived([
     { title: '', pages: ['home'] as PageId[] },
-    ...NAV_SECTIONS.map((s) => ({ title: s.title, pages: s.pages.filter(pageAvailable) })),
+    ...NAV_SECTIONS.map((s) => ({ title: s.title, pages: s.pages.filter((id) => pageAvailable(id) && pageShown(id)) })).filter((s) => s.pages.length > 0),
   ]);
   const all = $derived(buildCommands());
 
@@ -118,6 +120,8 @@
       />
     </div>
     <div class="row">
+      <!-- Simple or Advanced (user decision: here, beside the size of the text). -->
+      <ModeSwitch />
       <button type="button" class="btn ghost small" title="Smaller text (Ctrl+-)" aria-label="Smaller text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust - 1) })}>A−</button>
       <button type="button" class="btn ghost small" title="Larger text (Ctrl++)" aria-label="Larger text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust + 1) })}>A+</button>
     </div>
