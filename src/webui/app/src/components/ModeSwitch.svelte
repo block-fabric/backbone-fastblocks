@@ -38,7 +38,7 @@
 <style>
   .mode-switch {
     display: inline-flex;
-    flex: 1 1 8rem;
+    flex: 1 1 7.5rem;
     min-width: 0;
     padding: 2px;
     border: 1px solid var(--line);
@@ -46,15 +46,15 @@
     background: var(--surface-2);
   }
   button {
-    flex: 1 1 0;
+    flex: 1 1 auto;
     min-width: 0;
-    padding: 0.22rem 0.55rem;
+    padding: 0.22rem 0.4rem;
     border: 0;
     border-radius: 999px;
     background: none;
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;

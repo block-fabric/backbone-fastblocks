@@ -15,6 +15,10 @@ import { nav, PAGES, type PageId } from '../lib/nav.svelte';
 import { app, applyPrefs, prefs } from '../lib/state.svelte';
 import { pageShown, simpleMode } from '../lib/uimode.svelte';
 import { plainStatusText, statusText } from '../lib/wallet';
+import Transactions from '../pages/Transactions.svelte';
+import { wallets } from '../lib/state.svelte';
+import { resetWalletData } from '../lib/walletdata.svelte';
+import { regtestP2wpkh } from './bech32';
 // The source of the state, for its default (the tests themselves start in Advanced, test/setup.ts).
 import stateSource from '../lib/state.svelte.ts?raw';
 
@@ -199,5 +203,29 @@ describe('the status of a transaction', () => {
     prefs.uiMode = 'advanced';
     expect(statusText(r('confirmed', 9))).toBe('Confirmed (9 confirmations)');
     expect(statusText(r('unconfirmed', 0))).toBe('Unconfirmed');
+  });
+});
+
+describe('the history in Simple mode', () => {
+  afterEach(() => {
+    wallets.list = [];
+    wallets.current = null;
+    resetWalletData();
+  });
+
+  it('says the status of each transaction in words, in a column of its own', async () => {
+    wallets.list = [{ name: 'w', encrypted: false, locked: false, privateKeysDisabled: false, hd: true }];
+    wallets.current = 'w';
+    setTransport(async (r) => {
+      if (r.method === 'wallet.transactions') return { height: 10, hash: 'h', records: [['aa'.repeat(32), 0, 'recv', regtestP2wpkh, 'Pay', 1_700_000_000, 250_000_000, 0, 'confirmed', 7, 0, true, 'k1']] };
+      if (r.method === 'wallet.addresses') return [];
+      return null;
+    });
+    prefs.uiMode = 'simple';
+    render(Transactions);
+    await waitFor(() => expect(document.querySelector('.status-word')?.textContent).toBe('Final'));
+    expect(screen.getByRole('columnheader', { name: /Status/ })).toBeTruthy();
+    prefs.uiMode = 'advanced';
+    await waitFor(() => expect(document.querySelector('.status-word')).toBeNull());
   });
 });

@@ -122,8 +122,8 @@
     <div class="row">
       <!-- Simple or Advanced (user decision: here, beside the size of the text). -->
       <ModeSwitch />
-      <button type="button" class="btn ghost small" title="Smaller text (Ctrl+-)" aria-label="Smaller text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust - 1) })}>A−</button>
-      <button type="button" class="btn ghost small" title="Larger text (Ctrl++)" aria-label="Larger text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust + 1) })}>A+</button>
+      <button type="button" class="btn ghost small size" title="Smaller text (Ctrl+-)" aria-label="Smaller text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust - 1) })}>A−</button>
+      <button type="button" class="btn ghost small size" title="Larger text (Ctrl++)" aria-label="Larger text" onclick={() => savePrefs({ fontAdjust: clampFontAdjust(prefs.fontAdjust + 1) })}>A+</button>
     </div>
     <div class="leave">
       {#each leave as c (c.id)}
@@ -306,6 +306,10 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 0.2rem;
+  }
+  /* A− and A+ beside the switch of the mode: narrow, so that both words of the switch fit. */
+  .size {
+    padding: 0 0.4rem;
   }
   .scrim {
     display: none;

@@ -44,10 +44,9 @@
     for (const theme of ['midnight', 'light']) {
       T().savePrefs({ theme });
       T().go('home');
-      await waitFor('Home', () => text('.home').includes('Thunder'), 20000);
+      await waitFor('Home, merged mining in a line', () => text('[data-testid="bmm-line"]').includes('of 2 active'), 20000);
       await waitFor('the first steps', () => $('.tips'), 10000);
       await check(`${theme}: the first steps on Home`, document.querySelectorAll('.tips li').length === 3);
-      await waitFor('merged mining in a line', () => $('[data-testid="bmm-line"]'), 20000);
       await check(`${theme}: no mining card in Simple mode`, !$('[data-testid="mining-rate"]'));
       const sidebar = text('nav.sidebar .scroll');
       await check(`${theme}: the sidebar without the pages of Advanced`, !sidebar.includes('Advanced transactions') && !sidebar.includes('Node window') && sidebar.includes('Send'), sidebar);

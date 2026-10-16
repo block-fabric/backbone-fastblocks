@@ -160,7 +160,7 @@ describe('Home in Simple mode', () => {
     await waitFor(() => expect(screen.getByTestId('bmm-line').textContent).toMatch(/Sidechains are merge-mined: 1 of 2 active\./));
     expect(document.querySelector('.meters')).toBeNull();
     expect(screen.queryByTestId('mining-rate')).toBeNull();
-    expect(screen.getByRole('button', { name: /Move coins/ })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /Move coins/ }).length).toBe(2);
     await fireEvent.click(screen.getByRole('button', { name: 'Details' }));
     await waitFor(() => expect(document.querySelector('.meters')).toBeTruthy());
   });

@@ -265,7 +265,7 @@
     </div>
     <nav class="quick" aria-label="Quick actions">
       {#each quickLinks as q (q.label)}
-        <button type="button" class="pill action" disabled={pageDisabled(q.page)} onclick={() => (q.panel ? openQuick(q.panel) : go(q.page, q.tab ?? ''))}><Icon name={q.icon} size={15} /> {t(q.label)}</button>
+        <button type="button" class="pill action" disabled={pageDisabled(q.page)} onclick={() => (q.panel ? openQuick(q.panel) : go(q.page, q.tab ?? ''))}><Icon name={q.icon} size={15} /> {t(simple && q.page === 'sidechains' ? 'Move coins' : q.label)}</button>
       {/each}
       <button type="button" class="pill action ghost" onclick={openPalette}><Icon name="search" size={15} /> All actions <kbd>Ctrl K</kbd></button>
     </nav>

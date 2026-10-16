@@ -197,7 +197,7 @@
             <dt>Arrives at</dt><dd class="mono break">{destination.trim()}</dd>
             <dt>When</dt><dd>After the next block of the sidechain, usually a minute or two.</dd>
           </dl>
-          <p class="muted small">A small <Term id="fee">fee</Term> is added. Coming back takes longer: see below.</p>
+          <p class="muted small">A small <Term id="fee">fee</Term> is added. Coming back takes longer: see “Bringing coins back”.</p>
           <div class="nav">
             <button type="button" class="btn" onclick={() => (step = 2)}>Back</button>
             <button type="button" class="btn primary" disabled={sending || wallets.current === null} onclick={move}>{sending ? 'Moving…' : t('Move %1', formatAmount(amount, prefs.unit, { withUnit: true }))}</button>
