@@ -53,6 +53,26 @@
     }
     await snapshot(`${name}-${W}`);
   }
+  /** What the page says in its dialogs (the node's refusals). */
+  const said = () => $$('dialog[open]').map((d) => d.textContent.replace(/\s+/g, ' ').trim()).join(' | ');
+  /**
+   * One change through the bond form: its kind, the key, the amount; the desktop answers yes. Waits for the form to
+   * be idle (the previous change done, its amount field new), then for the desktop to be asked.
+   */
+  async function formStep(kind, key, amount) {
+    await waitFor('the form idle', () => $('#fb-bond-amount') && $('#fb-bond-amount').value === '' && !$$('dialog[open]').length, 30000);
+    await click(kind);
+    set($('#fb-bond-key'), key);
+    await sleep(200);
+    set(await waitFor('the amount', () => $('#fb-bond-amount')), amount);
+    await sleep(300);
+    const before = (await host('test.confirmed')).length;
+    await host('test.confirmAnswer', { yes: true });
+    await clickId('fb-bond-submit');
+    await waitFor(`the desktop asked (${kind})`, async () => (await host('test.confirmed')).length > before || (said() ? Promise.reject(new Error(said())) : false), 30000);
+    await sleep(1500);
+    if (said()) throw new Error(`${kind}: the page says ${said()}`);
+  }
   /** Nothing of the page wider than the window (the pages turn tables into cards when narrow). */
   function overflow() {
     const out = [];
@@ -99,7 +119,12 @@
 
     // --- Home: the cards of FastBlocks ---
     await go('home');
-    await waitFor('the cards of FastBlocks on the home', () => text('.fb-cards').includes('Next slots') && text('.fb-cards').includes('Active'), 30000);
+    // (A genesis validator that missed its slots while the chain waited for its first BMM commitments is jailed
+    // for a few epochs of 20 s: the card says so, then Active again.)
+    await waitFor('the cards of FastBlocks on the home', () => text('.fb-cards').includes('Next slots') && text('.fb-cards').includes('Active'), 150000).catch(async (e) => {
+      await log(`the home says: ${text('.home').replace(/\s+/g, ' ').slice(0, 1500)}`);
+      throw e;
+    });
     await check('the Staking card says Active', text('.fb-cards').includes('Active'));
 
     // --- Staking, This node ---
@@ -131,24 +156,20 @@
     await host('test.confirmAnswer', { yes: true });
     await waitFor('the form ready again', () => !$('#fb-bond-submit').disabled, 10000);
     set($('#fb-bond-amount'), '1');
+    const asked2 = (await host('test.confirmed')).length;
     await clickId('fb-bond-submit');
+    await waitFor('the desktop asked about the bond again', async () => (await host('test.confirmed')).length > asked2, 30000);
+    await sleep(2000);
+    if (said()) await log(`the page says: ${said()}`);
     const bonded = await waitFor('the bond mined', async () => {
       const b = (await rpc('listbonds', [], W_)).find((x) => x.validator === X1);
       return b && b.bonded >= 1 ? b : null;
     }, 120000);
     await check('a bond of 1 to the second key, through the form and the desktop', bonded.bonded === 1, JSON.stringify(bonded));
-    await click('Add to bond');
-    set($('#fb-bond-key'), X1);
-    set(await waitFor('the amount', () => $('#fb-bond-amount')), '0.5');
-    await host('test.confirmAnswer', { yes: true });
-    await clickId('fb-bond-submit');
+    await formStep('Add to bond', X1, '0.5');
     await waitFor('more bonded', async () => (await rpc('listbonds', [], W_)).find((x) => x.validator === X1)?.bonded === 1.5, 120000);
     await check('0.5 more added to the bond', true);
-    await click('Unbond');
-    set($('#fb-bond-key'), X1);
-    set(await waitFor('the amount', () => $('#fb-bond-amount')), '0.25');
-    await host('test.confirmAnswer', { yes: true });
-    await clickId('fb-bond-submit');
+    await formStep('Unbond', X1, '0.25');
     const unbonding = await waitFor('the unbond mined', async () => {
       const b = (await rpc('listbonds', [], W_)).find((x) => x.validator === X1);
       return b && b.unbonding > 0 ? b : null;
