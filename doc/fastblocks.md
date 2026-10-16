@@ -1,7 +1,7 @@
 # FastBlocks
 
 FastBlocks is a sidechain of Chains (CHN) in slot 5. It is a hybrid chain:
-*PoS blocks* (blocks of stake) every 30 seconds, signed by validators who stake
+*PoS blocks* (blocks of stake) every 15 seconds, signed by validators who stake
 pegged CHN, and *BMM blocks*, the template's blind merged mined blocks, as the
 fallback. The mainchain anchors the PoS chain through BMM commitments to
 *tickets*. The full design is `~/skydoge/design/fastblocks.md`; this file says
@@ -34,10 +34,10 @@ test network and signet only warn (it is 0 there until the slot activates).
 
 | | Main | Testnet / Signet | Regtest |
 |---|---|---|---|
-| Slot | 30 s | 30 s | 1 s (`-posslotseconds`) |
-| Slots per epoch | 120 | 20 | 20 |
+| Slot | 15 s | 15 s | 1 s (`-posslotseconds`) |
+| Slots per epoch | 240 (1 h) | 40 (10 min) | 20 |
 | Validators (min active / max) | 4 / 100 | 3 / 32 | 1 / 8 |
-| `max_unanchored_slots` | 120 (1 h) | 120 (1 h) | 100 |
+| `max_unanchored_slots` | 240 (1 h) | 240 (1 h) | 100 |
 | `stall_seconds` | 1800 | 600 | 30 |
 | Producer share | 50 % | 50 % | 50 % |
 | Anchors that make a block final (wallets) | 6 | 3 | 1 |
@@ -46,14 +46,33 @@ test network and signet only warn (it is 0 there until the slot activates).
 | Window for proofs (anchors) | 1440 | 60 | 10 |
 | Seed lookahead | 1200 s | 600 s | 3600 s (`-posseedlookahead`) |
 | Penalty, reporter's share | 10 %, 1/8 | 10 %, 1/8 | 10 %, 1/8 |
-| Jailing | under 50 % of 10 slots or more led: 1 epoch more | same | same |
+| Jailing | under 50 % of 20 slots (5 min) or more led: 1 epoch more | same | under 50 % of 10 slots or more led |
 | Reserve paid per anchor | 1/1440 | 1/60 | 1/5 |
 | Validators to start with | none | none | `-posvalidators` (a bootstrap) |
+| Block weight (whole block / transactions other than the coinbase) | 1,500,000 / 400,000 | same | same |
+| Largest standard transaction | 392,000 weight | same | same |
+| Signature operations a block (cost) | 80,000 | same | same |
+
+Blocks are small (user decision, 2026-10-16): at most 1.5 million weight units,
+of which the transactions other than the coinbase take 400,000 and the rest is
+the coinbase's (payouts, drivechain and PoS sections), on every network,
+regtest included, so the tests run against the real limit (`bad-blk-weight`,
+`bad-blk-tx-weight`). The template's blocks took six million (four for
+transactions). It applies from genesis (the largest block of the test network
+before, 106 blocks, weighed at most about 12,000). As on Chains (800,000 / 400,000),
+the policy limits follow the block's: a standard transaction weighs at most
+392,000, a package 396,000 and a cluster 99 kvB, so that each fits in a block;
+the miner, the producer of blocks of stake and `getblocktemplate` build blocks
+up to the transactions' limit plus `-blockreservedweight`, and the mempool fee
+estimator measures against the 400,000. The limit of signature operations is
+Bitcoin's (80,000), as the template kept it for its larger blocks: a block of
+FastBlocks holds no more signature checks than one of Bitcoin.
 
 Bitcoin's heuristics that count blocks by the target spacing (headers sync and
 block download timeouts, stale tips, verification progress) count a block a
-slot: `nPowTargetSpacing` is 30 s on every 30-second network (60 s before,
-which gave initial block download half the headers timeout it needs).
+slot: `nPowTargetSpacing` is the slot, 15 s on the networks (60 s before the
+slot was used, which gave initial block download half the headers timeout it
+needs).
 
 Without enough validators a network has no PoS blocks: it is the template's
 chain, merged mined only (and its BMM blocks carry the transactions). That is
@@ -1261,6 +1280,39 @@ Found and left as they are (decisions):
   it leads fewer than 10 slots an epoch: on the main network (120 slots) with
   13 or more equal validators, on the test networks (20 slots) unless it holds
   half the stake.
+
+## The decisions of 2026-10-16
+
+Blocks of 1.5 million weight (400,000 for transactions), see "Parameters", and
+slots of 15 seconds on the main network, the test network and signet (30
+before). Both apply from genesis: the test network starts again (the slot
+numbering and the leader schedule follow the slot). Regtest keeps its own slot
+(1 s, `-posslotseconds`) and its counts. What is counted in slots keeps the
+duration it had; what is counted in seconds or in anchors (mainchain blocks) is
+unchanged:
+
+| Parameter | Main | Testnet / Signet |
+|---|---|---|
+| `slot_seconds` | 30 → 15 | 30 → 15 |
+| `slots_per_epoch` | 120 → 240 (1 h) | 20 → 40 (10 min) |
+| `max_unanchored_slots` | 120 → 240 (1 h) | 120 → 240 (1 h) |
+| `liveness_min_assigned` | 10 → 20 (5 min of slots led) | 10 → 20 |
+| `nPowTargetSpacing` (Bitcoin's heuristics; `nPowTargetTimespan` 2016 of them) | 30 → 15 | 30 → 15 |
+| `max_block_weight` / `max_block_tx_weight` | 6,000,000 / 4,000,000 → 1,500,000 / 400,000 | same |
+| `MAX_STANDARD_TX_WEIGHT` / `MAX_PACKAGE_WEIGHT` / cluster limit (policy, every network) | 400,000 / 404,000 / 101 kvB → 392,000 / 396,000 / 99 kvB | same |
+| Genesis message (main network, not launched) | "a block every 30 seconds" → "15 seconds" | — |
+
+Unchanged: `stall_seconds`, `seed_lookahead_seconds`, `max_future_seconds`
+(seconds); `unbonding_anchors`, `evidence_window_anchors`,
+`pot_reserve_anchors`, `final_anchors` (anchors); `jail_epochs` (epochs, of
+the same length); the budgets of unchecked headers and their bytes (counts
+of headers, not durations); the producer's retry (a third of the slot) and the
+past limit of a header's slot (`MAX_FUTURE_BLOCK_TIME` / slot) follow the slot.
+A validator's slashing protection file (the last slot each key signed) stays
+safe across the change on the test network: its genesis time is the same, so
+the slot of a moment under 15-second slots is twice its slot under 30-second
+ones, above any slot signed before; a node that never signs a slot at or below
+the one it signed last refuses nothing it should sign now.
 
 ## The decisions of 2026-10-12
 

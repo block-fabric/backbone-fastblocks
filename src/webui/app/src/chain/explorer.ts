@@ -144,8 +144,8 @@ export const EXPLORER: ChainExplorer = {
     const kind = blockKind(b);
     return kind ? kindText(kind) : undefined;
   },
-  // A block a slot: the length of a slot of this network (getposinfo; 30 s on main and testnet, regtest's own,
-  // -posslotseconds), chain.json's 30 until the node has said it.
+  // A block a slot: the length of a slot of this network (getposinfo; 15 s on main and testnet, regtest's own,
+  // -posslotseconds), chain.json's 15 until the node has said it.
   target: () => known.slotSeconds || undefined,
   refresh: async () => {
     try {

@@ -18,6 +18,7 @@
 #include <util/result.h>
 #include <util/translation.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -56,10 +57,11 @@ Result<void> CheckMiningOptions(BlockCreateOptions options, bool use_argnames)
                                             use_argnames ? "-blockmaxweight" : "block_max_weight",
                                             *options.block_max_weight))};
     }
-    if (options.coinbase_output_max_additional_sigops > MAX_BLOCK_SIGOPS_COST) {
+    const int64_t max_sigops{Params().GetConsensus().MaxBlockSigOpsCost()};
+    if (options.coinbase_output_max_additional_sigops > static_cast<uint64_t>(max_sigops)) {
         return Error{Untranslated(strprintf("%s (%zu) exceeds consensus maximum block sigops cost (%d)",
                                             "coinbase_output_max_additional_sigops",
-                                            options.coinbase_output_max_additional_sigops, MAX_BLOCK_SIGOPS_COST))};
+                                            options.coinbase_output_max_additional_sigops, max_sigops))};
     }
     return {};
 }
@@ -87,7 +89,8 @@ BlockCreateOptions FlattenMiningOptions(BlockCreateOptions options)
     if (!options.block_min_fee_rate) options.block_min_fee_rate = CFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
     if (!options.print_modified_fee) options.print_modified_fee = DEFAULT_PRINT_MODIFIED_FEE;
     if (!options.block_reserved_weight) options.block_reserved_weight = DEFAULT_BLOCK_RESERVED_WEIGHT;
-    if (!options.block_max_weight) options.block_max_weight = DEFAULT_BLOCK_MAX_WEIGHT;
+    // Bitcoin's default, or the chain's maximum where that is lower (FastBlocks: one million).
+    if (!options.block_max_weight) options.block_max_weight = std::min<uint64_t>(DEFAULT_BLOCK_MAX_WEIGHT, Params().GetConsensus().max_block_weight);
     return options;
 }
 

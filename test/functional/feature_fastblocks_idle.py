@@ -4,12 +4,12 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """FastBlocks on an idle chain: validators only, no transactions, no setbmm.
 
-Three genesis validators with 30-second slots (-posslotseconds=30), their anchorers on
+Three genesis validators with 15-second slots (-posslotseconds=15), as on the networks, their anchorers on
 (-validatoranchorbid), on mock time (every node and the mainchain), a slot at a time:
 
   - an hour and more with no fees and no merged miner: the validators' anchorers bid for every
     mainchain block whatever the fees, so blocks of stake go on (they halt after max_unanchored_slots,
-    50 minutes here, without an anchor) and anchors keep coming;
+    25 minutes here, without an anchor) and anchors keep coming;
   - the rate: mainchain blocks that come in pairs, the second before any leader could acknowledge the
     first one's commitment: the anchorers bid for every mainchain block all the same (they waited for
     the acknowledgement before), and at least 90 % of the mainchain blocks have a commitment, each
@@ -31,7 +31,7 @@ from feature_sidechain import ACTIVATION_PERIOD, SidechainTest
 from test_framework.fastblocks import KEYS, REGTEST_GENESIS_TIME, SLOT, XONLY, assert_peg_balance
 from test_framework.util import assert_equal, assert_greater_than, assert_greater_than_or_equal, rpc_port
 
-SLOT_SECONDS = 30
+SLOT_SECONDS = 15
 #: max_unanchored_slots on regtest.
 MAX_UNANCHORED_SLOTS = 100
 
@@ -78,7 +78,7 @@ class FastBlocksIdleTest(SidechainTest):
 
     def next_slot(self, settle=0):
         """The clock on to the next slot: each node has its leader's block of it. Then `settle` seconds
-        (real time) for the anchorers, which look once a second: slots are 30 seconds apart."""
+        (real time) for the anchorers, which look once a second: slots are 15 seconds apart."""
         slot = (self.now - REGTEST_GENESIS_TIME) // SLOT_SECONDS + 1
         self.set_time(REGTEST_GENESIS_TIME + slot * SLOT_SECONDS)
         self.wait_until(lambda: all(self.tip_slot(n) == slot for n in self.nodes), timeout=120)

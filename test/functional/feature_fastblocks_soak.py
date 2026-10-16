@@ -2,8 +2,8 @@
 # Copyright (c) 2026 The Chains developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""FastBlocks soak test (extended; --duration=<minutes>, 30 by default): the real networks' 30-second
-slots (-posslotseconds=30), so that what happens at the boundary of a slot happens as it does there,
+"""FastBlocks soak test (extended; --duration=<minutes>, 30 by default): the real networks' 15-second
+slots (-posslotseconds=15), so that what happens at the boundary of a slot happens as it does there,
 not as mock time or one-second slots make it. Three validators and an observer that merged mines; in
 rounds of a slot or two, one of: a node restarted (or killed), a validator cut off from the others for a
 while, a mainchain reorg, a bond, an unbond, a payment, a withdrawal. After each round: the nodes agree
@@ -26,7 +26,7 @@ from test_framework.fastblocks import (
 )
 from test_framework.util import assert_equal, rpc_port
 
-SLOT_SECONDS = 30
+SLOT_SECONDS = 15
 
 
 class FastBlocksSoakTest(SidechainTest):

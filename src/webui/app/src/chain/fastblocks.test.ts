@@ -221,7 +221,7 @@ beforeEach(() => {
   wallets.current = 'w';
   pos = {
     active: true,
-    slotseconds: 30,
+    slotseconds: 15,
     slot: SLOT,
     epoch: 50,
     leader: K2,
@@ -432,16 +432,16 @@ describe('the explorer of FastBlocks', () => {
     expect(EXPLORER.facts({ height: 1 })).toEqual([]);
   });
 
-  it("the ribbon's target is a slot: chain.json's 30 s, then the slot of the network as the node says it (regtest's own)", async () => {
-    expect(CHAIN.blockTarget).toBe(30);
+  it("the ribbon's target is a slot: chain.json's 15 s, then the slot of the network as the node says it (regtest's own)", async () => {
+    expect(CHAIN.blockTarget).toBe(15);
     pos.slotseconds = 1;
     await EXPLORER.refresh!();
     expect(EXPLORER.target!()).toBe(1);
-    pos.slotseconds = 30;
+    pos.slotseconds = 15;
     await EXPLORER.refresh!();
-    expect(EXPLORER.target!()).toBe(30);
+    expect(EXPLORER.target!()).toBe(15);
     render(Explorer);
-    await waitFor(() => expect(document.querySelector('.ribbon-head')?.textContent).toContain('target 30s'));
+    await waitFor(() => expect(document.querySelector('.ribbon-head')?.textContent).toContain('target 15s'));
     expect(document.querySelector('.ribbon-head')!.textContent).not.toContain('target 1m');
   });
 
