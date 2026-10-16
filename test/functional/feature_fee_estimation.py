@@ -12,8 +12,7 @@ import time
 
 from test_framework.messages import (
     COIN,
-    DEFAULT_BLOCK_RESERVED_WEIGHT,
-    MAX_BLOCK_WEIGHT,
+    MAX_BLOCK_TX_WEIGHT,
     WITNESS_SCALE_FACTOR,
 )
 from test_framework.script import (
@@ -547,9 +546,10 @@ class EstimateFeeTest(BitcoinTestFramework):
         self.broadcast_and_maybe_mine(node0, high_feerate, TXS_COUNT, 6, miner)
         self.log.info("Test estimatesmartfee returns block policy estimator estimate when mempool is higher")
         # Add large insane-feerate transactions enough to generate a block template
-        # (FastBlocks: 11 rather than 10, so that each stays below the standard size.)
+        # (FastBlocks: 11 rather than 10, so that each stays below the standard size; a block's
+        # transactions other than the coinbase weigh MAX_BLOCK_TX_WEIGHT at most.)
         num_txs = 11
-        target_vsize = int(((MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT) / WITNESS_SCALE_FACTOR) / num_txs)
+        target_vsize = int((MAX_BLOCK_TX_WEIGHT / WITNESS_SCALE_FACTOR) / num_txs)
         utxos = [self.wallet.get_utxo(confirmed_only=True) for _ in range(num_txs)]
         insane_feerate = Decimal("0.01")
         self.send_transactions(utxos, insane_feerate, target_vsize)
@@ -603,7 +603,7 @@ class EstimateFeeTest(BitcoinTestFramework):
         assert "feerate" in self.nodes[0].estimatesmartfee(1, "economical", {"fee_rate_estimator": "block_policy"})
         assert_equal(self.nodes[0].estimatesmartfee(1, "economical", {"fee_rate_estimator": "auto"})["estimator"], "mempool_policy")
         anyone_can_spend_script = CScript([OP_TRUE]).hex()
-        quarter_block_vsize = int(MAX_BLOCK_WEIGHT / WITNESS_SCALE_FACTOR / 4)
+        quarter_block_vsize = int(MAX_BLOCK_TX_WEIGHT / WITNESS_SCALE_FACTOR / 4)  # FastBlocks: of the transactions' part
         expected_stats = []
         for _ in range(MEMPOOL_HEALTH_WINDOW):
             unseen_txs = [make_tx(self.wallet, self.wallet.get_utxo(confirmed_only=True), 10, quarter_block_vsize) for _ in range(3)]

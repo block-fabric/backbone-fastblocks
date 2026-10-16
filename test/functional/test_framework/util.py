@@ -681,12 +681,28 @@ def create_lots_of_big_transactions(mini_wallet, node, fee, tx_batch_size, txout
 
 
 def mine_large_block(test_framework, mini_wallet, node):
-    # generate a 66k transaction,
-    # and 14 of them is close to the 1MB block limit
-    txouts = gen_return_txouts()
-    fee = 100 * node.getnetworkinfo()["relayfee"]
-    create_lots_of_big_transactions(mini_wallet, node, fee, 14, txouts)
-    test_framework.generate(node, 1)
+    """Mine the largest block the chain takes. FastBlocks: 1.5 million weight units, of which the
+    transactions other than the coinbase take 400,000 at most, so the size is the coinbase's: an
+    OP_RETURN of OP_NOPs (consensus valid in a coinbase) that brings the block to its limit."""
+    from .blocktools import create_block, create_coinbase
+    from .messages import FASTBLOCKS_MAX_BLOCK_WEIGHT
+    from .script import CScript, OP_NOP, OP_RETURN
+    best = node.getblock(node.getbestblockhash())
+    # The node's time (mock time if set), as a block it mined would have.
+    ntime = max(best["time"] + 1, node.getblocktemplate({"rules": ["segwit"]})["curtime"])
+    def make(nops):
+        block = create_block(hashprev=int(best["hash"], 16), ntime=ntime,
+                             coinbase=create_coinbase(best["height"] + 1, script_pubkey=CScript([OP_RETURN] + [OP_NOP] * nops)))
+        block.solve()
+        return block
+    nops = FASTBLOCKS_MAX_BLOCK_WEIGHT // 4 - 200
+    block = make(nops)
+    nops -= (block.get_weight() - FASTBLOCKS_MAX_BLOCK_WEIGHT) // 4
+    block = make(nops)
+    assert FASTBLOCKS_MAX_BLOCK_WEIGHT - 16 < block.get_weight() <= FASTBLOCKS_MAX_BLOCK_WEIGHT, block.get_weight()
+    assert_equal(node.submitblock(block.serialize().hex()), None)
+    assert_equal(node.getbestblockhash(), block.hash_hex)
+    test_framework.sync_all()
 
 
 def find_vout_for_address(node, txid, addr):

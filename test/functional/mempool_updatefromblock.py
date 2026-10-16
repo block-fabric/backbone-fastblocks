@@ -13,7 +13,7 @@ import time
 
 from test_framework.blocktools import create_empty_fork
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal, assert_greater_than_or_equal, assert_raises_rpc_error
+from test_framework.util import assert_equal, assert_greater_than, assert_greater_than_or_equal, assert_raises_rpc_error
 from test_framework.wallet import MiniWallet
 from test_framework.mempool_util import DEFAULT_CLUSTER_LIMIT
 
@@ -111,7 +111,9 @@ class MempoolUpdateFromBlockTest(BitcoinTestFramework):
             assert_equal(entry['ancestorcount'], k + 1)
             assert_equal(entry['ancestorsize'], sum(tx_size[0:(k + 1)]))
 
-        self.generate(self.nodes[0], 1)
+        # (FastBlocks: the transactions weigh more than the 400,000 a block's may: two blocks.)
+        assert_greater_than(sum(tx_size) * 4, 400_000)
+        self.generate(self.nodes[0], 2)
         assert_equal(self.nodes[0].getrawmempool(), [])
         wallet.rescan_utxos()
 
@@ -126,7 +128,9 @@ class MempoolUpdateFromBlockTest(BitcoinTestFramework):
         assert_equal(self.nodes[0].getrawmempool(), [])
 
         # Set up empty fork blocks ahead of time, needs to be longer than full fork made later
-        fork_blocks = create_empty_fork(self.nodes[0], fork_length=60)
+        # (FastBlocks: a block takes one of these parents, its transactions weighing 400,000 at most:
+        # a block for each, and some more.)
+        fork_blocks = create_empty_fork(self.nodes[0], fork_length=MAX_DISCONNECTED_TX_POOL_BYTES // parent_target_vsize + 20)
 
         large_std_txs = []
         # Add children to ensure they're recursively removed if disconnectpool trimming of parent occurs
@@ -169,6 +173,11 @@ class MempoolUpdateFromBlockTest(BitcoinTestFramework):
         # The txns at the end of the list, or most recently confirmed, should have been trimmed
         assert_equal(parent_presence, [tx["txid"] in mempool for tx in small_child_txs])
         assert_equal(parent_presence, [True] * expected_parent_count + [False] * (len(large_std_txs) - expected_parent_count))
+
+        # FastBlocks: a block takes one of the parents (the next test starts with an empty mempool after
+        # 101 blocks, which took them all in Bitcoin's blocks): mine them.
+        self.generate(self.nodes[0], expected_parent_count)
+        assert_equal(self.nodes[0].getrawmempool(), [])
 
     def test_chainlimits_exceeded(self):
         self.log.info('Check that too long chains on reorg are handled')

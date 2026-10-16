@@ -43,16 +43,22 @@ class PrivateBroadcastCapTest(BitcoinTestFramework):
         # Build a parent that fans out to MAX_TRANSACTIONS + OVER_CAP outputs.
         # Inject it directly via generateblock since -privatebroadcast bypasses
         # the mempool
-        utxo = wallet.get_utxo()
-        parent = wallet.create_self_transfer_multi(
-            utxos_to_spend=[utxo],
-            num_outputs=MAX_TRANSACTIONS + OVER_CAP,
-            fee_per_output=500,
-        )
-        self.generateblock(node, wallet.get_address(), [parent["hex"]])
+        # (FastBlocks: a block's transactions weigh 400,000 at most, so the outputs come from parents
+        # of 2,001 outputs each, a block each.)
+        new_utxos = []
+        total = MAX_TRANSACTIONS + OVER_CAP
+        while len(new_utxos) < total:
+            utxo = wallet.get_utxo()
+            parent = wallet.create_self_transfer_multi(
+                utxos_to_spend=[utxo],
+                num_outputs=min(2001, total - len(new_utxos)),
+                fee_per_output=500,
+            )
+            self.generateblock(node, wallet.get_address(), [parent["hex"]])
+            new_utxos += parent["new_utxos"]
 
         children = [wallet.create_self_transfer(utxo_to_spend=u)
-                    for u in parent["new_utxos"]]
+                    for u in new_utxos]
         assert_equal(len(children), MAX_TRANSACTIONS + OVER_CAP)
 
         # Fill the queue exactly to the cap; every distinct submission succeeds.

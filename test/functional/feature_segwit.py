@@ -22,6 +22,8 @@ from test_framework.messages import (
     CTransaction,
     CTxIn,
     CTxOut,
+    FASTBLOCKS_MAX_BLOCK_WEIGHT,
+    MAX_BLOCK_TX_WEIGHT,
     tx_from_hex,
 )
 from test_framework.script import (
@@ -111,8 +113,10 @@ class SegWitTest(BitcoinTestFramework):
         self.log.info("Verify sigops are counted in GBT with pre-BIP141 rules before the fork")
         txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
         tmpl = self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
-        assert_equal(tmpl['sizelimit'], 1000000)
+        # (FastBlocks: blocks of FASTBLOCKS_MAX_BLOCK_WEIGHT, a quarter of it without witnesses.)
+        assert_equal(tmpl['sizelimit'], FASTBLOCKS_MAX_BLOCK_WEIGHT // 4)
         assert 'weightlimit' not in tmpl
+        assert 'txweightlimit' not in tmpl
         assert_equal(tmpl['sigoplimit'], 20000)
         assert_equal(tmpl['transactions'][0]['hash'], txid)
         assert_equal(tmpl['transactions'][0]['sigops'], 2)
@@ -223,8 +227,9 @@ class SegWitTest(BitcoinTestFramework):
         txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
         raw_tx = self.nodes[0].getrawtransaction(txid, True)
         tmpl = self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
-        assert_greater_than_or_equal(tmpl['sizelimit'], 3999577)  # actual maximum size is lower due to minimum mandatory non-witness data
-        assert_equal(tmpl['weightlimit'], 4000000)
+        assert_greater_than_or_equal(tmpl['sizelimit'], FASTBLOCKS_MAX_BLOCK_WEIGHT - 423)  # actual maximum size is lower due to minimum mandatory non-witness data
+        assert_equal(tmpl['weightlimit'], FASTBLOCKS_MAX_BLOCK_WEIGHT)
+        assert_equal(tmpl['txweightlimit'], MAX_BLOCK_TX_WEIGHT)
         assert_equal(tmpl['sigoplimit'], 80000)
         assert_equal(tmpl['transactions'][0]['txid'], txid)
         expected_sigops = 9 if 'txinwitness' in raw_tx["vin"][0] else 8

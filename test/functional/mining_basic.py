@@ -30,7 +30,8 @@ from test_framework.messages import (
     CBlockHeader,
     COIN,
     DEFAULT_BLOCK_RESERVED_WEIGHT,
-    MAX_BLOCK_WEIGHT,
+    FASTBLOCKS_MAX_BLOCK_WEIGHT,
+    MAX_BLOCK_TX_WEIGHT,
     MAX_SEQUENCE_NONFINAL,
     MINIMUM_BLOCK_RESERVED_WEIGHT,
     ser_uint256,
@@ -329,9 +330,12 @@ class MiningTest(BitcoinTestFramework):
     def test_block_max_weight(self):
         self.log.info("Testing default and custom -blockmaxweight startup options.")
 
-        # FastBlocks: 11 rather than 10, so that each stays below the standard size.
+        # FastBlocks: the transactions of a block other than the coinbase weigh MAX_BLOCK_TX_WEIGHT at
+        # most, and the miner makes blocks of that plus -blockreservedweight (for the coinbase) unless
+        # -blockmaxweight is lower: BLOCK_LIMIT has the part of Bitcoin's MAX_BLOCK_WEIGHT here.
+        BLOCK_LIMIT = MAX_BLOCK_TX_WEIGHT + DEFAULT_BLOCK_RESERVED_WEIGHT
         LARGE_TXS_COUNT = 11
-        LARGE_VSIZE = int(((MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT) / WITNESS_SCALE_FACTOR) / LARGE_TXS_COUNT)
+        LARGE_VSIZE = int(((BLOCK_LIMIT - DEFAULT_BLOCK_RESERVED_WEIGHT) / WITNESS_SCALE_FACTOR) / LARGE_TXS_COUNT)
         HIGH_FEERATE = Decimal("0.0003")
 
         # Ensure the mempool is empty
@@ -354,48 +358,52 @@ class MiningTest(BitcoinTestFramework):
         self.log.info("Testing that the block template includes only the large transactions.")
         self.verify_block_template(
             expected_tx_count=LARGE_TXS_COUNT,
-            expected_weight=MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT,
+            expected_weight=BLOCK_LIMIT - DEFAULT_BLOCK_RESERVED_WEIGHT,
         )
 
         # Test block template creation with custom -blockmaxweight
-        custom_block_weight = MAX_BLOCK_WEIGHT - 2000
+        custom_block_weight = BLOCK_LIMIT - 2000
         # Reducing the weight by 2000 units will prevent 1 large transaction from fitting into the block.
         self.restart_node(0, extra_args=[f"-blockmaxweight={custom_block_weight}"])
 
         self.log.info("Testing the block template with custom -blockmaxweight to include all large transactions but one, and 2 normal transactions.")
         self.verify_block_template(
             expected_tx_count=LARGE_TXS_COUNT - 1 + 2,
-            expected_weight=MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT - 2000,
+            expected_weight=BLOCK_LIMIT - DEFAULT_BLOCK_RESERVED_WEIGHT - 2000,
         )
 
         # Ensure the block weight does not exceed the maximum
-        self.log.info(f"Testing that the block weight will never exceed {MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT}.")
-        self.restart_node(0, extra_args=[f"-blockmaxweight={MAX_BLOCK_WEIGHT}"])
+        self.log.info(f"Testing that the block weight will never exceed {BLOCK_LIMIT - DEFAULT_BLOCK_RESERVED_WEIGHT}.")
+        # (FastBlocks: a -blockmaxweight up to the chain's maximum block weight is taken, and blocks
+        # are made no larger than the transactions' limit with the reserved weight all the same.)
+        self.restart_node(0, extra_args=[f"-blockmaxweight={FASTBLOCKS_MAX_BLOCK_WEIGHT}"])
         self.log.info("Sending 2 additional normal transactions to fill the mempool to the maximum block weight.")
         self.send_transactions(utxos[LARGE_TXS_COUNT + 2:], NORMAL_FEERATE, NORMAL_VSIZE)
-        self.log.info(f"Testing that the mempool's weight matches the maximum block weight: {MAX_BLOCK_WEIGHT}.")
+        self.log.info(f"Testing that the mempool's weight matches the maximum block weight: {BLOCK_LIMIT}.")
         # (FastBlocks: all but the remainder of dividing the room among the large transactions.)
-        assert_equal(self.nodes[0].getmempoolinfo()['bytes'] * WITNESS_SCALE_FACTOR, MAX_BLOCK_WEIGHT - (MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT) // WITNESS_SCALE_FACTOR % LARGE_TXS_COUNT * WITNESS_SCALE_FACTOR)
+        assert_equal(self.nodes[0].getmempoolinfo()['bytes'] * WITNESS_SCALE_FACTOR, BLOCK_LIMIT - (BLOCK_LIMIT - DEFAULT_BLOCK_RESERVED_WEIGHT) // WITNESS_SCALE_FACTOR % LARGE_TXS_COUNT * WITNESS_SCALE_FACTOR)
 
         self.log.info("Testing that the block template includes only the large transactions and cannot reach full block weight.")
         self.verify_block_template(
             expected_tx_count=LARGE_TXS_COUNT,
-            expected_weight=MAX_BLOCK_WEIGHT - DEFAULT_BLOCK_RESERVED_WEIGHT,
+            expected_weight=BLOCK_LIMIT - DEFAULT_BLOCK_RESERVED_WEIGHT,
         )
 
         self.log.info("Test -blockreservedweight startup option.")
-        # Lowering the -blockreservedweight by 4000 will allow for two more transactions.
+        # FastBlocks: the reserved weight comes on top of the transactions' limit, which is
+        # consensus: lowering -blockreservedweight by 4000 leaves the transactions the same room (in
+        # Bitcoin it allows for two more transactions).
         self.restart_node(0, extra_args=["-blockreservedweight=4000"])
         self.verify_block_template(
-            expected_tx_count=LARGE_TXS_COUNT + 2,
-            expected_weight=MAX_BLOCK_WEIGHT - 4000,
+            expected_tx_count=LARGE_TXS_COUNT,
+            expected_weight=MAX_BLOCK_TX_WEIGHT,
         )
 
         self.log.info("Test that node will fail to start when user provide invalid -blockreservedweight")
         self.stop_node(0)
         self.nodes[0].assert_start_raises_init_error(
-            extra_args=[f"-blockreservedweight={MAX_BLOCK_WEIGHT + 1}"],
-            expected_msg=f"Error: -blockreservedweight ({MAX_BLOCK_WEIGHT + 1}) exceeds consensus maximum block weight ({MAX_BLOCK_WEIGHT})",
+            extra_args=[f"-blockreservedweight={FASTBLOCKS_MAX_BLOCK_WEIGHT + 1}"],
+            expected_msg=f"Error: -blockreservedweight ({FASTBLOCKS_MAX_BLOCK_WEIGHT + 1}) exceeds consensus maximum block weight ({FASTBLOCKS_MAX_BLOCK_WEIGHT})",
         )
 
         self.log.info(f"Test that node will fail to start when user provide -blockreservedweight below {MINIMUM_BLOCK_RESERVED_WEIGHT}")
@@ -408,8 +416,8 @@ class MiningTest(BitcoinTestFramework):
         self.log.info("Test that node will fail to start when user provide invalid -blockmaxweight")
         self.stop_node(0)
         self.nodes[0].assert_start_raises_init_error(
-            extra_args=[f"-blockmaxweight={MAX_BLOCK_WEIGHT + 1}"],
-            expected_msg=f"Error: -blockmaxweight ({MAX_BLOCK_WEIGHT + 1}) exceeds consensus maximum block weight ({MAX_BLOCK_WEIGHT})",
+            extra_args=[f"-blockmaxweight={FASTBLOCKS_MAX_BLOCK_WEIGHT + 1}"],
+            expected_msg=f"Error: -blockmaxweight ({FASTBLOCKS_MAX_BLOCK_WEIGHT + 1}) exceeds consensus maximum block weight ({FASTBLOCKS_MAX_BLOCK_WEIGHT})",
         )
 
         self.log.info("Test that node will fail to start when -blockmaxweight is lower than -blockreservedweight")

@@ -21,7 +21,8 @@ from test_framework.messages import (
     CTxInWitness,
     CTxOut,
     CTxWitness,
-    MAX_BLOCK_WEIGHT,
+    FASTBLOCKS_MAX_BLOCK_WEIGHT,
+    MAX_BLOCK_TX_WEIGHT,
     MSG_BLOCK,
     MSG_TX,
     MSG_WITNESS_FLAG,
@@ -824,7 +825,7 @@ class SegWitTest(BitcoinTestFramework):
         block.solve()
 
         block.vtx[0].wit.vtxinwit[0].scriptWitness.stack.append(b'a' * 5000000)
-        assert block.get_weight() > MAX_BLOCK_WEIGHT
+        assert block.get_weight() > FASTBLOCKS_MAX_BLOCK_WEIGHT
 
         # We can't send over the p2p network, because this is too big to relay
         assert_equal('bad-witness-nonce-size', self.nodes[0].submitblock(block.serialize().hex()))
@@ -832,7 +833,7 @@ class SegWitTest(BitcoinTestFramework):
         assert_not_equal(self.nodes[0].getbestblockhash(), block.hash_hex)
 
         block.vtx[0].wit.vtxinwit[0].scriptWitness.stack.pop()
-        assert block.get_weight() < MAX_BLOCK_WEIGHT
+        assert block.get_weight() < FASTBLOCKS_MAX_BLOCK_WEIGHT
         assert_equal(None, self.nodes[0].submitblock(block.serialize().hex()))
 
         assert_equal(self.nodes[0].getbestblockhash(), block.hash_hex)
@@ -848,7 +849,7 @@ class SegWitTest(BitcoinTestFramework):
         relayable_block.vtx[0].wit.vtxinwit[0].scriptWitness.stack.append(b'a' * 100_000)
 
         # Ensure it's relayable by weight
-        assert_greater_than_or_equal(MAX_BLOCK_WEIGHT, relayable_block.get_weight())
+        assert_greater_than_or_equal(FASTBLOCKS_MAX_BLOCK_WEIGHT, relayable_block.get_weight())
 
         # Send over P2P and expect rejection for the same reason
         test_witness_block(self.nodes[0], self.test_node, relayable_block,
@@ -861,7 +862,7 @@ class SegWitTest(BitcoinTestFramework):
         relayable_block.vtx[0].wit.vtxinwit[0].scriptWitness.stack.pop()
 
         # Confirm the block is still relayable by weight
-        assert relayable_block.get_weight() <= MAX_BLOCK_WEIGHT
+        assert relayable_block.get_weight() <= FASTBLOCKS_MAX_BLOCK_WEIGHT
 
         # Send the corrected block and expect acceptance
         test_witness_block(self.nodes[0], self.test_node, relayable_block, accepted=True)
@@ -888,6 +889,9 @@ class SegWitTest(BitcoinTestFramework):
         # Skipping this test for now; this is covered in feature_block.py
 
         # Test that witness-bearing blocks are limited at ceil(base + wit/4) <= 1MB.
+        # (FastBlocks: at FASTBLOCKS_MAX_BLOCK_WEIGHT, of which the transactions other than the coinbase
+        # take MAX_BLOCK_TX_WEIGHT at most: the witness transaction is within that, and the coinbase,
+        # with an OP_RETURN of data, takes the block near its limit; the witness brings it there.)
         block = self.build_next_block()
 
         assert len(self.utxo) > 0
@@ -897,7 +901,7 @@ class SegWitTest(BitcoinTestFramework):
         # This should give us plenty of room to tweak the spending tx's
         # virtual size.
         NUM_DROPS = 200  # 201 max ops per script!
-        NUM_OUTPUTS = 50
+        NUM_OUTPUTS = 3  # FastBlocks: 50 in Bitcoin
 
         witness_script = CScript([OP_2DROP] * NUM_DROPS + [OP_TRUE])
         script_pubkey = script_to_p2wsh_script(witness_script)
@@ -921,11 +925,16 @@ class SegWitTest(BitcoinTestFramework):
             child_tx.wit.vtxinwit.append(CTxInWitness())
             child_tx.wit.vtxinwit[-1].scriptWitness.stack = [b'a' * 195] * (2 * NUM_DROPS) + [witness_script]
         self.update_witness_block_with_transactions(block, [parent_tx, child_tx])
+        # The coinbase's data, before its witness commitment (the last output).
+        block.vtx[0].vout.insert(1, CTxOut(0, CScript([OP_RETURN, b'\x00' * ((FASTBLOCKS_MAX_BLOCK_WEIGHT - block.get_weight() - 30_000) // WITNESS_SCALE_FACTOR)])))
+        block.vtx[0].vout.pop()
+        add_witness_commitment(block)
 
-        additional_bytes = MAX_BLOCK_WEIGHT - block.get_weight()
+        additional_bytes = FASTBLOCKS_MAX_BLOCK_WEIGHT - block.get_weight()
+        assert 0 < additional_bytes < 2 * NUM_DROPS * NUM_OUTPUTS * 55
         i = 0
         while additional_bytes > 0:
-            # Add some more bytes to each input until we hit MAX_BLOCK_WEIGHT+1
+            # Add some more bytes to each input until we hit FASTBLOCKS_MAX_BLOCK_WEIGHT+1
             extra_bytes = min(additional_bytes + 1, 55)
             block.vtx[-1].wit.vtxinwit[int(i / (2 * NUM_DROPS))].scriptWitness.stack[i % (2 * NUM_DROPS)] = b'a' * (195 + extra_bytes)
             additional_bytes -= extra_bytes
@@ -934,10 +943,13 @@ class SegWitTest(BitcoinTestFramework):
         block.vtx[0].vout.pop()  # Remove old commitment
         add_witness_commitment(block)
         block.solve()
-        assert_equal(block.get_weight(), MAX_BLOCK_WEIGHT + 1)
+        assert_equal(block.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT + 1)
         # Make sure that our test case would exceed the old max-network-message
-        # limit
-        assert len(block.serialize()) > 2 * 1024 * 1024
+        # limit (FastBlocks: a block cannot be that large; it exceeds the size a block without
+        # witnesses may have)
+        assert len(block.serialize()) > FASTBLOCKS_MAX_BLOCK_WEIGHT // WITNESS_SCALE_FACTOR
+        # The transactions other than the coinbase within their limit.
+        assert sum(tx.get_weight() for tx in block.vtx[1:]) <= MAX_BLOCK_TX_WEIGHT
 
         test_witness_block(self.nodes[0], self.test_node, block, accepted=False, reason='bad-blk-weight')
 
@@ -947,7 +959,7 @@ class SegWitTest(BitcoinTestFramework):
         block.vtx[0].vout.pop()
         add_witness_commitment(block)
         block.solve()
-        assert_equal(block.get_weight(), MAX_BLOCK_WEIGHT)
+        assert_equal(block.get_weight(), FASTBLOCKS_MAX_BLOCK_WEIGHT)
 
         test_witness_block(self.nodes[0], self.test_node, block, accepted=True)
 
@@ -1647,7 +1659,8 @@ class SegWitTest(BitcoinTestFramework):
             block.vtx.append(tx)
 
             # Test the block periodically, if we're close to maxblocksize
-            if block.get_weight() > MAX_BLOCK_WEIGHT - 4000:
+            # (FastBlocks: the transactions' part of a block, with room for a transaction of 10 inputs.)
+            if block.get_weight() > MAX_BLOCK_TX_WEIGHT - 12_000:
                 self.update_witness_block_with_transactions(block, [])
                 test_witness_block(self.nodes[0], self.test_node, block, accepted=True)
                 block = self.build_next_block()
