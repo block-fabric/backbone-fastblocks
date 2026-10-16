@@ -44,11 +44,13 @@ export interface ChainExplorer {
   facts: (block: ChainBlock) => ChainFact[];
   /** The tag of a block's box in the ribbon, instead of its coinbase's; undefined: the coinbase's. */
   tag?: (block: ChainBlock) => string | undefined;
+  /** The time between blocks the chain aims at, in seconds, as the node says it; undefined: chain.json's blockTarget. */
+  target?: () => number | undefined;
   refresh?: () => Promise<void>;
 }
 
 /** What the columns read besides the blocks: the BMM-confirmed and final tips, this node's validator keys. */
-const known: FinalityTips & { keys: Set<string>; keysAt: number } = { anchored: -1, final: -1, finalAnchors: 1, keys: new Set(), keysAt: 0 };
+const known: FinalityTips & { keys: Set<string>; keysAt: number; slotSeconds: number } = { anchored: -1, final: -1, finalAnchors: 1, keys: new Set(), keysAt: 0, slotSeconds: 0 };
 
 function producer(block: ChainBlock): string | undefined {
   const key = typeof block.proposer === 'string' ? block.proposer : '';
@@ -142,7 +144,16 @@ export const EXPLORER: ChainExplorer = {
     const kind = blockKind(b);
     return kind ? kindText(kind) : undefined;
   },
+  // A block a slot: the length of a slot of this network (getposinfo; 30 s on main and testnet, regtest's own,
+  // -posslotseconds), chain.json's 30 until the node has said it.
+  target: () => known.slotSeconds || undefined,
   refresh: async () => {
+    try {
+      const pos = await rpc.raw<{ slotseconds: number }>('getposinfo', []);
+      if (pos.slotseconds > 0) known.slotSeconds = pos.slotseconds;
+    } catch {
+      // Not a chain of stake (yet), or the node is busy: what it said last, or chain.json's.
+    }
     try {
       const a = await rpc.raw<{ anchoredheight: number; finalheight: number; finalanchors: number }>('getanchorinfo', [0]);
       known.anchored = a.anchoredheight;

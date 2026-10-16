@@ -14,6 +14,7 @@ import LocalCards from './LocalCards.svelte';
 import { COINBASE_ROLES } from './roles';
 import DialogHost from '../components/DialogHost.svelte';
 import Explorer from '../pages/Explorer.svelte';
+import Transactions from '../pages/Transactions.svelte';
 import Finality from './pages/Finality.svelte';
 import Slashing from './pages/Slashing.svelte';
 import Staking from './pages/Staking.svelte';
@@ -43,7 +44,7 @@ import { AREAS, chainBeforeTools, HOME_QUICK_ACTIONS, NAV_SECTIONS } from '../li
 import { go, nav } from '../lib/nav.svelte';
 import { handleShortcut } from '../lib/keyboard';
 import { app, node, prefs, toasts, wallets } from '../lib/state.svelte';
-import { filterRecords, parseRecords, typeText, TYPE_FILTERS, type TxRecord } from '../lib/wallet';
+import { filterRecords, parseRecords, transactionsCsv, typeText, TYPE_FILTERS, type TxRecord } from '../lib/wallet';
 import { resetWalletData } from '../lib/walletdata.svelte';
 
 const K1 = '1'.repeat(64);
@@ -378,6 +379,23 @@ describe('the staking income in the history', () => {
     expect(parseRecords([records[0].slice(0, 18)])[0].role).toBe('');
   });
 
+  it('a block of stake without fees pays its producer a Staked output of 0: not a row of the history, the notices or the CSV', async () => {
+    const zero = [hash('z'), 0, 'mined', 'rsc1qpayout', '', NOW, 0, 0, 'confirmed', 10, 0, true, 'kz', 6, 'c', true, false, true, 'staked'];
+    const zeroBmm = [hash('y'), 1, 'mined', 'rsc1qpayout', '', NOW, 0, 0, 'confirmed', 10, 0, true, 'ky', 6, 'c', true, false, true, 'bmm'];
+    const r = parseRecords([...records, zero, zeroBmm]);
+    expect(r.map((x) => x.role)).toEqual(['staked', 'staked', 'bmm', 'slashing', '']);
+    expect(r.some((x) => x.amount === 0n)).toBe(false);
+    expect(transactionsCsv(parseRecords([zero]), 'CHN').trim().split('\n')).toHaveLength(1);
+    // Those that pay stay, whatever their role.
+    expect(parseRecords([records[0], zero]).map((x) => x.amount)).toEqual([10_000_000n]);
+    // The history of the page leaves it out too.
+    records = [...records, zero, zeroBmm];
+    render(Transactions);
+    await waitFor(() => expect(screen.getAllByText('Staked').length).toBeGreaterThan(0));
+    expect(document.body.textContent).toContain('5 of 5');
+    expect([...document.querySelectorAll('.amt')].map((a) => a.textContent)).not.toContain('0.00000000');
+  });
+
   it('the host gives the roles of a coinbase (walletapi.cpp, local::CoinbaseRoles)', () => {
     const walletapi = readFileSync(join(__dirname, '../../../walletapi.cpp'), 'utf8');
     expect(walletapi).toMatch(/roles = local::CoinbaseRoles\(w\.chain\(\), confirmed->confirmed_block_hash\)/);
@@ -412,6 +430,19 @@ describe('the explorer of FastBlocks', () => {
     expect(facts[2].dd).toMatch(/yes: it records the BMM commitment of mainchain block .*401/);
     expect(EXPLORER.facts(block(17))[0].dd).toMatch(/PoW: merged mined, committed at mainchain block .*400/);
     expect(EXPLORER.facts({ height: 1 })).toEqual([]);
+  });
+
+  it("the ribbon's target is a slot: chain.json's 30 s, then the slot of the network as the node says it (regtest's own)", async () => {
+    expect(CHAIN.blockTarget).toBe(30);
+    pos.slotseconds = 1;
+    await EXPLORER.refresh!();
+    expect(EXPLORER.target!()).toBe(1);
+    pos.slotseconds = 30;
+    await EXPLORER.refresh!();
+    expect(EXPLORER.target!()).toBe(30);
+    render(Explorer);
+    await waitFor(() => expect(document.querySelector('.ribbon-head')?.textContent).toContain('target 30s'));
+    expect(document.querySelector('.ribbon-head')!.textContent).not.toContain('target 1m');
   });
 
   it('the page lists the blocks with their kind, and leaves the difficulty out', async () => {

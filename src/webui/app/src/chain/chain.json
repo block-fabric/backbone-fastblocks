@@ -34,5 +34,6 @@
     "guide": "https://github.com/block-fabric/fastblocks-app/blob/main/doc/fastblocks.md"
   },
   "blockWeight": 6000000,
+  "blockTarget": 30,
   "drop": ["sidechains", "sidechain-nodes", "mine"]
 }
