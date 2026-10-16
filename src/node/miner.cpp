@@ -474,7 +474,7 @@ std::pair<uint64_t, uint64_t> BlockAssembler::WithdrawalRoom(const std::vector<C
         const uint64_t tx_weight(GetTransactionWeight(*withdrawal));
         const uint64_t tx_sigops(WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*withdrawal));
         if (*m_options.block_reserved_weight + weight + tx_weight >= *Assert(m_options.block_max_weight)) continue;
-        if (m_options.coinbase_output_max_additional_sigops + sigops + tx_sigops >= MAX_BLOCK_SIGOPS_COST) continue;
+        if (m_options.coinbase_output_max_additional_sigops + sigops + tx_sigops >= static_cast<uint64_t>(chainparams.GetConsensus().MaxBlockSigOpsCost())) continue;
         weight += tx_weight;
         sigops += tx_sigops;
     }

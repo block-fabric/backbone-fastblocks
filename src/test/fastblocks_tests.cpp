@@ -638,13 +638,20 @@ BOOST_AUTO_TEST_CASE(chain_key)
 
 BOOST_AUTO_TEST_CASE(network_parameters)
 {
-    // The user's decisions (design, section 13): 30-second slots; blocks of stake halt after an hour
-    // without anchors; BMM blocks take transactions after 30 minutes without blocks of stake (10 on
-    // the test networks), which is sooner, so that the chain goes on in BMM blocks.
+    // The user's decisions (design, section 13; 15-second slots from 2026-10-16, 30 before): blocks of
+    // stake halt after an hour without anchors; BMM blocks take transactions after 30 minutes without
+    // blocks of stake (10 on the test networks), which is sooner, so that the chain goes on in BMM
+    // blocks. Counts of slots keep the durations they had with 30-second slots.
     for (const auto& params : {CChainParams::Main(), CChainParams::TestNet(), CChainParams::SigNet({})}) {
         const Consensus::PosParams& pos{params->GetConsensus().pos};
-        BOOST_CHECK_EQUAL(pos.slot_seconds, 30);
+        BOOST_CHECK_EQUAL(pos.slot_seconds, 15);
+        BOOST_CHECK_EQUAL(pos.max_unanchored_slots, 240);
         BOOST_CHECK_EQUAL(pos.slot_seconds * pos.max_unanchored_slots, 60 * 60);
+        // Jailed for leading under half of five minutes of slots or more in an epoch.
+        BOOST_CHECK_EQUAL(pos.liveness_min_assigned, 20);
+        BOOST_CHECK_EQUAL(pos.slot_seconds * pos.liveness_min_assigned, 5 * 60);
+        BOOST_CHECK_EQUAL(pos.max_future_seconds, 2);
+        BOOST_CHECK_EQUAL(params->GetConsensus().nPowTargetSpacing, 15);
         BOOST_CHECK_LT(pos.stall_seconds, pos.slot_seconds * pos.max_unanchored_slots);
         BOOST_CHECK_EQUAL(pos.producer_share_bps, 5000);
         // Bitcoin's heuristics count a block a slot; version bits periods stay 2016 blocks.
@@ -2010,6 +2017,7 @@ BOOST_AUTO_TEST_CASE(staking_parameters)
     BOOST_CHECK_EQUAL(m.min_stake, COIN);
     BOOST_CHECK_EQUAL(m.min_active_validators, 4U);
     BOOST_CHECK_EQUAL(m.max_validators, 100U);
+    BOOST_CHECK_EQUAL(m.slots_per_epoch, 240);
     BOOST_CHECK_EQUAL(m.slots_per_epoch * m.slot_seconds, 60 * 60);
     // Two days of anchors, one a mainchain block (a minute).
     BOOST_CHECK_EQUAL(m.unbonding_anchors, 2 * 24 * 60);
@@ -2030,7 +2038,9 @@ BOOST_AUTO_TEST_CASE(staking_parameters)
         BOOST_CHECK_EQUAL(pos.min_stake, COIN / 100);
         BOOST_CHECK_EQUAL(pos.min_active_validators, 3U);
         BOOST_CHECK_EQUAL(pos.max_validators, 32U);
-        BOOST_CHECK_EQUAL(pos.slots_per_epoch, 20);
+        // Ten minutes (20 slots of 30 seconds before 2026-10-16).
+        BOOST_CHECK_EQUAL(pos.slots_per_epoch, 40);
+        BOOST_CHECK_EQUAL(pos.slots_per_epoch * pos.slot_seconds, 10 * 60);
     }
     CChainParams::RegTestOptions options;
     options.sidechain_slot = 5;

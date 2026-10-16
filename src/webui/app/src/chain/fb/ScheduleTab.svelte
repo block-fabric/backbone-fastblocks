@@ -17,14 +17,14 @@
   import { fb } from './store.svelte';
 
   const SIZES = [25, 50, 100];
-  /** When a slot starts, to the second (slots are seconds apart on regtest, 30 s on the networks). */
+  /** When a slot starts, to the second (slots are seconds apart on regtest, 15 s on the networks). */
   const clockTime = (secs: number) => `${formatTime(secs, true)}:${String(new Date(secs * 1000).getSeconds()).padStart(2, '0')}`;
   /** How many epochs the overview reads, back from the next one (each is a call of the node). */
   const EPOCH_POINTS = [5, 10, 25, 50, 100];
 
   const pos = $derived(fb.pos);
   const current = $derived(pos?.epoch ?? 0);
-  const slotSeconds = $derived(pos?.slotseconds ?? 30);
+  const slotSeconds = $derived(pos?.slotseconds ?? 15);
   const localKeys = $derived(new Set(fb.staking?.keys.map((k) => k.pubkey) ?? []));
 
   // --- The schedule of an epoch ---

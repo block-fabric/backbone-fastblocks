@@ -750,32 +750,80 @@ struct MainNetworkSetup : public TestingSetup {
 
 BOOST_FIXTURE_TEST_CASE(block_weight_limits, MainNetworkSetup)
 {
-    // On the networks of this chain a block may weigh 6 million, of which the transactions other than
-    // the coinbase 4 million: the rest is for the coinbase, which pays deposits and refunds.
+    // On the networks of FastBlocks a block may weigh 1.5 million, of which the transactions other than
+    // the coinbase 400,000: the rest is for the coinbase, which pays deposits and refunds.
     const Consensus::Params& params{m_node.chainman->GetConsensus()};
-    BOOST_REQUIRE_EQUAL(params.max_block_weight, 6'000'000U);
-    BOOST_REQUIRE_EQUAL(params.max_block_tx_weight, 4'000'000U);
-    const auto with{[&](int count, size_t witness = 0) {
+    BOOST_REQUIRE_EQUAL(params.max_block_weight, 1'500'000U);
+    BOOST_REQUIRE_EQUAL(params.max_block_tx_weight, 400'000U);
+    // A block with `count` transactions of about 380,000 weight units each (below the limit of the
+    // transactions), each with a witness of `witness` bytes, and `coinbase_data` bytes more in its
+    // coinbase (an OP_RETURN output).
+    const auto make{[&](int count, size_t witness = 0, size_t coinbase_data = 0) {
         auto block_template{interfaces::MakeMining(m_node)->createNewBlock({.coinbase_output_script = CScript() << OP_TRUE}, /*cooldown=*/false)};
         CBlock block{block_template->getBlock()};
+        if (coinbase_data) {
+            CMutableTransaction coinbase{*block.vtx[0]};
+            coinbase.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>(coinbase_data, 0x33));
+            block.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        }
         for (int i{0}; i < count; ++i) {
-            // About 2.1 million weight units each, below the limit of a transaction.
             CMutableTransaction tx;
             tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{static_cast<uint8_t>(i + 1)}), 0});
-            tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>(525'000, 0x11));
+            tx.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>(95'000, 0x11));
             if (witness) tx.vin[0].scriptWitness.stack.emplace_back(witness, 0x22);
             block.vtx.push_back(MakeTransactionRef(std::move(tx)));
         }
         node::RegenerateCommitments(block, *m_node.chainman);
+        return block;
+    }};
+    const auto reason{[&](const CBlock& block) {
         LOCK(::cs_main);
         return TestBlockValidity(m_node.chainman->ActiveChainstate(), block, /*check_pow=*/false, /*check_merkle_root=*/true).GetRejectReason();
     }};
+    const auto tx_weight{[](const CBlock& block) {
+        int64_t weight{0};
+        for (size_t i{1}; i < block.vtx.size(); ++i) weight += GetTransactionWeight(*block.vtx[i]);
+        return weight;
+    }};
     // One such transaction is within both limits (it fails later, on its inputs); two are past that of
-    // the transactions; with witnesses, past that of the block; three, past its size without witnesses.
-    BOOST_CHECK_EQUAL(with(1), "bad-txns-inputs-missingorspent");
-    BOOST_CHECK_EQUAL(with(2), "bad-blk-tx-weight");
-    BOOST_CHECK_EQUAL(with(2, 1'000'000), "bad-blk-weight");
-    BOOST_CHECK_EQUAL(with(3), "bad-blk-length");
+    // the transactions; with witnesses, past that of the block; four, past its size without witnesses.
+    BOOST_CHECK_EQUAL(reason(make(1)), "bad-txns-inputs-missingorspent");
+    BOOST_CHECK_EQUAL(reason(make(2)), "bad-blk-tx-weight");
+    BOOST_CHECK_EQUAL(reason(make(2, 400'000)), "bad-blk-weight");
+    BOOST_CHECK_EQUAL(reason(make(4)), "bad-blk-length");
+
+    // Exactly at the limits. The witness of the transaction (one weight unit a byte) brings its weight
+    // to 400,000; the coinbase's data (four a byte) and then the witness the block's to 1.5 million.
+    {
+        const size_t base_witness{1'000};
+        const int64_t tx_room{400'000 - tx_weight(make(1, base_witness))};
+        BOOST_REQUIRE(tx_room > 0);
+        const size_t witness{base_witness + static_cast<size_t>(tx_room)};
+        const CBlock at_tx_limit{make(1, witness)};
+        BOOST_REQUIRE_EQUAL(tx_weight(at_tx_limit), 400'000);
+        BOOST_CHECK_EQUAL(reason(at_tx_limit), "bad-txns-inputs-missingorspent");
+        BOOST_CHECK_EQUAL(reason(make(1, witness + 1)), "bad-blk-tx-weight");
+    }
+    {
+        // A transaction a little below its limit, and a coinbase that takes the block to within a few
+        // thousand weight units of 1.5 million, for the witness to fill the rest.
+        const size_t base_witness{1'000};
+        const CBlock small{make(1, base_witness)};
+        const int64_t room{1'500'000 - GetBlockWeight(small)};
+        // The data push grows by a few bytes of length prefix beyond 75 and 255 bytes, and the output
+        // count stays one byte: measure the coinbase once with its data, then fill the rest.
+        const size_t data{static_cast<size_t>((room - 2'000) / WITNESS_SCALE_FACTOR)};
+        const int64_t rest{1'500'000 - GetBlockWeight(make(1, base_witness, data))};
+        BOOST_REQUIRE(rest > 0 && rest < 4'000);
+        const size_t witness{base_witness + static_cast<size_t>(rest)};
+        const CBlock at_limit{make(1, witness, data)};
+        BOOST_REQUIRE_EQUAL(GetBlockWeight(at_limit), 1'500'000);
+        BOOST_REQUIRE(tx_weight(at_limit) <= 400'000);
+        BOOST_CHECK_EQUAL(reason(at_limit), "bad-txns-inputs-missingorspent");
+        const CBlock past_limit{make(1, witness + 1, data)};
+        BOOST_REQUIRE_EQUAL(GetBlockWeight(past_limit), 1'500'001);
+        BOOST_CHECK_EQUAL(reason(past_limit), "bad-blk-weight");
+    }
 }
 
 namespace {

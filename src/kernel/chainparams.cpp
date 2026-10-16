@@ -9,6 +9,7 @@
 
 #include <chainparamsseeds.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <crypto/hex_base.h>
@@ -166,11 +167,12 @@ public:
         consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing; // only sizes version bits periods; difficulty uses aserti3
         consensus.asert_half_life = 2 * 60 * 60; // two hours, i.e. 120 blocks
         consensus.asert_anchor_height = 2016; // blocks before it are mined at the proof of work limit
-        // A sidechain's blocks: up to six million weight units, four of them for
-        // transactions and the rest for the coinbase with its payouts. Larger than
-        // the mainchain's (800,000), most activity being on the sidechains.
-        consensus.max_block_weight = 6'000'000;
-        consensus.max_block_tx_weight = 4'000'000;
+        // FastBlocks' blocks: up to 1.5 million weight units, 400,000 of them for
+        // transactions (as many as Bitcoin's largest standard transaction) and the
+        // rest for the coinbase with its payouts. A block comes far more often than
+        // the mainchain's, so they are kept small (user decision, 2026-10-16).
+        consensus.max_block_weight = FASTBLOCKS_MAX_BLOCK_WEIGHT;
+        consensus.max_block_tx_weight = FASTBLOCKS_MAX_BLOCK_TX_WEIGHT;
         consensus.coinbase_maturity = 360; // six hours
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
@@ -237,7 +239,7 @@ public:
         };
 
         // This chain is a sidechain of the Chains mainchain.
-        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks: a block every 30 seconds, anchored by the mainchain", .genesis_time = 1791763200,
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks: a block every 15 seconds, anchored by the mainchain", .genesis_time = 1791763200,
                        .message_start = {0x66, 0x62, 0x6c, 0x01}, .default_port = 9155, .bech32_hrp = "fbl"});
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
@@ -245,12 +247,15 @@ public:
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        // Blocks of stake: a slot every 30 seconds, an epoch an hour (see doc/fastblocks.md). No
+        // Blocks of stake: a slot every 15 seconds, an epoch an hour (see doc/fastblocks.md). No
         // validators yet: until the chain has them, it is the sidechain template's, merged mined only.
-        consensus.pos.slots_per_epoch = 120;
+        // Counts of slots are of the durations they had with 30-second slots (user decision, 2026-10-16).
+        consensus.pos.slot_seconds = 15;
+        consensus.pos.slots_per_epoch = 240;
         consensus.pos.min_active_validators = 4;
         consensus.pos.max_validators = 100;
-        consensus.pos.max_unanchored_slots = 120; // an hour: PoS blocks halt after an hour without anchors
+        consensus.pos.max_unanchored_slots = 240; // an hour: PoS blocks halt after an hour without anchors
+        consensus.pos.liveness_min_assigned = 20; // five minutes of slots led
         consensus.pos.stall_seconds = 1800;
         // Staking (design section 13): 1 CHN at least, about two days to unbond.
         consensus.pos.min_stake = 1 * COIN;
@@ -288,11 +293,12 @@ public:
         consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing; // only sizes version bits periods; difficulty uses aserti3
         consensus.asert_half_life = 2 * 60 * 60; // two hours, i.e. 120 blocks
         consensus.asert_anchor_height = 2016; // blocks before it are mined at the proof of work limit
-        // A sidechain's blocks: up to six million weight units, four of them for
-        // transactions and the rest for the coinbase with its payouts. Larger than
-        // the mainchain's (800,000), most activity being on the sidechains.
-        consensus.max_block_weight = 6'000'000;
-        consensus.max_block_tx_weight = 4'000'000;
+        // FastBlocks' blocks: up to 1.5 million weight units, 400,000 of them for
+        // transactions (as many as Bitcoin's largest standard transaction) and the
+        // rest for the coinbase with its payouts. A block comes far more often than
+        // the mainchain's, so they are kept small (user decision, 2026-10-16).
+        consensus.max_block_weight = FASTBLOCKS_MAX_BLOCK_WEIGHT;
+        consensus.max_block_tx_weight = FASTBLOCKS_MAX_BLOCK_TX_WEIGHT;
         consensus.coinbase_maturity = 360; // six hours
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
@@ -370,11 +376,14 @@ public:
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        // Blocks of stake: a slot every 30 seconds, an epoch 10 minutes. No validators yet.
-        consensus.pos.slots_per_epoch = 20;
+        // Blocks of stake: a slot every 15 seconds, an epoch 10 minutes. No validators yet. Counts of
+        // slots are of the durations they had with 30-second slots (user decision, 2026-10-16).
+        consensus.pos.slot_seconds = 15;
+        consensus.pos.slots_per_epoch = 40;
         consensus.pos.min_active_validators = 3;
         consensus.pos.max_validators = 32;
-        consensus.pos.max_unanchored_slots = 120; // an hour
+        consensus.pos.max_unanchored_slots = 240; // an hour
+        consensus.pos.liveness_min_assigned = 20; // five minutes of slots led
         consensus.pos.stall_seconds = 600;
         consensus.pos.min_stake = COIN / 100;
         consensus.pos.unbonding_anchors = 120;
@@ -435,8 +444,8 @@ public:
         consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing; // only sizes version bits periods; difficulty uses aserti3
         consensus.asert_half_life = 2 * 60 * 60; // two hours, i.e. 120 blocks
         consensus.asert_anchor_height = 2016; // blocks before it are mined at the proof of work limit
-        consensus.max_block_weight = 6'000'000;
-        consensus.max_block_tx_weight = 4'000'000;
+        consensus.max_block_weight = FASTBLOCKS_MAX_BLOCK_WEIGHT;
+        consensus.max_block_tx_weight = FASTBLOCKS_MAX_BLOCK_TX_WEIGHT;
         consensus.coinbase_maturity = 360; // six hours
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false; // aserti3 is not subject to the timewarp attack
@@ -501,11 +510,14 @@ public:
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
         consensus.coinbase_maturity = 0; // what a block pays (deposits, fees) can be spent in the next
-        // Blocks of stake: a slot every 30 seconds, an epoch 10 minutes. No validators yet.
-        consensus.pos.slots_per_epoch = 20;
+        // Blocks of stake: a slot every 15 seconds, an epoch 10 minutes. No validators yet. Counts of
+        // slots are of the durations they had with 30-second slots (user decision, 2026-10-16).
+        consensus.pos.slot_seconds = 15;
+        consensus.pos.slots_per_epoch = 40;
         consensus.pos.min_active_validators = 3;
         consensus.pos.max_validators = 32;
-        consensus.pos.max_unanchored_slots = 120; // an hour
+        consensus.pos.max_unanchored_slots = 240; // an hour
+        consensus.pos.liveness_min_assigned = 20; // five minutes of slots led
         consensus.pos.stall_seconds = 600;
         consensus.pos.min_stake = COIN / 100;
         consensus.pos.unbonding_anchors = 120;
@@ -583,6 +595,9 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.enforce_BIP94 = opts.enforce_bip94;
         consensus.fPowNoRetargeting = true;
+        // FastBlocks: the block weight of the other networks, so that tests run against the real limit.
+        consensus.max_block_weight = FASTBLOCKS_MAX_BLOCK_WEIGHT;
+        consensus.max_block_tx_weight = FASTBLOCKS_MAX_BLOCK_TX_WEIGHT;
 
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].bit = 28;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].nStartTime = 0;

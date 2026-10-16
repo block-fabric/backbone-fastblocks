@@ -33,6 +33,6 @@
     "issues": "https://github.com/block-fabric/fastblocks-app/issues",
     "guide": "https://github.com/block-fabric/fastblocks-app/blob/main/doc/fastblocks.md"
   },
-  "blockWeight": 6000000,
+  "blockWeight": 1500000,
   "drop": ["sidechains", "sidechain-nodes", "mine"]
 }
