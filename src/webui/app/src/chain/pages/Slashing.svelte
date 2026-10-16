@@ -120,6 +120,8 @@
     </div>
   </section>
 
+  <!-- The rules beside the proofs of double signing, as the row below (user decision, 2026-10-16). -->
+  <div class="side-cols">
   <section class="panel rules" aria-labelledby="fb-rules-title">
     <div class="panel-head"><h2 id="fb-rules-title">The rules</h2></div>
     <div class="panel-body">
@@ -160,6 +162,7 @@
       </div>
     {/if}
   </section>
+  </div>
 
   <div class="side-cols lower">
     <section class="panel" aria-labelledby="fb-held-title">

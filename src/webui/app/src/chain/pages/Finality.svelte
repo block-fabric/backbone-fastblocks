@@ -134,6 +134,8 @@
     </div>
   </section>
 
+  <!-- The blocks waiting for BMM and the newest BMM blocks side by side (user decision, 2026-10-16). -->
+  <div class="side-cols fb-pair">
     <section class="panel gap" aria-labelledby="fb-waiting-title">
       <div class="panel-head fb-listbar">
         <h2 id="fb-waiting-title">Blocks waiting for BMM confirmation</h2>
@@ -198,7 +200,9 @@
       </div>
     {/if}
   </section>
+  </div>
 
+  <div class="side-cols fb-pair">
     <section class="panel gap" aria-labelledby="fb-tickets-title">
       <div class="panel-head fb-listbar">
         <h2 id="fb-tickets-title">Tickets this node knows</h2>
@@ -225,7 +229,8 @@
       {/if}
     </section>
 
-  <div class="side-cols lower">
+  <!-- Beside the tickets: the bids of this node and the fee pot, one above the other (user decision). -->
+  <div class="fb-stack">
     <section class="panel" aria-labelledby="fb-bid-title">
       <div class="panel-head"><h2 id="fb-bid-title">BMM bids of this node</h2></div>
       <div class="panel-body side-form">
@@ -274,14 +279,21 @@
       </div>
     </section>
   </div>
+  </div>
 </div>
 
 <style>
   .pad {
     padding: 0 1.1rem 0.6rem;
   }
-  .lower {
-    margin-top: 0;
+  .fb-pair > :global(.panel) {
+    margin-bottom: 0;
+  }
+  .fb-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
   }
   .gap {
     margin-bottom: 1rem;
