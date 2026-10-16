@@ -7,7 +7,7 @@
   import { t } from '../lib/i18n.svelte';
   import Amount from '../components/Amount.svelte';
   import BlockRibbon from '../components/BlockRibbon.svelte';
-  import { coinbaseTag, type RibbonBlock } from '../lib/blocks';
+  import { coinbaseTag, TARGET_SPACING, type RibbonBlock } from '../lib/blocks';
   import { every } from '../lib/poll';
   import CopyButton from '../components/CopyButton.svelte';
   import Pager from '../components/Pager.svelte';
@@ -366,6 +366,11 @@
     { key: 'hash', label: 'Hash', value: (b) => b.hash, width: 'minmax(14rem, 1fr)', mono: true },
   ];
   const blockColumns: Column<BlockRow>[] = [kitColumns[0], ...chainColumns, ...kitColumns.slice(1)].filter((c) => !EXPLORER.hide.includes(c.key));
+  // The pace the chain aims at: the node's when the chain reads it (chain/explorer.ts), else chain.json's.
+  const blockTarget = $derived.by(() => {
+    void detailsVersion;
+    return EXPLORER.target?.() ?? TARGET_SPACING;
+  });
   const chainColumnOf = (key: string) => EXPLORER.columns.find((c) => `chain:${c.key}` === key);
   const sortedBlocks = $derived.by(() => {
     void detailsVersion;
@@ -409,7 +414,7 @@
     <button type="button" class="btn" onclick={() => { cache.clear(); blocks = []; refreshBlocks(); refreshMempool(); }}>Refresh</button>
   </form>
 
-  <BlockRibbon blocks={ribbon} selected={selectedBlock} {fresh} now={nowSecs} onselect={pickBlock} onmore={moreDetails} />
+  <BlockRibbon blocks={ribbon} selected={selectedBlock} {fresh} now={nowSecs} onselect={pickBlock} onmore={moreDetails} {blockTarget} />
 
   <div class="list-bar">
   <div class="tabs" role="tablist" aria-label="Lists" id="explorer-lists">

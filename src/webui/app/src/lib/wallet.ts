@@ -371,8 +371,21 @@ export interface TxRecord {
   role: string;
 }
 
-/** The records as the host sends them: one array each (RecordJson in walletapi.cpp). */
+/**
+ * An output of a coinbase with a role of the chain (chain/roles.ts) that pays nothing: FastBlocks' block of stake
+ * without fees pays its producer a Staked output of 0. Not a payment: the history, the notices and the CSV leave
+ * it out (those that pay something stay).
+ */
+export function isEmptyRoleOutput(r: Pick<TxRecord, 'role' | 'type' | 'amount'>): boolean {
+  return r.role !== '' && r.type === 'mined' && r.amount === 0n;
+}
+
+/** The records as the host sends them: one array each (RecordJson in walletapi.cpp); empty outputs of a role left out. */
 export function parseRecords(raw: unknown[][]): TxRecord[] {
+  return parseAll(raw).filter((r) => !isEmptyRoleOutput(r));
+}
+
+function parseAll(raw: unknown[][]): TxRecord[] {
   return raw.map((r) => {
     const credit = n(r[6]);
     const debit = n(r[7]);
@@ -563,7 +576,7 @@ export const TYPE_FILTERS: { id: TypeFilter; label: string; types: RecordType[];
   { id: 'sent', label: 'Sent to', types: ['send', 'sendOther'] },
   { id: 'mined', label: 'Mined', types: ['mined'] },
   { id: 'other', label: 'Other', types: ['other'] },
-  // The roles of the chain's coinbase outputs (chain/roles.ts): FastBlocks' Staked, BMM reward, Slashing reward.
+  // The roles of the chain's coinbase outputs (chain/roles.ts; FastBlocks: Staked, BMM reward, Slashing reward).
   ...Object.entries(COINBASE_ROLES).map(([role, r]) => ({ id: `role:${role}` as TypeFilter, label: r.label, types: ['mined' as RecordType], role })),
 ];
 

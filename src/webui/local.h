@@ -46,7 +46,7 @@ void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm);
 /**
  * What each output of the coinbase of a block of the wallet pays, by the chain's own words (a short id,
  * "" for an output it has nothing to say of): the history shows such an output by its role rather than
- * "Mined" (chain/local.ts, COINBASE_ROLES). The template has none: empty.
+ * "Mined" (chain/roles.ts, COINBASE_ROLES). The template has none: empty.
  */
 std::vector<std::string> CoinbaseRoles(interfaces::Chain& chain, const uint256& block);
 
