@@ -428,8 +428,8 @@ describe('the pages of FastBlocks', () => {
   it('are in the Chain section and the menus, before the tools, with Alt+6 to Alt+8 and a quick action', () => {
     const own = (LOCAL_PAGES as readonly LocalPage[]).map((p) => p.id);
     expect(own).toEqual(['staking', 'finality', 'slashing']);
-    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', 'bmm', ...own, 'explorer']);
-    expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', 'bmm', ...own, 'explorer']);
+    expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', ...own, 'explorer']);
+    expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', ...own, 'explorer']);
     expect(chainBeforeTools(HOME_QUICK_ACTIONS.map((q) => q.page), (p) => p)).toBeNull();
     expect(HOME_QUICK_ACTIONS.map((q) => q.label)).toContain('Stake');
     const chain = menuSections(buildCommands()).find((s) => s.group === 'Chains')!;
