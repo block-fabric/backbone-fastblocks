@@ -100,6 +100,9 @@ function block(h: number): Record<string, unknown> {
   };
 }
 
+/** The fees of a block, in satoshis (getblockstats' totalfee). */
+let blockFee = 0;
+
 async function fakeNode(r: BridgeRequest): Promise<unknown> {
   calls.push(r);
   const p = (r.params ?? []) as unknown[];
@@ -162,7 +165,7 @@ async function fakeNode(r: BridgeRequest): Promise<unknown> {
       return block(h);
     }
     case 'getblockstats':
-      return { subsidy: 0, totalfee: 0, avgfeerate: 0 };
+      return { subsidy: 0, totalfee: blockFee, avgfeerate: 0 };
     case 'getrawtransaction':
       return { vin: [{ coinbase: '00' }] };
     case 'getrawmempool':
@@ -666,6 +669,10 @@ describe('the host side of the pages (local.cpp)', () => {
 describe('Staking in Simple mode', () => {
   beforeEach(() => {
     prefs.uiMode = 'simple';
+    blockFee = 10_000;
+  });
+  afterEach(() => {
+    blockFee = 0;
   });
 
   it('says the state in words, and estimates what a stake earns a day', () => {
@@ -703,6 +710,14 @@ describe('Staking in Simple mode', () => {
     await waitFor(() => expect(called('fastblocks.unbond').length).toBe(1));
     expect(called('fastblocks.unbond')[0].params).toEqual({ wallet: 'w', pubkey: K1, amount: 'all' });
     expect(called('createbond')).toHaveLength(0);
+  });
+
+  it('without fees, says that staking earns next to nothing now', async () => {
+    blockFee = 0;
+    render(Staking);
+    await loaded();
+    await fireEvent.input(await waitFor(() => document.querySelector('#fb-simple-amount')!), { target: { value: '1' } });
+    await waitFor(() => expect(document.querySelector('#fb-simple-estimate')?.textContent).toMatch(/next to no fees/));
   });
 
   it('a first stake is Start staking; the validators when asked for', async () => {

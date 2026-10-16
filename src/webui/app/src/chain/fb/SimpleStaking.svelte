@@ -101,8 +101,10 @@
     }
   });
 
+  /** This wallet has coins staked on this node now (not only some on their way back). */
+  const staked = $derived(!!myBond && myBond.bonded > 0);
   const canStake = $derived(!!key && plain !== 'banned' && wallets.current !== null);
-  const problem = $derived(canStake ? bondProblem(myBond ? 'add' : 'bond', key, amount, myBond, minStake) : '');
+  const problem = $derived(canStake ? bondProblem(staked ? 'add' : 'bond', key, amount, myBond, minStake) : '');
 
   async function send(method: 'fastblocks.bond' | 'fastblocks.unbond', params: Record<string, unknown>): Promise<Record<string, unknown> | null> {
     const wallet = wallets.current;
@@ -131,7 +133,7 @@
   }
 
   async function stopAll() {
-    if (!myBond || busy) return;
+    if (!staked || busy) return;
     const result = await send('fastblocks.unbond', { pubkey: key, amount: 'all' });
     if (result) toast('success', t('Staking'), t('Stopping. Your coins come back in %1.', backIn));
   }
@@ -171,11 +173,11 @@
     {/if}
 
     <dl class="facts figures">
-      <dt>Staked</dt><dd><Amount sats={bonded} /></dd>
-      {#if unbonding > 0n}<dt>Coming back</dt><dd><Amount sats={unbonding} /> <span class="faint">{t('in about %1', backIn)}</span></dd>{/if}
+      <dt>Staked by you</dt><dd><Amount sats={bonded} /></dd>
+      {#if unbonding > 0n}<dt>Coming back</dt><dd><Amount sats={unbonding} /> <span class="faint">{t('in %1', backIn)}</span></dd>{/if}
       <dt>Earned today</dt><dd>{#if income}<Amount sats={income.today.staked + income.today.bmm + income.today.slashing} />{:else}–{/if}</dd>
       <dt>Earned in all</dt><dd>{#if income}<Amount sats={income.staked + income.bmm + income.slashing} />{:else}–{/if}</dd>
-      {#if bonded > 0n}<dt>Earning now</dt><dd>{t('about %1 a day', formatAmount(perDayNow, prefs.unit, { withUnit: true }))}</dd>{/if}
+      {#if ownStake > 0n && avgFee > 0}<dt>This node earns</dt><dd>{t('about %1 a day', formatAmount(perDayNow, prefs.unit, { withUnit: true }))}</dd>{/if}
     </dl>
 
     {#if plain === 'paused-off'}
@@ -184,18 +186,20 @@
 
     {#if canStake}
       <form class="stake-form" onsubmit={(e) => { e.preventDefault(); stake(); }}>
-        {#key amountKey}<AmountInput id="fb-simple-amount" bind:value={amount} label={myBond ? 'Add to your stake' : 'Stake'} />{/key}
-        {#if perDayWith !== null}
+        {#key amountKey}<AmountInput id="fb-simple-amount" bind:value={amount} label={staked ? 'Add to your stake' : 'Stake'} />{/key}
+        {#if perDayWith !== null && avgFee <= 0}
+          <p class="estimate" id="fb-simple-estimate">{t('The latest blocks paid next to no fees, so staking earns next to nothing right now.')} <span class="faint">{t('Validators earn part of the fees of the blocks they make: more payments, more earnings.')}</span></p>
+        {:else if perDayWith !== null}
           <p class="estimate" id="fb-simple-estimate">{t("You'd earn about %1 a day.", formatAmount(perDayWith, prefs.unit, { withUnit: true }))} <span class="faint">{t('An estimate, from the coins staked by everyone, a block every %1 s and the fees of the latest blocks: it changes with them.', pos?.slotseconds ?? 0)}</span></p>
         {/if}
         {#if problem && amount !== null}<p class="fb-error fb-small" role="alert">{problem}</p>{/if}
         <div class="row">
-          <button type="submit" class="btn primary" id="fb-simple-stake" disabled={!!problem || busy}><Icon name="stake" size={15} /> {myBond ? 'Add more' : 'Start staking'}</button>
-          {#if myBond && myBond.bonded > 0}
-            <button type="button" class="btn danger-ghost" id="fb-simple-stop" disabled={busy} onclick={stopAll} title={t('Take all of your stake back: it comes back in about %1', backIn)}>Stop staking</button>
+          <button type="submit" class="btn primary" id="fb-simple-stake" disabled={!!problem || busy}><Icon name="stake" size={15} /> {staked ? 'Add more' : 'Start staking'}</button>
+          {#if staked}
+            <button type="button" class="btn danger-ghost" id="fb-simple-stop" disabled={busy} onclick={stopAll} title={t('Take all of your stake back: it comes back in %1', backIn)}>Stop staking</button>
           {/if}
         </div>
-        {#if myBond && myBond.bonded > 0}<p class="faint fb-small">{t('Stopping takes all of your stake back; it comes back to this wallet in about %1 and earns nothing meanwhile.', backIn)}</p>{/if}
+        {#if staked}<p class="faint fb-small">{t('Stopping takes all of your stake back; it comes back to this wallet in %1 and earns nothing meanwhile.', backIn)}</p>{/if}
       </form>
     {:else if wallets.current === null && plain !== 'nokey'}
       <p class="muted">Open a wallet to stake from it.</p>

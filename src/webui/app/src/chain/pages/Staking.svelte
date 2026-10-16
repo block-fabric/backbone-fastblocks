@@ -65,7 +65,7 @@
 <div class="page fb-page staking">
   <header class="page-head">
     <h1>Staking</h1>
-    {#if pos}
+    {#if pos && !simpleCard}
       <span class="muted fb-head-meta">
         <span>{t('Slot %1', formatCount(pos.slot))}</span>
         <span>{t('epoch %1', formatCount(pos.epoch))}</span>

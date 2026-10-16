@@ -9,3 +9,12 @@ webui_local_e2e(fastblocks 29840
   --app-arg=-validatorkeyfile={tmp}/validator.key
   --app-arg=-validatorpayout=rsc1qqghd0tuw5wc9k0ec22t8qr7gy3tz5c5sx6gvwx
   --app-arg=-validatoranchorbid=0.00001)
+# Simple mode (fastblocks_simple.js): the home's one card, the Staking card, a stake through it and Stop staking
+# (a danger on the desktop), the node a validator as for fastblocks.js.
+webui_local_e2e(fastblocks_simple 41900
+  --js-var SIMPLE=true
+  --file=validator.key=1100000000000000000000000000000000000000000000000000000000000001\\n1100000000000000000000000000000000000000000000000000000000000002
+  --app-arg=-posvalidators=100f6d8cbf94afb6fc58e9c384b9b3a6516091373a83c869f4e24a9d2bb4a494
+  --app-arg=-validatorkeyfile={tmp}/validator.key
+  --app-arg=-validatorpayout=rsc1qqghd0tuw5wc9k0ec22t8qr7gy3tz5c5sx6gvwx
+  --app-arg=-validatoranchorbid=0.00001)
