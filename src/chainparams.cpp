@@ -161,6 +161,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         if (*lookahead < 0 || *lookahead > 365 * 24 * 60 * 60) throw std::runtime_error("Invalid -posseedlookahead");
         options.pos_seed_lookahead = *lookahead;
     }
+    if (const auto height{args.GetIntArg("-sidechainactivationheight")}) {
+        if (*height < 0 || *height > std::numeric_limits<int32_t>::max()) throw std::runtime_error("Invalid -sidechainactivationheight");
+        options.sidechain_activation_height = static_cast<int>(*height);
+    }
     for (const std::string& arg : args.GetArgs("-testdrivechainparam")) {
         const auto found{arg.find('@')};
         const auto value{found == std::string::npos ? std::nullopt : ToIntegral<int32_t>(arg.substr(found + 1))};
