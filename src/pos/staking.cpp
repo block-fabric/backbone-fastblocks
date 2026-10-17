@@ -409,6 +409,15 @@ Staking::PegStepResult Staking::PegStep(sidechain::StoreOverlay& out, const uint
     return PegStepResult{.release = release, .set_active = set.Active()};
 }
 
+void Staking::ToReserve(sidechain::StoreOverlay& out, CAmount amount) const
+{
+    if (amount <= 0) return;
+    LoadGenesis(out);
+    StakeState stake{STAKE_STATE.Get(out)};
+    stake.pot_reserve += amount;
+    STAKE_STATE.Put(out, stake);
+}
+
 void Staking::NoteLiveness(sidechain::StoreOverlay& out, int64_t slot, const uint256& producer, const std::vector<std::pair<int64_t, uint256>>& missed) const
 {
     const auto add{[&](int64_t at, const uint256& pubkey, bool made) {
@@ -455,8 +464,12 @@ bool Staking::Punish(sidechain::StoreOverlay& out, const Offence& offence, const
     std::erase_if(after.unbonding, [](const UnbondingEntry& entry) { return entry.amount == 0; });
 
     // The block that carried the proof is paid its share at the next peg step; the rest goes to the
-    // reserve. The offender carrying it itself is paid nothing: all of it to the reserve.
-    const CAmount reward{reporter && m_params.reporter_share_divisor > 0 ? penalty / m_params.reporter_share_divisor : 0};
+    // reserve. The offender carrying it itself is paid nothing: all of it to the reserve. So is a
+    // carrier whose first coinbase output is not an address (IsRewardPayee): the reward would be owed
+    // to that script at every peg step until paid, and a script no block can carry (the pot's, one of
+    // 80,000 sigops) stopped every peg step for good (audit 7, finding 1).
+    const bool payable{reporter && IsRewardPayee(*reporter)};
+    const CAmount reward{payable && m_params.reporter_share_divisor > 0 ? penalty / m_params.reporter_share_divisor : 0};
     if (reward > 0) {
         REWARDS.Put(out, stake.next_reward++, CTxOut{reward, *reporter});
         stake.rewards_owed += reward;

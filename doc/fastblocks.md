@@ -751,6 +751,26 @@ step (table `0x54`), unless its leader is the offender (a proof against
 itself): then nothing, its share to the reserve too; the rest goes to a reserve that each anchor pays
 1/`pot_reserve_anchors` of (rounded up) with the pot, to the anchor's payee.
 
+**Only addresses are paid** (consensus, `IsRewardPayee`; audit 7, finding 1).
+The reward is owed to a script the carrier's maker chose, and a payout is owed
+until a peg step pays it. A script no block can carry (the pot's own
+`OP_RETURN 0xDE504F54`, which every BMM block then had to pay against
+`bad-pos-pot-not-pos`, or 1000 `OP_CHECKMULTISIG`, 80,000 sigops, which put
+every peg step with any other signature check over the limit) stopped every peg
+step, so blocks of stake stopped after `max_unanchored_slots` and the chain
+with them, for good. So the reward is paid only to a P2PKH, P2SH, P2WPKH, P2WSH
+or P2TR script (34 bytes and 4 sigops at most, what the payouts of a block are
+sized for; never one of the chain's tagged scripts). Any other first output is
+paid nothing, and the reward goes to the reserve, as for a proof against
+itself. That covers each way to the carrier's first output: a leader of a
+later slot (two keys of the attacker, or someone's accidental double
+signature), a BMM block that carries the proof (one key and a BMM win), and a
+BMM block's own pot (below, "Fees and the pot"), which a backlog of payouts
+could defer to a later peg step. The producer pays its share to an address
+(`-validatorpayout`, a wallet address or the validator key's P2WPKH), and a
+merged miner's coinbase script is a wallet address, so honest blocks are paid
+as before.
+
 **Peg actions of an anchor** (before the template's, `BeforePegStep`): the pot
 and the share of the reserve to the payee; unbonds due and rewards owed; the
 liveness of earlier epochs (jailing); the set of the anchor.
@@ -909,10 +929,11 @@ through the chain interface's `getCoinbaseRoles`) is
   wallet, else the first validator key's P2WPKH address);
 - **anchor**: in a block that takes the peg actions (an acknowledgement, or a
   merged mined block), the pot and the share of the reserve paid to the
-  anchor's payee (the ticket's, or the merged mined block's first output);
+  anchor's payee (the ticket's, or the merged mined block's first output if
+  it is an address);
 - **reporter**: the reward for a proof that a leader signed twice, paid at the
   peg step after the block that carried the proof to that block's first
-  output's script.
+  output's script (if it is an address; otherwise to the reserve).
 
 The rest (a merged mined block's first output, deposits, refunds, unbonds) is
 "mined", as before. A block's payouts come after its first output in this
@@ -995,7 +1016,12 @@ A PoS block's producer keeps half its fees (output 0); the other half goes to
 a pot output (`OP_RETURN 0xDE504F54`), which takes the coins out of
 circulation into the state. An acknowledgement pays the pot accrued up to P
 to the ticket's payee; a BMM block pays the pot accrued up to its parent to
-its first output's script. Bidders bid for the pot on the mainchain, so its
+its first output's script, if that is an address (`IsRewardPayee`, above:
+P2PKH, P2SH, P2WPKH, P2WSH or P2TR); otherwise the pot, and the share of the
+reserve that anchor releases, go to the reserve (consensus; audit 7, finding 1:
+a payout to a script no block can carry, owed when the payout queue was behind,
+stopped the peg steps after it). A ticket's payee is checked when the ticket is
+(`bad-pos-ticket-payee`). Bidders bid for the pot on the mainchain, so its
 value reaches the mainchain's miners.
 
 ## Peg balance

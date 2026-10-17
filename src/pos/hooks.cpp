@@ -804,7 +804,15 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
     std::vector<CTxOut> staking_owed;
     const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, anchor_slot, EpochOf(earliest, m_params), set_epoch, staking_owed)};
     const int64_t paid_out{pay + staked.release};
-    if (paid_out > 0) owed_tx.emplace_back(paid_out, payee);
+    // A BMM block's first coinbase output takes the pot only if it is an address (IsRewardPayee): a
+    // payout, when the queue is behind, is owed at later peg steps, and a script no block can carry
+    // would stop them all (audit 7, finding 1). Else the pot goes to the reserve, which pays it out
+    // with the pots to come. (A ticket's payee is checked when the ticket is: bad-pos-ticket-payee.)
+    if (paid_out > 0 && !pos_block && !IsRewardPayee(payee)) {
+        m_staking.ToReserve(out, paid_out);
+    } else if (paid_out > 0) {
+        owed_tx.emplace_back(paid_out, payee);
+    }
     owed_tx.insert(owed_tx.end(), staking_owed.begin(), staking_owed.end());
     return true;
 }

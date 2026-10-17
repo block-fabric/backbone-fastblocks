@@ -16,6 +16,7 @@
 #include <coins.h>
 #include <common/signmessage.h>
 #include <consensus/merkle.h>
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <interfaces/chain.h>
 #include <interfaces/mining.h>
@@ -41,6 +42,7 @@
 #include <pow.h>
 #include <primitives/block.h>
 #include <script/sign.h>
+#include <script/solver.h>
 #include <streams.h>
 #include <script/signingprovider.h>
 #include <sidechain/mainchain.h>
@@ -140,6 +142,14 @@ std::vector<const char*> SetupArgs(InstallFastBlocks& installed)
     std::vector<const char*> args;
     for (const std::string& arg : installed.args) args.push_back(arg.c_str());
     return args;
+}
+
+/** A P2WPKH script of a key hash made of `b` (an address nobody holds the key of). */
+static CScript Wpkh(uint8_t b)
+{
+    uint160 hash;
+    std::fill(hash.begin(), hash.end(), b);
+    return GetScriptForDestination(WitnessV0KeyHash{hash});
 }
 
 struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
@@ -280,8 +290,10 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         return it->second.GetRejectReason();
     }
 
+    /** The payee of the BMM blocks of the tests: an address (IsRewardPayee), which takes the pot. */
+    static CScript BmmPayee() { return Wpkh(0x42); }
     /** A BMM block on the tip, not committed yet. */
-    CBlock BmmBlock(bool use_mempool = true, const CScript& coinbase_script = CScript() << OP_TRUE)
+    CBlock BmmBlock(bool use_mempool = true, const CScript& coinbase_script = BmmPayee())
     {
         auto block_template{interfaces::MakeMining(m_node)->createNewBlock({.use_mempool = use_mempool, .coinbase_output_script = coinbase_script, .test_block_validity = false}, /*cooldown=*/false)};
         BOOST_REQUIRE(block_template);
@@ -613,6 +625,23 @@ BOOST_AUTO_TEST_CASE(formats)
     BOOST_CHECK(!pos::IsValidPayee(CScript() << OP_RETURN));
     BOOST_CHECK(!pos::IsValidPayee(CScript() << OP_TRUE << OP_DROP));
     BOOST_CHECK(!pos::IsValidPayee(CScript() << std::vector<unsigned char>(79, 1) << OP_CHECKSIG));
+    // What a reward for a proof, or a BMM block's pot, may be paid to (audit 7, finding 1): the address
+    // forms only. Not the pot's script, a proof's, data, bare multisig or keys, nor anything else.
+    {
+        ECC_Context ecc;
+        CKey k;
+        k.MakeNewKey(/*fCompressed=*/true);
+        for (const CTxDestination& dest : std::vector<CTxDestination>{PKHash{k.GetPubKey()}, ScriptHash{CScript() << OP_TRUE}, WitnessV0KeyHash{k.GetPubKey()},
+                                                                        WitnessV0ScriptHash{CScript() << OP_TRUE}, WitnessV1Taproot{XOnlyPubKey{k.GetPubKey()}}}) {
+            BOOST_CHECK(pos::IsRewardPayee(GetScriptForDestination(dest)));
+        }
+        CScript sigops;
+        for (int n{0}; n < 1000; ++n) sigops << OP_CHECKMULTISIG;
+        for (const CScript& bad : {pos::PotScript(), CScript() << OP_RETURN, CScript() << OP_TRUE, sigops, GetScriptForRawPubKey(k.GetPubKey()),
+                                   GetScriptForMultisig(1, {k.GetPubKey()}), CScript() << OP_2 << std::vector<unsigned char>(32, 1), CScript{}}) {
+            BOOST_CHECK(!pos::IsRewardPayee(bad));
+        }
+    }
 
     // The producer's share, in integers, without overflow.
     BOOST_CHECK_EQUAL(pos::Producer::ProducerShare(10001, 5000), 5000);
@@ -2518,7 +2547,7 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
     const CAmount due{Fast().pot_accrued - Fast().pot_paid};
     const CAmount reserve{penalty - penalty / 8};
     const CAmount release{reserve / Pos().pot_reserve_anchors + (reserve % Pos().pot_reserve_anchors != 0)};
-    BOOST_CHECK(Pays(bmm, CTxOut{due + release, CScript() << OP_TRUE}));
+    BOOST_CHECK(Pays(bmm, CTxOut{due + release, BmmPayee()}));
     MineBmm(bmm);
     BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
     // What a wallet shows of them (not consensus): the reward to the reporter, the pot to the payee;
@@ -2532,7 +2561,7 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
         size_t rewards{0}, pots{0};
         for (size_t i{0}; i < vout.size(); ++i) {
             const Role expected{i > 0 && vout[i] == CTxOut{penalty / 8, reporter} ? Role::REPORTER :
-                                i > 0 && vout[i] == CTxOut{due + release, CScript() << OP_TRUE} ? Role::ANCHOR : Role::OTHER};
+                                i > 0 && vout[i] == CTxOut{due + release, BmmPayee()} ? Role::ANCHOR : Role::OTHER};
             BOOST_CHECK(roles[i] == expected);
             rewards += roles[i] == Role::REPORTER;
             pots += roles[i] == Role::ANCHOR;
@@ -2562,9 +2591,9 @@ BOOST_AUTO_TEST_CASE(coinbase_roles)
 {
     // A merged mined block that pays, after its first output (the payee's): a deposit to the payee,
     // the pot to the payee, an unbond, a reward to the payee and one to another reporter, a refund.
-    const CScript payee{CScript() << OP_TRUE};
-    const CScript other{CScript() << OP_2};
-    const CScript owner{CScript() << OP_3};
+    const CScript payee{Wpkh(1)};
+    const CScript other{Wpkh(2)};
+    const CScript owner{Wpkh(3)};
     CMutableTransaction coinbase;
     coinbase.vin.resize(1);
     coinbase.vout = {CTxOut{0, payee}, CTxOut{5, payee}, CTxOut{7, payee}, CTxOut{3, owner}, CTxOut{1, payee}, CTxOut{2, other}, CTxOut{4, owner},
@@ -2587,6 +2616,15 @@ BOOST_AUTO_TEST_CASE(coinbase_roles)
     carrying.vtx.push_back(MakeTransactionRef(with_proof));
     BOOST_CHECK(pos::ReporterScripts(carrying, std::nullopt, uint256{}) == std::vector<CScript>{payee});
     BOOST_CHECK(pos::ReporterScripts(bmm, std::nullopt, uint256{}).empty());
+    // A first output that is no address (IsRewardPayee): the chain pays it no pot and no reward (they
+    // go to the reserve), and the wallet calls nothing so; another reporter's reward still is one.
+    CMutableTransaction not_address{with_proof};
+    not_address.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    CBlock odd;
+    odd.vtx.push_back(MakeTransactionRef(not_address));
+    BOOST_CHECK(!pos::AnchorPayee(odd));
+    BOOST_CHECK(pos::ReporterScripts(odd, std::nullopt, uint256{}).empty());
+    BOOST_CHECK(pos::CoinbaseRoles(odd, {other}) == (std::vector<Role>{Role::OTHER, Role::OTHER, Role::OTHER, Role::OTHER, Role::OTHER, Role::REPORTER, Role::OTHER, Role::OTHER, Role::OTHER}));
 }
 
 BOOST_FIXTURE_TEST_CASE(leader_checked_when_connected, FastBlocksSetup)
@@ -5989,6 +6027,171 @@ BOOST_FIXTURE_TEST_CASE(review8_forged_signature_failing_against_the_record, Fas
     BOOST_CHECK(Tip() == anchor_index);
     BOOST_CHECK_EQUAL(Reason(honest), "bmm-unknown");
     BOOST_CHECK(Record().GetFailure(honest.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+}
+
+
+// AUDIT 7, finding 1 (regression; the PoC halted the chain): the reward for a proof was owed to the
+// carrier's first coinbase output script verbatim. A script of 1000 OP_CHECKMULTISIG (80,000 sigop
+// cost) fit the carrier exactly; every later peg step had to pay it, and any other payout with a
+// signature check (a P2PKH deposit anyone can make) put it over the limit: no peg step could be valid
+// any more, blocks of stake stopped at max_unanchored_slots. Now a carrier whose first output is no
+// address (IsRewardPayee) is paid nothing: the reward goes to the reserve, and the chain goes on.
+BOOST_FIXTURE_TEST_CASE(audit7_reporter_script_halts_peg_steps, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    int i{3};
+    while (XOnly(Leader(base_slot + i)) == offender) ++i;
+    CBlock carrier{WithEvidence(i, {proof})};
+    CScript poison;
+    for (int n{0}; n < 1000; ++n) poison << OP_CHECKMULTISIG;
+    SetCoinbase(carrier, [&](CMutableTransaction& tx) { tx.vout[0].scriptPubKey = poison; });
+    Resign(carrier);
+    BOOST_CHECK_EQUAL(GetLegacySigOpCount(*carrier.vtx[0]) * WITNESS_SCALE_FACTOR, 80000U);
+    const CAmount reserve_before{Stake().pot_reserve};
+    Take(carrier);
+    const CAmount penalty{bond / 10};
+    // Punished all the same; nothing owed to the script: all of the penalty to the reserve.
+    BOOST_CHECK(Validator(offender)->tombstoned);
+    BOOST_CHECK_EQUAL(Stake().slashed, penalty);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, reserve_before + penalty);
+    BOOST_CHECK_EQUAL(Stake().bonded + Stake().unbonding + Stake().pot_reserve + Stake().rewards_owed, 3 * bond + reserve_before);
+    // Anyone deposits to a P2PKH address on the sidechain.
+    Main([&](sidechain::MainBlock& block) {
+        sidechain::MainDeposit deposit;
+        deposit.destination = EncodeDestination(PKHash{key.GetPubKey()});
+        deposit.amount = COIN / 100;
+        deposit.txid = uint256{0x99};
+        block.deposits.push_back(deposit);
+    });
+    // Peg steps to come pay no reward to the script, and are valid: a BMM block, an acknowledgement.
+    {
+        const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+        for (const CTxOut& out : bmm.vtx[0]->vout) BOOST_CHECK(out.scriptPubKey != poison);
+        BOOST_CHECK_EQUAL(Check(bmm), "");
+    }
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    int j{i + 1};
+    while (XOnly(Leader(base_slot + j)) == offender) ++j;
+    const int64_t slot{Slot(j)};
+    std::string error;
+    auto block{producer->Build(slot, ack, error)};
+    BOOST_REQUIRE_MESSAGE(block, error);
+    BOOST_REQUIRE(pos::Producer::Sign(*block, Leader(slot), Genesis()));
+    for (const CTxOut& out : block->vtx[0]->vout) BOOST_CHECK(out.scriptPubKey != poison);
+    BOOST_CHECK_EQUAL(Check(*block), "");
+    Take(*block);
+    // The producer goes on.
+    int k{j + 1};
+    while (XOnly(Leader(base_slot + k)) == offender) ++k;
+    BOOST_CHECK_MESSAGE(producer->Produce(Slot(k), error), error);
+    BOOST_CHECK(Tip()->pprev->GetBlockHash() == block->GetHash());
+}
+
+// AUDIT 7, finding 1 (regression), the pot's own script as the carrier's first output: the reward was
+// a pot output in every peg step to come, which no block can carry (BMM: bad-pos-pot-not-pos; block of
+// stake: bad-pos-producer-share / bad-pos-pot-multiple). Now it goes to the reserve.
+BOOST_FIXTURE_TEST_CASE(audit7_reporter_pot_script_halts_peg_steps, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    int i{3};
+    while (XOnly(Leader(base_slot + i)) == offender) ++i;
+    CBlock carrier{WithEvidence(i, {proof})};
+    BOOST_REQUIRE_EQUAL(carrier.vtx[0]->vout.size(), 2U); // the share (no fees: 0), the witness commitment
+    SetCoinbase(carrier, [&](CMutableTransaction& tx) { tx.vout[0].scriptPubKey = pos::PotScript(); });
+    Resign(carrier);
+    Take(carrier);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, bond / 10);
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    for (const CTxOut& out : bmm.vtx[0]->vout) BOOST_CHECK(!pos::IsPotScript(out.scriptPubKey));
+    BOOST_CHECK_EQUAL(Check(bmm), "");
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    int j{i + 1};
+    while (XOnly(Leader(base_slot + j)) == offender) ++j;
+    const int64_t slot{Slot(j)};
+    std::string error;
+    auto block{producer->Build(slot, ack, error)};
+    BOOST_REQUIRE_MESSAGE(block, error);
+    BOOST_REQUIRE(pos::Producer::Sign(*block, Leader(slot), Genesis()));
+    BOOST_CHECK(!Pays(*block, CTxOut{bond / 10 / 8, pos::PotScript()}));
+    BOOST_CHECK_EQUAL(Check(*block), "");
+}
+
+// AUDIT 7, finding 1 (regression), the BMM routes: one key plus a BMM win (a BMM block carries the
+// proof, its first output poisoned), and a BMM block's own pot, owed to its first output (deferred to
+// later peg steps when the payout queue is behind). Neither is owed to a script that is no address:
+// the reward and the pot go to the reserve, and the next peg steps are valid.
+BOOST_FIXTURE_TEST_CASE(audit7_bmm_payee_not_address_pays_reserve, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    pos::DoubleProposal proof{.a = first, .b = second};
+    proof.Normalize();
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    CScript poison;
+    for (int n{0}; n < 1000; ++n) poison << OP_CHECKMULTISIG;
+    // The merged miner puts the proof in its block; its payee is the poison.
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof, reason), reason);
+    const CBlock carrying{BmmBlock(/*use_mempool=*/false, poison)};
+    bool carried{false};
+    for (const CTxOut& out : carrying.vtx[0]->vout) carried |= pos::ParseEvidenceScript(out.scriptPubKey).has_value();
+    BOOST_REQUIRE(carried);
+    MineBmm(carrying);
+    BOOST_CHECK(Tip()->GetBlockHash() == carrying.GetHash());
+    const CAmount penalty{bond / 10};
+    BOOST_CHECK(Validator(offender)->tombstoned);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    // (Its own peg step released a share of the reserve before the penalty came in.)
+    const CAmount reserve{Stake().pot_reserve};
+    BOOST_CHECK_GE(reserve, penalty);
+    // (A BMM block whose first output is the pot's own script is no block: a BMM block has no pot.)
+    BOOST_CHECK_EQUAL(Check(BmmBlock(/*use_mempool=*/false, pos::PotScript())), "bad-pos-pot-not-pos");
+    // A BMM block whose first output is the poison, then a nonstandard script: the pot and the share of
+    // the reserve that anchor releases are paid to neither, and go back to the reserve.
+    for (const CScript& payee : {poison, CScript() << OP_TRUE}) {
+        const CAmount before{Stake().pot_reserve};
+        const CAmount paid_before{Fast().pot_paid};
+        const CBlock bmm{BmmBlock(/*use_mempool=*/false, payee)};
+        for (size_t n{1}; n < bmm.vtx[0]->vout.size(); ++n) BOOST_CHECK(bmm.vtx[0]->vout[n].scriptPubKey != payee);
+        BOOST_CHECK_EQUAL(Check(bmm), "");
+        MineBmm(bmm);
+        BOOST_CHECK(Tip()->GetBlockHash() == bmm.GetHash());
+        // (The share released, and the pot of this anchor, back in the reserve.)
+        BOOST_CHECK_EQUAL(Stake().pot_reserve, before + (Fast().pot_paid - paid_before));
+    }
+    // Then an address takes the pot again, with the share of the reserve, and the chain goes on.
+    const CBlock paid{BmmBlock(/*use_mempool=*/false)};
+    const CAmount release{Stake().pot_reserve / Pos().pot_reserve_anchors + (Stake().pot_reserve % Pos().pot_reserve_anchors != 0)};
+    BOOST_CHECK(Pays(paid, CTxOut{Fast().pot_accrued - Fast().pot_paid + release, BmmPayee()}));
+    MineBmm(paid);
+    BOOST_CHECK(Tip()->GetBlockHash() == paid.GetHash());
+    BOOST_CHECK_LT(Stake().pot_reserve, reserve);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

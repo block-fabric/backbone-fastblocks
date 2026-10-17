@@ -112,6 +112,15 @@ CScript PotScript();
 bool IsPotScript(const CScript& script);
 /** Whether a ticket's payee is one: no larger than MAX_PAYEE_SIZE, standard, and not data. */
 bool IsValidPayee(const CScript& payee);
+/**
+ * Whether a script the chain pays without anyone choosing it for a ticket may be paid: a reward for a
+ * proof (to the first coinbase output of the block that carried it) and a BMM block's pot (to its own
+ * first coinbase output). Only the address forms P2PKH, P2SH, P2WPKH, P2WSH and P2TR: at most 34 bytes
+ * and 4 sigops each, what the payouts of a block are sized for, and never one of the chain's own
+ * tagged scripts (pot, bonds, unbonds, proofs). Any other script is paid nothing: the coins go to the
+ * reserve (audit 7, finding 1: a script no block can carry, owed at every peg step, stopped the chain).
+ */
+bool IsRewardPayee(const CScript& payee);
 
 /** The nBits of every PoS block: the chain's proof-of-work limit. */
 uint32_t PosBits(const uint256& pow_limit);

@@ -165,6 +165,9 @@ public:
      */
     PegStepResult PegStep(sidechain::StoreOverlay& out, const uint256& anchor, uint64_t anchors, int64_t slot, int64_t epoch, int64_t set_epoch, std::vector<CTxOut>& owed_tx) const;
 
+    /** Coins the chain could not pay to the reserve (a BMM block's pot whose payee is no address: IsRewardPayee). */
+    void ToReserve(sidechain::StoreOverlay& out, CAmount amount) const;
+
     /** A block of stake at `slot` made by `producer`; the leaders of the slots it skipped (`missed`) are charged. */
     void NoteLiveness(sidechain::StoreOverlay& out, int64_t slot, const uint256& producer, const std::vector<std::pair<int64_t, uint256>>& missed) const;
 
@@ -172,7 +175,8 @@ public:
      * Punish an offence a block carried proof of (checked by the caller: the slot's leader signed two
      * headers): slash_bps of its stake, a ban, the rest unbonded; 1/reporter_share_divisor of the
      * penalty to `reporter`, at the next peg step, the rest to the reserve. No reporter (the offender
-     * carried the proof itself): all of it to the reserve. Once: a banned validator loses nothing more.
+     * carried the proof itself), or one that is not an address (IsRewardPayee): all of it to the
+     * reserve. Once: a banned validator loses nothing more.
      * Reasons: bad-pos-evidence-known (punished before), bad-pos-evidence-banned (the validator is banned).
      */
     bool Punish(sidechain::StoreOverlay& out, const Offence& offence, const std::optional<CScript>& reporter, uint64_t anchors, std::string& reject_reason) const;
