@@ -341,7 +341,7 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, test network", .genesis_time = 1790900000,
+        MakeSidechain({.slot = 0, .genesis_message = "Sidechain template, test network 17/Oct/2026: a fresh start", .genesis_time = 1792210200,
                        .message_start = {0x5c, 0x1d, 0xec, 0x02}, .default_port = 19655, .bech32_hrp = "tsc"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
