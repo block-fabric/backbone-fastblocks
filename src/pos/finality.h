@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 class CBlockIndex;
@@ -87,8 +88,26 @@ struct SkippedCommitment {
     /** Whether a chain that leaves this one above `fork` can have it. */
     bool UsableAt(int fork) const { return exact_fork ? fork == *exact_fork : (!min_fork || fork >= *min_fork); }
 };
-std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count);
-/** The anchors AnchoredHeights looks at: forks deeper than these are not looked at. */
+/** The margins of the forks below the oldest acknowledgement walked (FastBlocksHooks::DeepForkMargin). */
+struct DeepForks {
+    //! The forks at or below this height, from genesis (-1: none): the least of their margins.
+    int kept_height{-1};
+    int kept_margin{0};
+    //! The forks above it, below the oldest acknowledgement walked: height and margin.
+    std::vector<std::pair<int, int>> forks;
+};
+/**
+ * `deep`: the margins of the forks below the oldest acknowledgement of `anchors`; a height takes those
+ * below it. Without it, those forks count as many anchors as were walked.
+ */
+std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count, const std::optional<DeepForks>& deep = std::nullopt);
+/**
+ * The commitments on record at mainchain heights whose median time is more than this before the
+ * chain's genesis time are not counted against forks (DeepForkMargin): no block of the chain existed
+ * to commit to (a new genesis is published at its time or after: doc/fastblocks.md, "Finality").
+ */
+inline constexpr int64_t FINALITY_RECORD_MARGIN{2 * 60 * 60};
+/** The anchors AnchoredHeights looks at in full; forks deeper than these are bounded by DeepForkMargin. */
 inline size_t AnchorsWalked(int final_anchors) { return static_cast<size_t>(final_anchors) * 4 + 8; }
 /**
  * The commitments on the node's record, after the oldest of `anchors` (those of the chain that ends

@@ -16,6 +16,7 @@
 #include <coins.h>
 #include <common/signmessage.h>
 #include <consensus/merkle.h>
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <interfaces/chain.h>
 #include <interfaces/mining.h>
@@ -41,6 +42,7 @@
 #include <pow.h>
 #include <primitives/block.h>
 #include <script/sign.h>
+#include <script/solver.h>
 #include <streams.h>
 #include <script/signingprovider.h>
 #include <sidechain/mainchain.h>
@@ -140,6 +142,14 @@ std::vector<const char*> SetupArgs(InstallFastBlocks& installed)
     std::vector<const char*> args;
     for (const std::string& arg : installed.args) args.push_back(arg.c_str());
     return args;
+}
+
+/** A P2WPKH script of a key hash made of `b` (an address nobody holds the key of). */
+static CScript Wpkh(uint8_t b)
+{
+    uint160 hash;
+    std::fill(hash.begin(), hash.end(), b);
+    return GetScriptForDestination(WitnessV0KeyHash{hash});
 }
 
 struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
@@ -280,8 +290,10 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         return it->second.GetRejectReason();
     }
 
+    /** The payee of the BMM blocks of the tests: an address (IsRewardPayee), which takes the pot. */
+    static CScript BmmPayee() { return Wpkh(0x42); }
     /** A BMM block on the tip, not committed yet. */
-    CBlock BmmBlock(bool use_mempool = true, const CScript& coinbase_script = CScript() << OP_TRUE)
+    CBlock BmmBlock(bool use_mempool = true, const CScript& coinbase_script = BmmPayee())
     {
         auto block_template{interfaces::MakeMining(m_node)->createNewBlock({.use_mempool = use_mempool, .coinbase_output_script = coinbase_script, .test_block_validity = false}, /*cooldown=*/false)};
         BOOST_REQUIRE(block_template);
@@ -393,7 +405,9 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         unbond.pubkey = XOnly(validator);
         unbond.amount = amount;
         unbond.sequence = sequence;
-        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, amount, sequence, Genesis())), unbond.signature));
+        // (Naming the first coin its first bond spent, as the state has it.)
+        const auto record{Validator(unbond.pubkey)};
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, amount, sequence, record ? record->first_bond : COutPoint{}, record ? record->first_bond_anchor : uint256{}, Genesis())), unbond.signature));
         return CTxOut{0, pos::UnbondScript(unbond)};
     }
     /** A transaction with these outputs, spending the coin, its change to the key. */
@@ -419,7 +433,7 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         LOCK(::cs_main);
         sidechain::StoreOverlay overlay{Chain().SideState().View()};
         std::string reason;
-        if (Hooks().GetStaking().ApplyTx(overlay, tx, Tip()->nHeight + 1, Fast().anchors, reason)) return {};
+        if (Hooks().GetStaking().ApplyTx(overlay, tx, Tip()->nHeight + 1, Fast().anchors, reason, Fast().anchor_point)) return {};
         return reason;
     }
     /** The coin TxWith spends. */
@@ -613,6 +627,23 @@ BOOST_AUTO_TEST_CASE(formats)
     BOOST_CHECK(!pos::IsValidPayee(CScript() << OP_RETURN));
     BOOST_CHECK(!pos::IsValidPayee(CScript() << OP_TRUE << OP_DROP));
     BOOST_CHECK(!pos::IsValidPayee(CScript() << std::vector<unsigned char>(79, 1) << OP_CHECKSIG));
+    // What a reward for a proof, or a BMM block's pot, may be paid to (audit 7, finding 1): the address
+    // forms only. Not the pot's script, a proof's, data, bare multisig or keys, nor anything else.
+    {
+        ECC_Context ecc;
+        CKey k;
+        k.MakeNewKey(/*fCompressed=*/true);
+        for (const CTxDestination& dest : std::vector<CTxDestination>{PKHash{k.GetPubKey()}, ScriptHash{CScript() << OP_TRUE}, WitnessV0KeyHash{k.GetPubKey()},
+                                                                        WitnessV0ScriptHash{CScript() << OP_TRUE}, WitnessV1Taproot{XOnlyPubKey{k.GetPubKey()}}}) {
+            BOOST_CHECK(pos::IsRewardPayee(GetScriptForDestination(dest)));
+        }
+        CScript sigops;
+        for (int n{0}; n < 1000; ++n) sigops << OP_CHECKMULTISIG;
+        for (const CScript& bad : {pos::PotScript(), CScript() << OP_RETURN, CScript() << OP_TRUE, sigops, GetScriptForRawPubKey(k.GetPubKey()),
+                                   GetScriptForMultisig(1, {k.GetPubKey()}), CScript() << OP_2 << std::vector<unsigned char>(32, 1), CScript{}}) {
+            BOOST_CHECK(!pos::IsRewardPayee(bad));
+        }
+    }
 
     // The producer's share, in integers, without overflow.
     BOOST_CHECK_EQUAL(pos::Producer::ProducerShare(10001, 5000), 5000);
@@ -657,6 +688,13 @@ BOOST_AUTO_TEST_CASE(network_parameters)
         // Bitcoin's heuristics count a block a slot; version bits periods stay 2016 blocks.
         BOOST_CHECK_EQUAL(params->GetConsensus().nPowTargetSpacing, pos.slot_seconds);
         BOOST_CHECK_EQUAL(params->GetConsensus().DifficultyAdjustmentInterval(), 2016);
+        // Counts of blocks keep their durations (audit 7, finding 4): the drivechain undo data, which
+        // bounds the deepest reorg, covers a day of slots; a pruned node keeps those blocks (and
+        // reorgs need them), and as many full blocks, with their undo data (some 15 % more), fit the
+        // least prune target.
+        BOOST_CHECK_GE(int64_t{DRIVECHAIN_UNDO_DEPTH} * pos.slot_seconds, 24 * 60 * 60);
+        BOOST_CHECK_EQUAL(MinBlocksToKeep(params->GetConsensus()), DRIVECHAIN_UNDO_DEPTH);
+        BOOST_CHECK_LE(int64_t{DRIVECHAIN_UNDO_DEPTH} * params->GetConsensus().max_block_weight * 115 / 100, static_cast<int64_t>(MinPruneTarget(params->GetConsensus())));
     }
     BOOST_CHECK_EQUAL(CChainParams::Main()->GetConsensus().pos.stall_seconds, 30 * 60);
     // Unchecked headers (review of audit 6, item 10): the worst case node-wide. Outbound and manual
@@ -755,6 +793,40 @@ BOOST_AUTO_TEST_CASE(slashing_protection)
         BOOST_CHECK(!pos::SlashingProtection::Open(file, dir, "keys.lock", error));
         std::ofstream{file.std_path()} << "fastblocks-slashing-protection 1\nnot a line\n";
         BOOST_CHECK(!pos::SlashingProtection::Open(file, dir, "keys.lock", error));
+        std::ofstream{file.std_path()} << "fastblocks-slashing-protection 2 nothex\n";
+        BOOST_CHECK(!pos::SlashingProtection::Open(file, dir, "keys.lock", error, {}, uint256{7}));
+    }
+    {
+        // The file names the chain (audit 7, finding 3). Of this chain, or of the first format: its slots count.
+        std::ofstream{file.std_path()} << "fastblocks-slashing-protection 1\n" << HexStr(uint256{1}) << " 100\n";
+        {
+            auto protection{pos::SlashingProtection::Open(file, dir, "keys.lock", error, {}, uint256{7})};
+            BOOST_REQUIRE_MESSAGE(protection, error);
+            BOOST_CHECK(protection->LastSigned(uint256{1}) == std::optional<int64_t>{100});
+            BOOST_CHECK(!protection->MaySign(uint256{1}, 50, error));
+            BOOST_CHECK(protection->MaySign(uint256{1}, 101, error));
+        }
+        {
+            auto protection{pos::SlashingProtection::Open(file, dir, "keys.lock", error, {}, uint256{7})};
+            BOOST_REQUIRE_MESSAGE(protection, error);
+            BOOST_CHECK(protection->LastSigned(uint256{1}) == std::optional<int64_t>{101});
+        }
+        // Of another chain (a test network started again from a new genesis, whose slots are numbered
+        // from a later time): none count, and the file is kept beside.
+        {
+            auto protection{pos::SlashingProtection::Open(file, dir, "keys.lock", error, {}, uint256{8})};
+            BOOST_REQUIRE_MESSAGE(protection, error);
+            BOOST_CHECK(!protection->LastSigned(uint256{1}));
+            BOOST_CHECK(protection->MaySign(uint256{1}, 3, error));
+            BOOST_CHECK(!protection->MaySign(uint256{1}, 3, error));
+        }
+        BOOST_CHECK(fs::exists(fs::PathFromString(fs::PathToString(file) + "." + uint256{7}.GetHex() + ".old")));
+        {
+            // And back on this chain's file: what it signed counts.
+            auto protection{pos::SlashingProtection::Open(file, dir, "keys.lock", error, {}, uint256{8})};
+            BOOST_REQUIRE_MESSAGE(protection, error);
+            BOOST_CHECK(protection->LastSigned(uint256{1}) == std::optional<int64_t>{3});
+        }
     }
     fs::remove_all(dir);
 }
@@ -2082,7 +2154,8 @@ BOOST_AUTO_TEST_CASE(staking_scripts)
     unbond.pubkey = XOnly(validator);
     unbond.amount = 4000;
     unbond.sequence = 7;
-    BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, genesis)), unbond.signature));
+    const COutPoint first_bond{Txid::FromUint256(uint256{5}), 1};
+    BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, first_bond, uint256{4}, genesis)), unbond.signature));
     const auto read{pos::ParseUnbond(CTxOut{0, pos::UnbondScript(unbond)})};
     BOOST_REQUIRE(read);
     BOOST_CHECK(read->pubkey == unbond.pubkey && read->amount == 4000 && read->sequence == 7 && read->signature == unbond.signature);
@@ -2091,8 +2164,14 @@ BOOST_AUTO_TEST_CASE(staking_scripts)
     huge.amount = MAX_MONEY + 1;
     BOOST_CHECK(!pos::ParseUnbond(CTxOut{0, pos::UnbondScript(huge)}));
     // The message names the validator, the amount, the sequence and the chain.
-    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 8, genesis));
-    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 7, uint256{2}));
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{4}, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 8, first_bond, uint256{4}, genesis));
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{4}, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{4}, uint256{2}));
+    // ... and the first coin its first bond spent (audit 7, finding 3: not replayable on another chain
+    // of the same genesis, whose validator bonded with another coin).
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{4}, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 7, COutPoint{Txid::FromUint256(uint256{5}), 2}, uint256{4}, genesis));
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{4}, genesis).find(first_bond.hash.GetHex() + ":1 ") != std::string::npos);
+    // ... and the anchor block of the chain when that bond was applied (the same coin on another chain).
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{4}, genesis) != pos::UnbondMessage(unbond.pubkey, 4000, 7, first_bond, uint256{6}, genesis));
     // A bond with the owner's signature reads back; one with a signature of another size does not.
     const std::vector<unsigned char> owner_sig(CPubKey::COMPACT_SIGNATURE_SIZE, 3);
     const auto signed_bond{pos::ParseBond(CTxOut{5000, pos::BondScript(XOnly(validator), owner_hash, pop, owner_sig)})};
@@ -2107,7 +2186,7 @@ BOOST_AUTO_TEST_CASE(staking_scripts)
     BOOST_CHECK(bond_message != pos::BondMessage(unbond.pubkey, 4000, coin, uint256{2}));
     BOOST_CHECK(bond_message != pos::BondMessage(XOnly(owner), 4000, coin, genesis));
     // An unbond of all says so, and reads back.
-    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, pos::UNBOND_ALL, 7, genesis).find(" all ") != std::string::npos);
+    BOOST_CHECK(pos::UnbondMessage(unbond.pubkey, pos::UNBOND_ALL, 7, first_bond, uint256{4}, genesis).find(" all ") != std::string::npos);
     pos::Unbond all{unbond};
     all.amount = pos::UNBOND_ALL;
     BOOST_CHECK_EQUAL(pos::ParseUnbond(CTxOut{0, pos::UnbondScript(all)})->amount, pos::UNBOND_ALL);
@@ -2366,7 +2445,7 @@ BOOST_AUTO_TEST_CASE(jailing)
         tx.vout.emplace_back(5000, pos::BondScript(XOnly(k), owner, pop, owner_sig));
     }
     std::string reason;
-    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{tx}, 1, 0, reason));
+    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{tx}, 1, 0, reason, uint256{9}));
     const uint256 a{XOnly(validators[0])}, b{XOnly(validators[1])}, c{XOnly(validators[2])};
     // Epoch 0: A made its ten; B led twelve and made none; C led four and made none (too few to tell).
     for (int64_t slot{0}; slot < 10; ++slot) staking.NoteLiveness(out, slot, a, {});
@@ -2518,7 +2597,7 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
     const CAmount due{Fast().pot_accrued - Fast().pot_paid};
     const CAmount reserve{penalty - penalty / 8};
     const CAmount release{reserve / Pos().pot_reserve_anchors + (reserve % Pos().pot_reserve_anchors != 0)};
-    BOOST_CHECK(Pays(bmm, CTxOut{due + release, CScript() << OP_TRUE}));
+    BOOST_CHECK(Pays(bmm, CTxOut{due + release, BmmPayee()}));
     MineBmm(bmm);
     BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
     // What a wallet shows of them (not consensus): the reward to the reporter, the pot to the payee;
@@ -2532,7 +2611,7 @@ BOOST_FIXTURE_TEST_CASE(slashing, FastBlocksSetup)
         size_t rewards{0}, pots{0};
         for (size_t i{0}; i < vout.size(); ++i) {
             const Role expected{i > 0 && vout[i] == CTxOut{penalty / 8, reporter} ? Role::REPORTER :
-                                i > 0 && vout[i] == CTxOut{due + release, CScript() << OP_TRUE} ? Role::ANCHOR : Role::OTHER};
+                                i > 0 && vout[i] == CTxOut{due + release, BmmPayee()} ? Role::ANCHOR : Role::OTHER};
             BOOST_CHECK(roles[i] == expected);
             rewards += roles[i] == Role::REPORTER;
             pots += roles[i] == Role::ANCHOR;
@@ -2562,9 +2641,9 @@ BOOST_AUTO_TEST_CASE(coinbase_roles)
 {
     // A merged mined block that pays, after its first output (the payee's): a deposit to the payee,
     // the pot to the payee, an unbond, a reward to the payee and one to another reporter, a refund.
-    const CScript payee{CScript() << OP_TRUE};
-    const CScript other{CScript() << OP_2};
-    const CScript owner{CScript() << OP_3};
+    const CScript payee{Wpkh(1)};
+    const CScript other{Wpkh(2)};
+    const CScript owner{Wpkh(3)};
     CMutableTransaction coinbase;
     coinbase.vin.resize(1);
     coinbase.vout = {CTxOut{0, payee}, CTxOut{5, payee}, CTxOut{7, payee}, CTxOut{3, owner}, CTxOut{1, payee}, CTxOut{2, other}, CTxOut{4, owner},
@@ -2587,6 +2666,15 @@ BOOST_AUTO_TEST_CASE(coinbase_roles)
     carrying.vtx.push_back(MakeTransactionRef(with_proof));
     BOOST_CHECK(pos::ReporterScripts(carrying, std::nullopt, uint256{}) == std::vector<CScript>{payee});
     BOOST_CHECK(pos::ReporterScripts(bmm, std::nullopt, uint256{}).empty());
+    // A first output that is no address (IsRewardPayee): the chain pays it no pot and no reward (they
+    // go to the reserve), and the wallet calls nothing so; another reporter's reward still is one.
+    CMutableTransaction not_address{with_proof};
+    not_address.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    CBlock odd;
+    odd.vtx.push_back(MakeTransactionRef(not_address));
+    BOOST_CHECK(!pos::AnchorPayee(odd));
+    BOOST_CHECK(pos::ReporterScripts(odd, std::nullopt, uint256{}).empty());
+    BOOST_CHECK(pos::CoinbaseRoles(odd, {other}) == (std::vector<Role>{Role::OTHER, Role::OTHER, Role::OTHER, Role::OTHER, Role::OTHER, Role::REPORTER, Role::OTHER, Role::OTHER, Role::OTHER}));
 }
 
 BOOST_FIXTURE_TEST_CASE(leader_checked_when_connected, FastBlocksSetup)
@@ -3158,16 +3246,16 @@ BOOST_AUTO_TEST_CASE(penalty_from_unbonding)
     std::vector<unsigned char> owner_sig;
     BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::BondMessage(pubkey, 10000, bond.vin[0].prevout, genesis)), owner_sig));
     bond.vout.emplace_back(10000, pos::BondScript(pubkey, owner_hash, pop, owner_sig));
-    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{bond}, 1, 0, reason));
+    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{bond}, 1, 0, reason, uint256{9}));
     const auto unbond{[&](CAmount amount, uint32_t sequence, uint64_t anchors) {
         pos::Unbond u;
         u.pubkey = pubkey;
         u.amount = amount;
         u.sequence = sequence;
-        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(pubkey, amount, sequence, genesis)), u.signature));
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(pubkey, amount, sequence, bond.vin[0].prevout, uint256{9}, genesis)), u.signature));
         CMutableTransaction tx;
         tx.vout.emplace_back(0, pos::UnbondScript(u));
-        BOOST_REQUIRE_MESSAGE(staking.ApplyTx(out, CTransaction{tx}, 2, anchors, reason), reason);
+        BOOST_REQUIRE_MESSAGE(staking.ApplyTx(out, CTransaction{tx}, 2, anchors, reason, uint256{9}), reason);
     }};
     unbond(9400, 0, 0);
     unbond(500, 1, 1);
@@ -5989,6 +6077,370 @@ BOOST_FIXTURE_TEST_CASE(review8_forged_signature_failing_against_the_record, Fas
     BOOST_CHECK(Tip() == anchor_index);
     BOOST_CHECK_EQUAL(Reason(honest), "bmm-unknown");
     BOOST_CHECK(Record().GetFailure(honest.GetHash()) == sidechain::Mainchain::Failure::RECORD);
+}
+
+
+// AUDIT 7, finding 1 (regression; the PoC halted the chain): the reward for a proof was owed to the
+// carrier's first coinbase output script verbatim. A script of 1000 OP_CHECKMULTISIG (80,000 sigop
+// cost) fit the carrier exactly; every later peg step had to pay it, and any other payout with a
+// signature check (a P2PKH deposit anyone can make) put it over the limit: no peg step could be valid
+// any more, blocks of stake stopped at max_unanchored_slots. Now a carrier whose first output is no
+// address (IsRewardPayee) is paid nothing: the reward goes to the reserve, and the chain goes on.
+BOOST_FIXTURE_TEST_CASE(audit7_reporter_script_halts_peg_steps, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    int i{3};
+    while (XOnly(Leader(base_slot + i)) == offender) ++i;
+    CBlock carrier{WithEvidence(i, {proof})};
+    CScript poison;
+    for (int n{0}; n < 1000; ++n) poison << OP_CHECKMULTISIG;
+    SetCoinbase(carrier, [&](CMutableTransaction& tx) { tx.vout[0].scriptPubKey = poison; });
+    Resign(carrier);
+    BOOST_CHECK_EQUAL(GetLegacySigOpCount(*carrier.vtx[0]) * WITNESS_SCALE_FACTOR, 80000U);
+    const CAmount reserve_before{Stake().pot_reserve};
+    Take(carrier);
+    const CAmount penalty{bond / 10};
+    // Punished all the same; nothing owed to the script: all of the penalty to the reserve.
+    BOOST_CHECK(Validator(offender)->tombstoned);
+    BOOST_CHECK_EQUAL(Stake().slashed, penalty);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, reserve_before + penalty);
+    BOOST_CHECK_EQUAL(Stake().bonded + Stake().unbonding + Stake().pot_reserve + Stake().rewards_owed, 3 * bond + reserve_before);
+    // Anyone deposits to a P2PKH address on the sidechain.
+    Main([&](sidechain::MainBlock& block) {
+        sidechain::MainDeposit deposit;
+        deposit.destination = EncodeDestination(PKHash{key.GetPubKey()});
+        deposit.amount = COIN / 100;
+        deposit.txid = uint256{0x99};
+        block.deposits.push_back(deposit);
+    });
+    // Peg steps to come pay no reward to the script, and are valid: a BMM block, an acknowledgement.
+    {
+        const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+        for (const CTxOut& out : bmm.vtx[0]->vout) BOOST_CHECK(out.scriptPubKey != poison);
+        BOOST_CHECK_EQUAL(Check(bmm), "");
+    }
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    int j{i + 1};
+    while (XOnly(Leader(base_slot + j)) == offender) ++j;
+    const int64_t slot{Slot(j)};
+    std::string error;
+    auto block{producer->Build(slot, ack, error)};
+    BOOST_REQUIRE_MESSAGE(block, error);
+    BOOST_REQUIRE(pos::Producer::Sign(*block, Leader(slot), Genesis()));
+    for (const CTxOut& out : block->vtx[0]->vout) BOOST_CHECK(out.scriptPubKey != poison);
+    BOOST_CHECK_EQUAL(Check(*block), "");
+    Take(*block);
+    // The producer goes on.
+    int k{j + 1};
+    while (XOnly(Leader(base_slot + k)) == offender) ++k;
+    BOOST_CHECK_MESSAGE(producer->Produce(Slot(k), error), error);
+    BOOST_CHECK(Tip()->pprev->GetBlockHash() == block->GetHash());
+}
+
+// AUDIT 7, finding 1 (regression), the pot's own script as the carrier's first output: the reward was
+// a pot output in every peg step to come, which no block can carry (BMM: bad-pos-pot-not-pos; block of
+// stake: bad-pos-producer-share / bad-pos-pot-multiple). Now it goes to the reserve.
+BOOST_FIXTURE_TEST_CASE(audit7_reporter_pot_script_halts_peg_steps, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    const pos::DoubleProposal proof{.a = first, .b = second};
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    int i{3};
+    while (XOnly(Leader(base_slot + i)) == offender) ++i;
+    CBlock carrier{WithEvidence(i, {proof})};
+    BOOST_REQUIRE_EQUAL(carrier.vtx[0]->vout.size(), 2U); // the share (no fees: 0), the witness commitment
+    SetCoinbase(carrier, [&](CMutableTransaction& tx) { tx.vout[0].scriptPubKey = pos::PotScript(); });
+    Resign(carrier);
+    Take(carrier);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    BOOST_CHECK_EQUAL(Stake().pot_reserve, bond / 10);
+    const CBlock bmm{BmmBlock(/*use_mempool=*/false)};
+    for (const CTxOut& out : bmm.vtx[0]->vout) BOOST_CHECK(!pos::IsPotScript(out.scriptPubKey));
+    BOOST_CHECK_EQUAL(Check(bmm), "");
+    const pos::AnchorAck ack{Anchor(Ticket(Tip()->GetBlockHash(), script))};
+    int j{i + 1};
+    while (XOnly(Leader(base_slot + j)) == offender) ++j;
+    const int64_t slot{Slot(j)};
+    std::string error;
+    auto block{producer->Build(slot, ack, error)};
+    BOOST_REQUIRE_MESSAGE(block, error);
+    BOOST_REQUIRE(pos::Producer::Sign(*block, Leader(slot), Genesis()));
+    BOOST_CHECK(!Pays(*block, CTxOut{bond / 10 / 8, pos::PotScript()}));
+    BOOST_CHECK_EQUAL(Check(*block), "");
+}
+
+// AUDIT 7, finding 1 (regression), the BMM routes: one key plus a BMM win (a BMM block carries the
+// proof, its first output poisoned), and a BMM block's own pot, owed to its first output (deferred to
+// later peg steps when the payout queue is behind). Neither is owed to a script that is no address:
+// the reward and the pot go to the reserve, and the next peg steps are valid.
+BOOST_FIXTURE_TEST_CASE(audit7_bmm_payee_not_address_pays_reserve, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const CAmount bond{100000};
+    Accept(Pay(coin, spent, {BondOut(keys[0], bond, Owner(key), &key, coin), BondOut(keys[1], bond, Owner(key), &key, coin), BondOut(keys[2], bond, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto [first, second]{TwoBlocks(2)};
+    pos::DoubleProposal proof{.a = first, .b = second};
+    proof.Normalize();
+    const uint256 offender{XOnly(Leader(base_slot + 2))};
+    Take(first);
+    CScript poison;
+    for (int n{0}; n < 1000; ++n) poison << OP_CHECKMULTISIG;
+    // The merged miner puts the proof in its block; its payee is the poison.
+    std::string reason;
+    BOOST_REQUIRE_MESSAGE(Hooks().AddEvidence(proof, reason), reason);
+    const CBlock carrying{BmmBlock(/*use_mempool=*/false, poison)};
+    bool carried{false};
+    for (const CTxOut& out : carrying.vtx[0]->vout) carried |= pos::ParseEvidenceScript(out.scriptPubKey).has_value();
+    BOOST_REQUIRE(carried);
+    MineBmm(carrying);
+    BOOST_CHECK(Tip()->GetBlockHash() == carrying.GetHash());
+    const CAmount penalty{bond / 10};
+    BOOST_CHECK(Validator(offender)->tombstoned);
+    BOOST_CHECK_EQUAL(Stake().rewards_owed, 0);
+    // (Its own peg step released a share of the reserve before the penalty came in.)
+    const CAmount reserve{Stake().pot_reserve};
+    BOOST_CHECK_GE(reserve, penalty);
+    // (A BMM block whose first output is the pot's own script is no block: a BMM block has no pot.)
+    BOOST_CHECK_EQUAL(Check(BmmBlock(/*use_mempool=*/false, pos::PotScript())), "bad-pos-pot-not-pos");
+    // A BMM block whose first output is the poison, then a nonstandard script: the pot and the share of
+    // the reserve that anchor releases are paid to neither, and go back to the reserve.
+    for (const CScript& payee : {poison, CScript() << OP_TRUE}) {
+        const CAmount before{Stake().pot_reserve};
+        const CAmount paid_before{Fast().pot_paid};
+        const CBlock bmm{BmmBlock(/*use_mempool=*/false, payee)};
+        for (size_t n{1}; n < bmm.vtx[0]->vout.size(); ++n) BOOST_CHECK(bmm.vtx[0]->vout[n].scriptPubKey != payee);
+        BOOST_CHECK_EQUAL(Check(bmm), "");
+        MineBmm(bmm);
+        BOOST_CHECK(Tip()->GetBlockHash() == bmm.GetHash());
+        // (The share released, and the pot of this anchor, back in the reserve.)
+        BOOST_CHECK_EQUAL(Stake().pot_reserve, before + (Fast().pot_paid - paid_before));
+    }
+    // Then an address takes the pot again, with the share of the reserve, and the chain goes on.
+    const CBlock paid{BmmBlock(/*use_mempool=*/false)};
+    const CAmount release{Stake().pot_reserve / Pos().pot_reserve_anchors + (Stake().pot_reserve % Pos().pot_reserve_anchors != 0)};
+    BOOST_CHECK(Pays(paid, CTxOut{Fast().pot_accrued - Fast().pot_paid + release, BmmPayee()}));
+    MineBmm(paid);
+    BOOST_CHECK(Tip()->GetBlockHash() == paid.GetHash());
+    BOOST_CHECK_LT(Stake().pot_reserve, reserve);
+}
+
+
+// AUDIT 7, finding 2 (regression; the PoC took a "final" block back): commitments older than the
+// oldest of the AnchorsWalked newest anchors were not counted against forks. A bidder that won more
+// commitments since a fork (blocks kept to itself) than the window holds won the order of chains after
+// the chain called blocks after the fork final. Now every skipped commitment since the fork counts
+// (DeepForkMargin): no block above the fork is final, and no final block is taken back.
+BOOST_FIXTURE_TEST_CASE(audit7_final_block_taken_back_by_old_hidden_commitments, FastBlocksSetup)
+{
+    StartPos();
+    Take(PosBlock(1));
+    const CBlockIndex* fork{Tip()};
+    const size_t walked{pos::AnchorsWalked(Pos().final_anchors)};
+    // The bidder's branch: walked + 1 BMM blocks on the fork, each committed (the mainchain's record
+    // has them); "kept to itself" here = taken, then marked invalid so that the node's chain leaves it.
+    std::vector<uint256> hidden;
+    for (size_t n{0}; n <= walked; ++n) {
+        Slot(2 + static_cast<int>(n));
+        const CBlock block{BmmBlock(/*use_mempool=*/false)};
+        MineBmm(block);
+        hidden.push_back(block.GetHash());
+    }
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, Index(hidden[0])));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    BOOST_REQUIRE(Tip() == fork);
+    // The chain: `walked` anchors since the fork (BMM blocks of another payee), one fewer than the branch.
+    for (size_t n{0}; n < walked; ++n) {
+        Slot(40 + static_cast<int>(n));
+        MineBmm(BmmBlock(/*use_mempool=*/false, Wpkh(2)));
+    }
+    const int final_height{WITH_LOCK(::cs_main, return Hooks().FinalHeight())};
+    BOOST_TEST_MESSAGE("audit7: fork at " << fork->nHeight << ", chain tip " << Tip()->nHeight << ", final height " << final_height);
+    // Nothing above the fork is final: the branch has as many anchors since it, and more.
+    BOOST_CHECK_LE(final_height, fork->nHeight);
+    const CBlockIndex* was_final{final_height >= 0 ? WITH_LOCK(::cs_main, return Chain().m_chain[final_height]) : nullptr};
+    // The bidder shows its branch (here: the operator's mark taken back, as if it came from a peer).
+    {
+        LOCK(::cs_main);
+        Chain().ResetBlockFailureFlags(Index(hidden[0]));
+        Chainman().RecalculateBestHeader();
+    }
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    // The branch wins (the order of chains is unchanged), and the final block stays.
+    BOOST_CHECK(Tip()->GetBlockHash() == hidden.back());
+    if (was_final) BOOST_CHECK(WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*was_final)));
+
+    // Once the chain has more anchors since the fork than the commitments it skipped (all of them, the
+    // branch's included), blocks are final again: here the branch's own chain, which skipped the
+    // `walked` commitments of the other.
+    for (size_t n{0}; n < 2 * walked; ++n) {
+        Slot(80 + static_cast<int>(n));
+        MineBmm(BmmBlock(/*use_mempool=*/false));
+    }
+    const int later{WITH_LOCK(::cs_main, return Hooks().FinalHeight())};
+    BOOST_CHECK_GT(later, fork->nHeight);
+    BOOST_CHECK_LT(later, Tip()->nHeight);
+}
+
+// AUDIT 7, finding 2: the margin of deep forks is the same whether computed at once or step by step
+// (what DeepForkMargin keeps between calls), and a mainchain reorg that takes commitments away is seen.
+BOOST_FIXTURE_TEST_CASE(audit7_deep_fork_margin_incremental, FastBlocksSetup)
+{
+    StartPos();
+    Take(PosBlock(1));
+    const size_t walked{pos::AnchorsWalked(Pos().final_anchors)};
+    std::vector<std::vector<int>> stepwise;
+    for (size_t n{0}; n < 3 * walked; ++n) {
+        Slot(2 + static_cast<int>(n));
+        MineBmm(BmmBlock(/*use_mempool=*/false));
+        // A commitment nobody shows (a skipped one), every fourth mainchain block.
+        if (n % 4 == 0) Commit(uint256{static_cast<uint8_t>(0x80 + n)});
+        stepwise.push_back(WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), Pos().final_anchors)));
+    }
+    const auto heights{[&] { return WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), Pos().final_anchors)); }};
+    // Computed at once (nothing kept), the same at the tip.
+    Hooks().ForgetDeepFinality();
+    const auto at_once{heights()};
+    BOOST_CHECK(at_once == stepwise.back());
+    BOOST_REQUIRE(!at_once.empty());
+    BOOST_CHECK_LT(at_once.back(), Tip()->nHeight);
+    // The record loses its last blocks (a mainchain reorg): counted again where it changed, the same
+    // as computed at once.
+    BOOST_CHECK(heights() == at_once);
+    Record().Truncate(Record().Height() - 3);
+    const auto after_reorg{heights()};
+    Hooks().ForgetDeepFinality();
+    BOOST_CHECK(heights() == after_reorg);
+}
+
+
+// AUDIT 7, finding 3: an unbond names the first coin its validator's first bond spent and the newest
+// anchor block of the chain when that bond was applied, so an unbond signed on another chain with the
+// same genesis (a test network restarted without a new genesis), where the same owner bonded the same
+// key, with the same sequence, is refused here: with another coin, and also with the same coin (the
+// deposits credited again after a restart give the same transactions) under another anchor block.
+BOOST_AUTO_TEST_CASE(audit7_unbond_not_replayable_across_chains)
+{
+    ECC_Context ecc;
+    CKey validator, owner;
+    validator.MakeNewKey(/*fCompressed=*/true);
+    owner.MakeNewKey(/*fCompressed=*/true);
+    Consensus::PosParams params;
+    params.min_stake = 100;
+    const uint256 genesis{3};
+    const pos::Staking staking{params, genesis};
+    const uint160 owner_hash{owner.GetPubKey().GetID()};
+    const uint256 pubkey{XOnly(validator)};
+    std::array<unsigned char, 64> pop;
+    BOOST_REQUIRE(validator.SignSchnorr(pos::BondPopHash(owner_hash, genesis), pop, nullptr, uint256{}));
+    const auto bond_on{[&](sidechain::StoreOverlay& out, const COutPoint& spent, const uint256& anchor_point) {
+        std::string reason;
+        CMutableTransaction bond;
+        bond.vin.emplace_back(spent);
+        std::vector<unsigned char> owner_sig;
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::BondMessage(pubkey, 10000, spent, genesis)), owner_sig));
+        bond.vout.emplace_back(10000, pos::BondScript(pubkey, owner_hash, pop, owner_sig));
+        BOOST_REQUIRE_MESSAGE(staking.ApplyTx(out, CTransaction{bond}, 1, 0, reason, anchor_point), reason);
+        const auto record{pos::GetValidator(out, pubkey)};
+        BOOST_CHECK(record->first_bond == spent);
+        BOOST_CHECK(record->first_bond_anchor == anchor_point);
+    }};
+    const auto unbond_tx{[&](const COutPoint& first_bond, const uint256& anchor) {
+        pos::Unbond u;
+        u.pubkey = pubkey;
+        u.amount = pos::UNBOND_ALL;
+        u.sequence = 0;
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(pubkey, u.amount, u.sequence, first_bond, anchor, genesis)), u.signature));
+        CMutableTransaction tx;
+        tx.vout.emplace_back(0, pos::UnbondScript(u));
+        return CTransaction{tx};
+    }};
+    const COutPoint coin{Txid::FromUint256(uint256{0x11}), 0}, other_coin{Txid::FromUint256(uint256{0x22}), 1};
+    const uint256 anchor_a{0xA1}, anchor_b{0xB2};
+    // Chain A: bonded, then unbonded (the unbond is public).
+    sidechain::EmptyStore empty_a;
+    sidechain::StoreOverlay chain_a{empty_a};
+    bond_on(chain_a, coin, anchor_a);
+    const CTransaction unbond_a{unbond_tx(coin, anchor_a)};
+    std::string reason;
+    BOOST_CHECK_MESSAGE(staking.ApplyTx(chain_a, unbond_a, 2, 0, reason, anchor_a), reason);
+    // Chain B, same genesis, keys, owner and sequence, and the same first coin, under another anchor:
+    // A's unbond is no unbond here; B's own is.
+    sidechain::EmptyStore empty_b;
+    sidechain::StoreOverlay chain_b{empty_b};
+    bond_on(chain_b, coin, anchor_b);
+    BOOST_CHECK(!staking.ApplyTx(chain_b, unbond_a, 2, 0, reason, anchor_b));
+    BOOST_CHECK_EQUAL(reason, "bad-pos-unbond-sig");
+    BOOST_CHECK_EQUAL(pos::GetValidator(chain_b, pubkey)->bonded, 10000);
+    BOOST_CHECK_MESSAGE(staking.ApplyTx(chain_b, unbond_tx(coin, anchor_b), 2, 0, reason, anchor_b), reason);
+    BOOST_CHECK_EQUAL(pos::GetValidator(chain_b, pubkey)->bonded, 0);
+    // Chain C, the same anchor block as A but another first coin: refused too.
+    sidechain::EmptyStore empty_c;
+    sidechain::StoreOverlay chain_c{empty_c};
+    bond_on(chain_c, other_coin, anchor_a);
+    BOOST_CHECK(!staking.ApplyTx(chain_c, unbond_a, 2, 0, reason, anchor_a));
+    BOOST_CHECK_EQUAL(reason, "bad-pos-unbond-sig");
+    // Before a chain's first anchor (no anchor block to name: every chain of the genesis would name the
+    // same nothing), no first bond: so no unbond of one chain instance can serve on another.
+    for (int instance{0}; instance < 2; ++instance) {
+        sidechain::EmptyStore empty;
+        sidechain::StoreOverlay unanchored{empty};
+        CMutableTransaction bond;
+        bond.vin.emplace_back(coin);
+        std::vector<unsigned char> owner_sig;
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::BondMessage(pubkey, 10000, coin, genesis)), owner_sig));
+        bond.vout.emplace_back(10000, pos::BondScript(pubkey, owner_hash, pop, owner_sig));
+        BOOST_CHECK(!staking.ApplyTx(unanchored, CTransaction{bond}, 1, 0, reason, uint256{}));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-bond-unanchored");
+        BOOST_CHECK(!pos::GetValidator(unanchored, pubkey));
+        BOOST_CHECK(!staking.ApplyTx(unanchored, unbond_tx(coin, uint256{}), 2, 0, reason, uint256{}));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-unbond-unknown");
+    }
+    // A top-up (not a first bond) needs none: the binding is the first bond's.
+    BOOST_CHECK(pos::GetValidator(chain_c, pubkey)->first_bond_anchor == anchor_a);
+}
+
+// AUDIT 7, finding 3: on a chain, the first bond records the newest anchor block (FastState::
+// anchor_point), and the node's unbond, made as the wallet makes it, is taken.
+BOOST_FIXTURE_TEST_CASE(audit7_first_bond_anchor_on_chain, FastBlocksSetup)
+{
+    StartPos();
+    COutPoint coin;
+    CTxOut spent{Fund(COIN, coin)};
+    const COutPoint first{coin};
+    Accept(Pay(coin, spent, {BondOut(keys[0], 100000, Owner(key), &key, coin)}));
+    Take(PosBlock(1));
+    const auto record{Validator(XOnly(keys[0]))};
+    BOOST_REQUIRE(record);
+    BOOST_CHECK(record->first_bond == first);
+    BOOST_CHECK(!record->first_bond_anchor.IsNull());
+    BOOST_CHECK(Index(record->first_bond_anchor) != nullptr);
+    BOOST_CHECK_EQUAL(StakingRules(TxWith({UnbondOut(keys[0], pos::UNBOND_ALL, record->unbond_seq, key)})), "");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

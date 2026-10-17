@@ -42,6 +42,13 @@ def assert_peg_balance(main, nodes):
         parts = ("utxos", "withdrawals", "pot", "bonded", "unbonding", "reserve", "rewards", "payouts")
         assert_equal(balance["total"], sum(balance[part] for part in parts))
         assert_equal(balance["total"], escrow_at(main, balance["mainheight"]))
+        # The node's own check (audit 7, finding 3) says the same, when the tip did not move meanwhile.
+        check = node.checkpegbalance()
+        if check["mainheight"] == balance["mainheight"]:
+            assert_equal(check["status"], "ok")
+            assert_equal(check["pegbalance"], balance["total"])
+            assert_equal(check["escrow"], balance["total"])
+            assert_equal(check["difference"], Decimal(0))
     return balance
 
 

@@ -464,7 +464,7 @@ RPCMethod createunbond()
     unbond.amount = all ? pos::UNBOND_ALL : amount;
     unbond.sequence = bond->unbond_seq;
     std::string signature_base64;
-    const SigningResult signing{pwallet->SignMessage(pos::UnbondMessage(pubkey, unbond.amount, unbond.sequence, Params().GetConsensus().hashGenesisBlock), PKHash{bond->owner}, signature_base64)};
+    const SigningResult signing{pwallet->SignMessage(pos::UnbondMessage(pubkey, unbond.amount, unbond.sequence, bond->first_bond, bond->first_bond_anchor, Params().GetConsensus().hashGenesisBlock), PKHash{bond->owner}, signature_base64)};
     if (signing != SigningResult::OK) throw JSONRPCError(RPC_WALLET_ERROR, "This wallet does not own the bond: " + SigningResultString(signing));
     unbond.signature = *Assert(DecodeBase64(signature_base64));
 

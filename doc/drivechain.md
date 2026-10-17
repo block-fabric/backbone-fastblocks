@@ -76,7 +76,7 @@ replaying every proposal and closure since its slot activated.
   for `getsidechainevents` and `listsidechaindeposits`. The pending bundles cost about 36 bytes per
   bundle per block for the sidechains that have any.
 * Per block, the changes it made to the database, to take it back in a reorg: only for the blocks
-  of the active chain less than `DRIVECHAIN_UNDO_DEPTH` (2880) below the last block flushed to disk
+  of the active chain less than `DRIVECHAIN_UNDO_DEPTH` (2880 in the template; 5760, a day of slots, in FastBlocks) below the last block flushed to disk
   (erased as the chainstate is flushed, not as blocks connect: a node that stops uncleanly restarts
   from the flushed block, and must find the undo data of every block a reorg from there can reach). A reorg deeper than that derives the
   database from the blocks (slow, and impossible on a pruned node, which cannot reorg that deep in

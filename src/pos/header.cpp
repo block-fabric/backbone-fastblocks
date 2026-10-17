@@ -114,6 +114,21 @@ bool IsValidPayee(const CScript& payee)
     return type != TxoutType::NONSTANDARD && type != TxoutType::NULL_DATA;
 }
 
+bool IsRewardPayee(const CScript& payee)
+{
+    std::vector<std::vector<unsigned char>> solutions;
+    switch (Solver(payee, solutions)) {
+    case TxoutType::PUBKEYHASH:
+    case TxoutType::SCRIPTHASH:
+    case TxoutType::WITNESS_V0_KEYHASH:
+    case TxoutType::WITNESS_V0_SCRIPTHASH:
+    case TxoutType::WITNESS_V1_TAPROOT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 uint32_t PosBits(const uint256& pow_limit) { return UintToArith256(pow_limit).GetCompact(); }
 
 } // namespace pos

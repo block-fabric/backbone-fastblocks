@@ -440,7 +440,7 @@ bool FastBlocksHooks::RecordIndependent(const std::string& reject_reason) const
         "bad-pos-ticket-payee", "bad-pos-ack-anchored", "bad-pos-ack-chain", "bad-pos-unanchored",
         "bad-pos-evidence-not-bmm", "bad-pos-evidence-count", "bad-pos-evidence-output", "bad-pos-evidence-kind", "bad-pos-evidence-slot",
         "bad-pos-evidence-same", "bad-pos-evidence-late", "bad-pos-evidence-known", "bad-pos-evidence-banned",
-        "bad-pos-bond", "bad-pos-bond-amount", "bad-pos-bond-owner", "bad-pos-bond-owner-sig", "bad-pos-bond-pop", "bad-pos-bond-tombstoned",
+        "bad-pos-bond", "bad-pos-bond-amount", "bad-pos-bond-owner", "bad-pos-bond-owner-sig", "bad-pos-bond-pop", "bad-pos-bond-tombstoned", "bad-pos-bond-unanchored",
         "bad-pos-unbond", "bad-pos-unbond-value", "bad-pos-unbond-unknown", "bad-pos-unbond-sequence", "bad-pos-unbond-amount",
         "bad-pos-unbond-remainder", "bad-pos-unbond-sig",
     };
@@ -804,7 +804,15 @@ bool FastBlocksHooks::BeforePegStep(sidechain::State& state, const CBlock& block
     std::vector<CTxOut> staking_owed;
     const auto staked{m_staking.PegStep(out, block.GetHash(), fast.anchors, anchor_slot, EpochOf(earliest, m_params), set_epoch, staking_owed)};
     const int64_t paid_out{pay + staked.release};
-    if (paid_out > 0) owed_tx.emplace_back(paid_out, payee);
+    // A BMM block's first coinbase output takes the pot only if it is an address (IsRewardPayee): a
+    // payout, when the queue is behind, is owed at later peg steps, and a script no block can carry
+    // would stop them all (audit 7, finding 1). Else the pot goes to the reserve, which pays it out
+    // with the pots to come. (A ticket's payee is checked when the ticket is: bad-pos-ticket-payee.)
+    if (paid_out > 0 && !pos_block && !IsRewardPayee(payee)) {
+        m_staking.ToReserve(out, paid_out);
+    } else if (paid_out > 0) {
+        owed_tx.emplace_back(paid_out, payee);
+    }
     owed_tx.insert(owed_tx.end(), staking_owed.begin(), staking_owed.end());
     return true;
 }
@@ -813,7 +821,8 @@ bool FastBlocksHooks::ApplyTx(sidechain::State& state, const CTransaction& tx, i
 {
     // Bonds and unbonds: an unbond is paid unbonding_anchors after the anchors of the chain so far.
     ++m_tx_rule_checks;
-    return m_staking.ApplyTx(state.Writable(), tx, height, FAST_STATE.Get(state.View()).anchors, reject_reason);
+    const FastState fast{FAST_STATE.Get(state.View())};
+    return m_staking.ApplyTx(state.Writable(), tx, height, fast.anchors, reject_reason, fast.anchor_point);
 }
 
 std::optional<std::vector<std::vector<unsigned char>>> FastBlocksHooks::TxRuleKeys(const CTransaction& tx) const { return ValidatorRuleKeys(tx); }

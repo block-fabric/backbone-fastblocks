@@ -74,6 +74,29 @@ slot: `nPowTargetSpacing` is the slot, 15 s on the networks (60 s before the
 slot was used, which gave initial block download half the headers timeout it
 needs).
 
+Counts of blocks that stand for durations were rescaled with the 15-second slot
+(audit 7, finding 4):
+
+- `DRIVECHAIN_UNDO_DEPTH` (the deepest reorg: blocks below it lose their
+  drivechain undo data, and a pruned node keeps the blocks above it whatever
+  its target) is 5760 blocks, 24 hours of slots (2880 were 12 hours at 15 s;
+  the template's 2880 are two days of one-minute blocks). 5760 full blocks of
+  1.5 MB with their undo data (about 9.9 GB) fit the least prune target of
+  10000 MiB, so the target still covers what the undo depth keeps;
+- the block download timeout counts in a minute per block at least (Bitcoin's
+  rule: one block interval, plus half of one per other peer downloading), not
+  15 seconds for a block of up to 1.5 MB, which slow links (Tor) missed;
+- a pruned node offers the blocks it keeps less an hour (`MinBlocksToKeep`,
+  5760 here), not Bitcoin's 288 less an hour of slots (48, below zero under
+  12.5-second slots);
+- the budget of unchecked headers stays 10000 a peer (41.7 hours of slots; see
+  "The limit of a long branch"), for the memory bound.
+
+Jailing (`liveness_min_assigned`, 20 of a 40-slot epoch) is a decision left as
+it is (audit 7, finding 6: with the test network's stakes, an offline large
+validator is jailed after about 2.3 hours on average, a small one never; its
+slots stay empty meanwhile).
+
 Without enough validators a network has no PoS blocks: it is the template's
 chain, merged mined only (and its BMM blocks carry the transactions). That is
 how the main and test networks start: validators bond, and once a validator set
@@ -468,11 +491,16 @@ Each against any number of peers, reconnections and new addresses.
   node takes such headers only on a branch that leaves its chain at or above its
   final block (`bad-pos-fork-too-deep`), which its side's anchors, net of the
   commitments it skipped (the other side's), have not covered `final_anchors`
-  times; with an anchor in every mainchain block (about 20 slots apart), the
-  other side leads within 10000 slots as long as the node's side made fewer
-  than about 500 anchors since the fork: a partition of three days and more in
-  which both sides anchored about as often, or one whose blocks past the first
-  epochs weigh more than 32 MiB before the branch leads (five full blocks). The
+  times. The other side's headers are one a slot (15 s), so 10000 of them are
+  41.7 hours of its blocks: the limit is a partition of more than about 40
+  hours in which both sides anchored about as often (an anchor in every
+  mainchain block, four slots apart), or one whose blocks past the first
+  epochs weigh more than 32 MiB before the branch leads (some 22 full blocks).
+  (With 30-second slots it was some 83 hours; audit 7, finding 4. The budget
+  stays at 10000 headers: twice that would put the worst case of unchecked
+  headers node-wide, 19 x 20000 + 8 x 500, over the 200 MiB that
+  `network_parameters` holds it to. Past the limit, the operator's steps below
+  apply.) The
   node cannot take more without a new denial of service: before the branch
   leads it cannot tell it from an attacker's, since a header it cannot check
   counts an anchor for any commitment on record after the last one below it
@@ -582,6 +610,33 @@ commitments this is the number of anchors that cover the block. Finality is
 what a node knows: one that never saw a ticket counts its commitment against
 every fork.
 
+**Forks below the window** (audit 7, finding 2). The newest 4 · `final_anchors`
++ 8 anchors are placed exactly; forks below them were not looked at, so a
+bidder that won more commitments in a row than that since a fork, and kept the
+blocks to itself until the chain had made as many anchors again, took back
+blocks shown as final. Now every fork down to genesis is counted
+(`DeepForkMargin`), conservatively: every commitment on record that the chain
+skipped since the fork's last shared anchor counts for it, known or not. For a
+fork at F (A: the chain's anchors, from its fork-choice key; C: the commitments
+on record):
+
+    margin(F) = (anchors after F, less those of blocks at or below F)
+              − (commitments after the shared one − anchors after F)
+
+The part that does not change with the tip (the forks at or below the block
+before the one the oldest walked acknowledgement anchors) is kept between calls
+as one maximum, and only the blocks the window left since are walked: the whole
+chain once after a start, then a few blocks per tip (counted again only where
+a mainchain reorg changed the record). Commitments on record from before the
+genesis could be known (mainchain median time two hours or more before
+`genesis_time`, `FINALITY_RECORD_MARGIN`) are not counted: a new genesis is
+published at its `genesis_time` or later. Commitments of another chain of the
+slot made since (an old testnet chain still merged mined after a restart) count
+like any skipped one, so "final" waits until the new chain has that many more
+anchors; stop the old chain's merged mining before a restart's genesis time.
+Wallets see fewer final blocks than before only after a run of skipped
+commitments, never more.
+
 `getblock` gives a block's `finality` (`status`, `anchors`), and its `kind`
 (`pos` or `bmm`), `slot`, `proposer` and `ack`, and for a merged mined block the
 `mainheight` of the mainchain block that committed to it; `getblockchaininfo` the
@@ -618,7 +673,17 @@ which the owner's would then need a signature for.
 
 **Unbond** (`createunbond`): an output of value 0, `OP_RETURN 0xDC'UNB' |
 validator key | amount (8) | sequence (4) | signature (65)`, the owner's signed
-message `FastBlocks unbond <key> <amount> <sequence> <genesis>`; an amount of 0
+message `FastBlocks unbond <key> <amount> <sequence> <txid>:<n> <anchor>
+<genesis>`, naming the first coin the validator's first bond spent and the
+newest anchor block of the chain when that bond was applied (`firstbond` and
+`firstbondanchor` in `getvalidator`; audit 7, finding 3). An unbond signed on
+another chain with the same genesis, where the same owner bonded the same key,
+with the same sequence, is no unbond here: its first bond spent another coin,
+or, if it spent the same one (deposits credited again after a restart give the
+same transactions), it did so under another anchor block, a block of that chain
+only. (The block that confirms the bond is not known to the rules of a
+transaction, which the mempool applies too; the anchor block before it is
+state.) An amount of 0
 (`all` in the message) unbonds all that is bonded when the unbond is applied.
 The sequence is the validator's next: an unbond counts once, and each top-up of
 the bond moves it on, so that an unbond signed before a top-up (and not mined:
@@ -637,6 +702,7 @@ unbonding.
 | The owner it names signed it (its amount and the transaction's first input), the first bond too | `bad-pos-bond-owner-sig` |
 | Its proof of possession verifies | `bad-pos-bond-pop` |
 | The key is not banned | `bad-pos-bond-tombstoned` |
+| A first bond comes after the chain's first anchor (it names the newest anchor block, which its unbonds name: audit 7, finding 3) | `bad-pos-bond-unanchored` |
 | An unbond output reads | `bad-pos-unbond` |
 | Its value is 0 | `bad-pos-unbond-value` |
 | The validator has an owner | `bad-pos-unbond-unknown` |
@@ -750,6 +816,26 @@ penalty, paid to the script of its coinbase's first output at the next peg
 step (table `0x54`), unless its leader is the offender (a proof against
 itself): then nothing, its share to the reserve too; the rest goes to a reserve that each anchor pays
 1/`pot_reserve_anchors` of (rounded up) with the pot, to the anchor's payee.
+
+**Only addresses are paid** (consensus, `IsRewardPayee`; audit 7, finding 1).
+The reward is owed to a script the carrier's maker chose, and a payout is owed
+until a peg step pays it. A script no block can carry (the pot's own
+`OP_RETURN 0xDE504F54`, which every BMM block then had to pay against
+`bad-pos-pot-not-pos`, or 1000 `OP_CHECKMULTISIG`, 80,000 sigops, which put
+every peg step with any other signature check over the limit) stopped every peg
+step, so blocks of stake stopped after `max_unanchored_slots` and the chain
+with them, for good. So the reward is paid only to a P2PKH, P2SH, P2WPKH, P2WSH
+or P2TR script (34 bytes and 4 sigops at most, what the payouts of a block are
+sized for; never one of the chain's tagged scripts). Any other first output is
+paid nothing, and the reward goes to the reserve, as for a proof against
+itself. That covers each way to the carrier's first output: a leader of a
+later slot (two keys of the attacker, or someone's accidental double
+signature), a BMM block that carries the proof (one key and a BMM win), and a
+BMM block's own pot (below, "Fees and the pot"), which a backlog of payouts
+could defer to a later peg step. The producer pays its share to an address
+(`-validatorpayout`, a wallet address or the validator key's P2WPKH), and a
+merged miner's coinbase script is a wallet address, so honest blocks are paid
+as before.
 
 **Peg actions of an anchor** (before the template's, `BeforePegStep`): the pot
 and the share of the reserve to the payee; unbonds due and rewards owed; the
@@ -909,10 +995,11 @@ through the chain interface's `getCoinbaseRoles`) is
   wallet, else the first validator key's P2WPKH address);
 - **anchor**: in a block that takes the peg actions (an acknowledgement, or a
   merged mined block), the pot and the share of the reserve paid to the
-  anchor's payee (the ticket's, or the merged mined block's first output);
+  anchor's payee (the ticket's, or the merged mined block's first output if
+  it is an address);
 - **reporter**: the reward for a proof that a leader signed twice, paid at the
   peg step after the block that carried the proof to that block's first
-  output's script.
+  output's script (if it is an address; otherwise to the reserve).
 
 The rest (a merged mined block's first output, deposits, refunds, unbonds) is
 "mined", as before. A block's payouts come after its first output in this
@@ -995,7 +1082,12 @@ A PoS block's producer keeps half its fees (output 0); the other half goes to
 a pot output (`OP_RETURN 0xDE504F54`), which takes the coins out of
 circulation into the state. An acknowledgement pays the pot accrued up to P
 to the ticket's payee; a BMM block pays the pot accrued up to its parent to
-its first output's script. Bidders bid for the pot on the mainchain, so its
+its first output's script, if that is an address (`IsRewardPayee`, above:
+P2PKH, P2SH, P2WPKH, P2WSH or P2TR); otherwise the pot, and the share of the
+reserve that anchor releases, go to the reserve (consensus; audit 7, finding 1:
+a payout to a script no block can carry, owed when the payout queue was behind,
+stopped the peg steps after it). A ticket's payee is checked when the ticket is
+(`bad-pos-ticket-payee`). Bidders bid for the pot on the mainchain, so its
 value reaches the mainchain's miners.
 
 ## Peg balance
@@ -1011,6 +1103,14 @@ leaves is lost) and coins burned (`OP_RETURN` outputs), `total` is the escrow
 the mainchain held for slot 5 after the block `mainheight`; with them, less.
 Every FastBlocks functional test checks this on every node after every step
 (`test_framework/fastblocks.py`, `assert_peg_balance`).
+
+`checkpegbalance` (audit 7, finding 3) asks the mainchain node for the escrow
+of the slot after the block `mainheight` (`listsidechaindeposits`) and compares:
+`status` `ok` when the escrow covers `total`, `deficit` when the chain holds
+coins the escrow does not back (a bundle of another chain of the slot was paid:
+an earlier test network's, say), with `escrow` and `difference`. Run it after
+every restart of a network from a new genesis. (Not at start-up: it reads the
+whole UTXO set and the mainchain's escrow changes.)
 
 ## Producer and anchorer
 
@@ -1043,6 +1143,15 @@ Every FastBlocks functional test checks this on every node after every step
   keeps the key, and so must keep what it signed. The `validator_protection.dat`
   of older versions, in the data directory, is read too (the highest slot of
   each key) and its slots written to the new file at start.
+- The file names the chain's genesis (format 2, `fastblocks-slashing-protection
+  2 <genesis>`; audit 7, finding 3). A file of another genesis counts for
+  nothing (a block signed on another chain names its genesis in the signature:
+  it is no block here, nor half a proof), and is kept beside as
+  `<file>.<genesis>.old`: a test network restarted from a new genesis whose
+  slots count from a later time signs again without anyone deleting the file.
+  A file of format 1 (no genesis: written before) counts, whatever chain it
+  was for, and becomes format 2 at the next slot signed; so at the restart
+  that brings format 2, delete it by hand if the genesis time moved later.
 - A slot whose block could not be made before the slashing protection noted it
   (nothing signed: the node still taking in a block that came as the slot
   started, the tip moving while the block was built, the seed of the epoch not
@@ -1308,8 +1417,8 @@ Unchanged: `stall_seconds`, `seed_lookahead_seconds`, `max_future_seconds`
 the same length); the budgets of unchecked headers and their bytes (counts
 of headers, not durations); the producer's retry (a third of the slot) and the
 past limit of a header's slot (`MAX_FUTURE_BLOCK_TIME` / slot) follow the slot.
-A validator's slashing protection file (the last slot each key signed) stays
-safe across the change on the test network: its genesis time is the same, so
+A validator's slashing protection file (the last slot each key signed) stayed
+safe across the change on the test network: its genesis time was the same, so
 the slot of a moment under 15-second slots is twice its slot under 30-second
 ones, above any slot signed before; a node that never signs a slot at or below
 the one it signed last refuses nothing it should sign now.
@@ -1719,6 +1828,35 @@ The security review of the attack8 fix found two issues in `BlocksCommittedBy`
   state after, which knows no other leader, so no block it took fails.
   `review8_forged_signature_failing_against_the_record`. Plain sidechains have
   no signature in their blocks: nothing to check first.
+
+## Audit 7 (2026-10-16): the 15-second chain
+
+Six findings (`~/skydoge/audit/2026-10-16-audit-7-C-fastblocks.md`), each fixed
+with a regression test (`fastblocks_tests.cpp`, `audit7_*`, from the audit's
+proofs of concept: each fails before its fix):
+
+1. **CRITICAL, rewards to any script.** A proof's reward was owed to the
+   carrier's first coinbase output verbatim (and a BMM block's pot to its own),
+   so a script no block can carry (the pot's, 80,000 sigops) made every later
+   peg step invalid and halted the chain. Only addresses are paid now
+   (`IsRewardPayee`: P2PKH, P2SH, P2WPKH, P2WSH, P2TR); anything else goes to
+   the reserve. Consensus. ("Staking", "Fees and the pot".)
+2. **MEDIUM, finality's window.** Forks below the newest 4k+8 anchors were not
+   looked at; every fork down to genesis is now (`DeepForkMargin`, "Finality").
+3. **MEDIUM, one genesis for every testnet restart.** The test network and
+   signet have a new genesis (testnet `90349e06…1b14`, signet `45c28d19…4301`,
+   `genesis_time` 2026-10-17 08:00 UTC); unbonds name the first bond's coin and
+   the anchor block it was applied under; slashing protection files name their
+   genesis; `checkpegbalance` compares the chain's coins with the escrow.
+   Restarting the test network: stop the old chain's merged mining first (its
+   commitments after the genesis time count against "final"), delete each
+   validator's `<key file>.protection` once (format 1, slots of the old
+   genesis time, which was earlier), and run `checkpegbalance` once synced.
+4. **LOW, counts of blocks.** Undo depth 5760 (a day), the block download
+   timeout at least a minute a block, pruned peers' window; the unchecked
+   header budget kept (memory bound).
+5. **INFO.** Main had the old prune minimum: the template's 10000 MiB merged.
+6. **INFO, jailing.** Left as decided (see "Counts of blocks").
 
 ## Deviations from the design (phase 5)
 

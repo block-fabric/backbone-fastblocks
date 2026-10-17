@@ -22,7 +22,8 @@ bool IsAnchorBlock(const CBlock& block)
 std::optional<CScript> AnchorPayee(const CBlock& block)
 {
     if (block.vtx.empty() || block.vtx[0]->vout.empty()) return std::nullopt;
-    if (!IsPosHeader(block)) return block.vtx[0]->vout[0].scriptPubKey;
+    // (A BMM block whose first output is no address pays its pot to the reserve: IsRewardPayee.)
+    if (!IsPosHeader(block)) return IsRewardPayee(block.vtx[0]->vout[0].scriptPubKey) ? std::optional{block.vtx[0]->vout[0].scriptPubKey} : std::nullopt;
     PosSections sections;
     if (!PosSections::Decode(block.vSections, sections) || !sections.ack) return std::nullopt;
     return sections.ack->ticket.payee;
@@ -33,6 +34,8 @@ std::vector<CScript> ReporterScripts(const CBlock& block, const std::optional<ui
     std::vector<CScript> scripts;
     if (block.vtx.empty() || block.vtx[0]->vout.empty()) return scripts;
     const CScript& reporter{block.vtx[0]->vout[0].scriptPubKey};
+    // Rewards to a script that is no address go to the reserve (IsRewardPayee).
+    if (!IsRewardPayee(reporter)) return scripts;
     if (IsPosHeader(block)) {
         PosSections sections;
         if (!PosSections::Decode(block.vSections, sections)) return scripts;
@@ -57,7 +60,7 @@ std::vector<CoinbaseRole> CoinbaseRoles(const CBlock& block, const std::vector<C
     if (outs.empty()) return roles;
     if (IsPosHeader(block)) roles[0] = CoinbaseRole::PRODUCER;
     const auto payee{AnchorPayee(block)};
-    if (!payee || !IsAnchorBlock(block)) return roles;
+    if (!IsAnchorBlock(block)) return roles;
     // A payout: after the first output, with a value, to a script that can be spent.
     const auto payout{[&](size_t i) { return i > 0 && outs[i].nValue > 0 && !outs[i].scriptPubKey.IsUnspendable(); }};
     // The rewards: the last payouts to each reporter's script, as many as it is owed.
@@ -78,7 +81,7 @@ std::vector<CoinbaseRole> CoinbaseRoles(const CBlock& block, const std::vector<C
             break;
         }
     }
-    for (size_t i{end}; i-- > 1;) {
+    for (size_t i{end}; payee && i-- > 1;) {
         if (payout(i) && outs[i].scriptPubKey == *payee) {
             roles[i] = CoinbaseRole::ANCHOR;
             break;

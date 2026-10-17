@@ -152,6 +152,13 @@ static const unsigned int BLOCK_DOWNLOAD_WINDOW = 1024;
 static constexpr double BLOCK_DOWNLOAD_TIMEOUT_BASE = 1;
 /** Additional block download timeout per parallel downloading peer (i.e. 5 min) */
 static constexpr double BLOCK_DOWNLOAD_TIMEOUT_PER_PEER = 0.5;
+/**
+ * The block interval the download timeout counts in, at least: FastBlocks' 15-second slot would give
+ * a peer 15 seconds for a block of up to 1.5 MB (audit 7, finding 4), which a slow link (Tor) misses.
+ * A minute, as on the template's one-minute sidechains: 25 kB/s for a full block, before the 50 % a
+ * peer for the others downloading.
+ */
+static constexpr std::chrono::seconds MIN_BLOCK_DOWNLOAD_INTERVAL{60};
 /** Maximum number of headers to announce when relaying blocks with headers message.*/
 static const unsigned int MAX_BLOCKS_TO_ANNOUNCE = 8;
 /** Minimum blocks required to signal NODE_NETWORK_LIMITED */
@@ -4763,7 +4770,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             }
             // If pruning, don't inv blocks unless we have on disk and are likely to still have
             // for some reasonable time window (1 hour) that block relay might require.
-            const int nPrunedBlocksLikelyToHave = MIN_BLOCKS_TO_KEEP - 3600 / m_chainparams.GetConsensus().nPowTargetSpacing;
+            // (A sidechain node keeps MinBlocksToKeep blocks, DRIVECHAIN_UNDO_DEPTH; never below none: at
+            // FastBlocks' 15-second slots Bitcoin's 288 blocks are less than an hour. Audit 7, finding 4.)
+            const int nPrunedBlocksLikelyToHave = std::max<int>(0, MinBlocksToKeep(m_chainparams.GetConsensus()) - 3600 / m_chainparams.GetConsensus().nPowTargetSpacing);
             if (m_chainman.m_blockman.IsPruneMode() && (!(pindex->nStatus & BLOCK_HAVE_DATA) || pindex->nHeight <= m_chainman.ActiveChain().Tip()->nHeight - nPrunedBlocksLikelyToHave)) {
                 LogDebug(BCLog::NET, " getblocks stopping, pruned or too old block at %d %s\n", pindex->nHeight, pindex->GetBlockHash().ToString());
                 break;
@@ -6768,7 +6777,8 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         if (state.vBlocksInFlight.size() > 0) {
             QueuedBlock &queuedBlock = state.vBlocksInFlight.front();
             int nOtherPeersWithValidatedDownloads = m_peers_downloading_from - 1;
-            if (current_time > state.m_downloading_since + std::chrono::seconds{consensusParams.nPowTargetSpacing} * (BLOCK_DOWNLOAD_TIMEOUT_BASE + BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * nOtherPeersWithValidatedDownloads)) {
+            const std::chrono::seconds block_interval{std::max(std::chrono::seconds{consensusParams.nPowTargetSpacing}, MIN_BLOCK_DOWNLOAD_INTERVAL)};
+            if (current_time > state.m_downloading_since + block_interval * (BLOCK_DOWNLOAD_TIMEOUT_BASE + BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * nOtherPeersWithValidatedDownloads)) {
                 LogInfo("Timeout downloading block %s, %s", queuedBlock.pindex->GetBlockHash().ToString(), node.DisconnectMsg());
                 node.fDisconnect = true;
                 return true;

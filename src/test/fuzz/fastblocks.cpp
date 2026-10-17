@@ -702,7 +702,7 @@ struct FastChain {
         default: unbond.amount = fdp.ConsumeIntegralInRange<CAmount>(1, record->bonded + 1);
         }
         unbond.sequence = record->unbond_seq + (fdp.ConsumeIntegralInRange<int>(0, 15) == 0);
-        if (!key.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, Genesis())), unbond.signature)) return;
+        if (!key.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, record->first_bond, record->first_bond_anchor, Genesis())), unbond.signature)) return;
         if (const auto tx{Spend(fdp, {CTxOut{0, pos::UnbondScript(unbond)}})}) {
             (void)WITH_LOCK(::cs_main, return Chainman().ProcessTransaction(MakeTransactionRef(*tx)));
         }
@@ -1368,12 +1368,12 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
                     // (0 is UNBOND_ALL: all that is bonded then.)
                     unbond.amount = fdp.ConsumeBool() && record ? record->bonded : fdp.ConsumeIntegralInRange<CAmount>(0, 3 * params.min_stake);
                     unbond.sequence = (record ? record->unbond_seq : 0) + fdp.ConsumeIntegralInRange<uint32_t>(0, 1);
-                    assert(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, genesis)), unbond.signature));
+                    assert(owner.SignCompact(MessageHash(pos::UnbondMessage(unbond.pubkey, unbond.amount, unbond.sequence, record ? record->first_bond : COutPoint{}, record ? record->first_bond_anchor : uint256{}, genesis)), unbond.signature));
                     tx.vout.emplace_back(fdp.ConsumeIntegralInRange<int>(0, 15) == 0 ? 1 : 0, pos::UnbondScript(unbond));
                 }
             }
             std::string reason;
-            kept = staking.ApplyTx(step, CTransaction{tx}, fdp.ConsumeIntegralInRange<int>(0, 1000), anchors, reason);
+            kept = staking.ApplyTx(step, CTransaction{tx}, fdp.ConsumeIntegralInRange<int>(0, 1000), anchors, reason, uint256::ONE);
             assert(kept || !reason.empty());
             // (A bond counted, if the transaction is: one that does not read or count fails it.)
             if (kept) in += bonding;

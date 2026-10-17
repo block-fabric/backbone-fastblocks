@@ -21,6 +21,8 @@
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
+#include <sidechain/follower.h>
+#include <sidechain/mainclient.h>
 #include <sidechain/state.h>
 #include <txdb.h>
 #include <univalue.h>
@@ -162,6 +164,8 @@ std::vector<RPCResult> BondFields()
             }},
         }},
         {RPCResult::Type::NUM, "unbondsequence", "The sequence its next unbond has"},
+        {RPCResult::Type::STR, "firstbond", "The first coin its first bond spent (txid:n), which its unbonds name; empty before a bond"},
+        {RPCResult::Type::STR_HEX, "firstbondanchor", "The newest anchor block of the chain when its first bond was applied, which its unbonds name too"},
         {RPCResult::Type::BOOL, "eligible", "Whether its stake lets it take part (not banned, enough bonded)"},
         {RPCResult::Type::NUM, "jaileduntilepoch", "Left out of the sets made before this epoch (0: never jailed)"},
         {RPCResult::Type::BOOL, "banned", "Signed two blocks for a slot: never in a set again"},
@@ -225,6 +229,8 @@ UniValue BondToJSON(const pos::ValidatorRecord& record, const Consensus::PosPara
     }
     bond.pushKV("unbonds", std::move(unbonds));
     bond.pushKV("unbondsequence", static_cast<uint64_t>(record.unbond_seq));
+    bond.pushKV("firstbondanchor", record.first_bond_anchor.GetHex());
+    bond.pushKV("firstbond", record.first_bond.IsNull() ? std::string{} : strprintf("%s:%u", record.first_bond.hash.GetHex(), record.first_bond.n));
     bond.pushKV("eligible", record.Eligible(params));
     bond.pushKV("jaileduntilepoch", record.jailed_until_epoch);
     bond.pushKV("banned", record.tombstoned);
@@ -1041,6 +1047,75 @@ void PushPegBalance(ChainstateManager& chainman, UniValue& result)
     result.pushKV("pegbalance", std::move(balance));
 }
 
+RPCMethod checkpegbalance()
+{
+    return RPCMethod{
+        "checkpegbalance",
+        "FastBlocks: compare the coins the chain holds against the mainchain's escrow (getsidechainstate's pegbalance) with what the\n"
+        "mainchain held in escrow for this sidechain's slot after the mainchain block the chain acted on, up to (asked of the mainchain\n"
+        "node). The chain holding more than the escrow (\"deficit\") means coins it cannot pay back: a withdrawal bundle of another chain\n"
+        "of the slot was paid (an earlier test network, say), or a fault. The escrow holding more is normal (fees left unclaimed, coins\n"
+        "burned). Run it after a restart of the chain (audit 7, finding 3).",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+        {
+            {RPCResult::Type::STR, "status", "\"ok\" (the escrow covers the chain's coins) or \"deficit\""},
+            {RPCResult::Type::NUM, "mainheight", "The mainchain block the chain has acted on, up to"},
+            {RPCResult::Type::STR_AMOUNT, "pegbalance", "The coins the chain holds against the escrow (getsidechainstate's pegbalance.total)"},
+            {RPCResult::Type::STR_AMOUNT, "escrow", "What the mainchain held in escrow for the slot after the block mainheight"},
+            {RPCResult::Type::STR_AMOUNT, "difference", "escrow less pegbalance: negative for a deficit"},
+        }},
+        RPCExamples{HelpExampleCli("checkpegbalance", "") + HelpExampleRpc("checkpegbalance", "")},
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (!pos::InstalledHooks()) throw JSONRPCError(RPC_MISC_ERROR, "This chain is not FastBlocks");
+    NodeContext& node{EnsureAnyNodeContext(request.context)};
+    ChainstateManager& chainman{EnsureChainman(node)};
+    if (!node.follower) throw JSONRPCError(RPC_MISC_ERROR, "This node does not follow a mainchain node");
+    UniValue state(UniValue::VOBJ);
+    PushPegBalance(chainman, state);
+    const UniValue& balance{state.find_value("pegbalance")};
+    const CAmount total{AmountFromValue(balance.find_value("total"))};
+    const int main_height{balance.find_value("mainheight").getInt<int>()};
+    const uint64_t slot{chainman.GetConsensus().sidechain.slot};
+    // The escrow after the block main_height: the total after the last escrow change at or below it
+    // (listsidechaindeposits, oldest first, by pages; heights from confirmations, as of one tip).
+    std::optional<CAmount> escrow;
+    try {
+        for (int attempt{0}; attempt < 3 && !escrow; ++attempt) {
+            const int tip_before{node.follower->Client().Call("getblockcount", UniValue{UniValue::VARR}).getInt<int>()};
+            CAmount found{0};
+            std::optional<std::string> after;
+            while (true) {
+                UniValue params(UniValue::VARR);
+                params.push_back(slot);
+                if (after) params.push_back(*after);
+                const UniValue changes{node.follower->Client().Call("listsidechaindeposits", params)};
+                for (const UniValue& change : changes.getValues()) {
+                    const int height{tip_before - change.find_value("confirmations").getInt<int>() + 1};
+                    if (height <= main_height) found = AmountFromValue(change.find_value("total"));
+                }
+                if (changes.size() < 1000) break;
+                after = changes.getValues().back().find_value("txid").get_str();
+            }
+            const int tip_after{node.follower->Client().Call("getblockcount", UniValue{UniValue::VARR}).getInt<int>()};
+            if (tip_after == tip_before) escrow = found;
+        }
+    } catch (const sidechain::MainClientError& e) {
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("The mainchain node did not answer: %s", e.what()));
+    }
+    if (!escrow) throw JSONRPCError(RPC_MISC_ERROR, "The mainchain tip kept moving: try again");
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("status", *escrow >= total ? "ok" : "deficit");
+    result.pushKV("mainheight", main_height);
+    result.pushKV("pegbalance", ValueFromAmount(total));
+    result.pushKV("escrow", ValueFromAmount(*escrow));
+    result.pushKV("difference", ValueFromAmount(*escrow - total));
+    return result;
+},
+    };
+}
+
 void RegisterPosRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
@@ -1054,6 +1129,7 @@ void RegisterPosRPCCommands(CRPCTable& t)
         {"sidechain", &setstaking},
         {"sidechain", &getstakinginfo},
         {"sidechain", &signbondpop},
+        {"sidechain", &checkpegbalance},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);

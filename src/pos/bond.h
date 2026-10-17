@@ -67,8 +67,15 @@ std::optional<Unbond> ParseUnbond(const CTxOut& out);
 /** What the validator key signs to bond for `owner` on the chain of `genesis_hash`. */
 uint256 BondPopHash(const uint160& owner, const uint256& genesis_hash);
 bool CheckBondPop(const uint256& pubkey, const uint160& owner, const std::array<unsigned char, 64>& pop, const uint256& genesis_hash);
-/** The message the owner signs to unbond ("all" for UNBOND_ALL). */
-std::string UnbondMessage(const uint256& pubkey, CAmount amount, uint32_t sequence, const uint256& genesis_hash);
+/**
+ * The message the owner signs to unbond ("all" for UNBOND_ALL): the validator, the amount, its unbond
+ * sequence, the first coin its first bond spent (ValidatorRecord::first_bond), the newest anchor block
+ * of the chain when that bond was applied (ValidatorRecord::first_bond_anchor) and the chain's genesis.
+ * The anchor block is of this chain instance only: an unbond of another chain with the same genesis (a
+ * test network restarted with the genesis it had, audit 7 finding 3), even one whose first bond spent
+ * the same coin (deposits credited again give the same transactions), is no unbond here.
+ */
+std::string UnbondMessage(const uint256& pubkey, CAmount amount, uint32_t sequence, const COutPoint& first_bond, const uint256& first_bond_anchor, const uint256& genesis_hash);
 /**
  * The message the owner signs to add a bond to its validator: the amount, and the first input of the
  * transaction (a coin is spent once: the signature is good for that transaction only).

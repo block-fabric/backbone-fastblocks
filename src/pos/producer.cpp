@@ -141,7 +141,8 @@ std::unique_ptr<Producer> Producer::FromArgs(node::NodeContext& node, const Fast
     const std::string key_name{fs::PathToString(key_path.filename())};
     const fs::path key_dir{key_path.parent_path()};
     auto protection{SlashingProtection::Open(key_dir / fs::PathFromString(key_name + ".protection"), key_dir,
-                                             fs::PathFromString(key_name + ".lock"), error, std::vector<fs::path>{args.GetDataDirNet() / fs::u8path("validator_protection.dat")})};
+                                             fs::PathFromString(key_name + ".lock"), error, std::vector<fs::path>{args.GetDataDirNet() / fs::u8path("validator_protection.dat")},
+                                             node.chainman->GetConsensus().hashGenesisBlock)};
     if (!protection) return nullptr;
     LogInfo("FastBlocks: block producer with %u validator key(s)", keys.size());
     auto producer{std::make_unique<Producer>(node, hooks, std::move(keys), std::move(payout), std::move(protection))};

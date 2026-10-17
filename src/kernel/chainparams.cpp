@@ -365,7 +365,10 @@ public:
         };
 
         // This chain is a sidechain of the Chains testnet.
-        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet", .genesis_time = 1791763200,
+        // A new genesis at each restart of the test network (audit 7, finding 3): a chain of an earlier
+        // start shares no genesis with this one, so it is no branch of it (its blocks, bonds, unbonds
+        // and signatures name another genesis). 2026-10-17 08:00 UTC; was "FastBlocks testnet", 1791763200.
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet 17/Oct/2026: a block every 15 seconds", .genesis_time = 1792224000,
                        .message_start = {0x66, 0x62, 0x6c, 0x02}, .default_port = 19155, .bech32_hrp = "tfbl"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
@@ -503,7 +506,8 @@ public:
         };
 
         // This chain is a sidechain of the Chains signet. Its own blocks are not signed.
-        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks signet", .genesis_time = 1791763200,
+        // A new genesis, as the test network's (audit 7, finding 3). Was "FastBlocks signet", 1791763200.
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks signet 17/Oct/2026: a block every 15 seconds", .genesis_time = 1792224000,
                        .message_start = {0x66, 0x62, 0x6c, 0x03}, .default_port = 39155, .bech32_hrp = "tfbl"});
         consensus.sidechain.main_activation_height = 0;
         // The Chains signet has the rules of its main network.

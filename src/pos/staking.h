@@ -60,6 +60,14 @@ struct ValidatorRecord {
     //! Signed two blocks for a slot: never in a set again, bonds refused.
     bool tombstoned{false};
     int32_t first_bond_height{-1};
+    //! The first coin the transaction of its first bond spent (what the owner's signature of it names):
+    //! unbonds name it (UnbondMessage), so that they serve on this chain only. Null before a first bond.
+    COutPoint first_bond;
+    //! The newest anchor block of this chain (FastState::anchor_point) when its first bond was applied:
+    //! a block of this chain instance, which unbonds name too (UnbondMessage). The coin alone could be
+    //! the same on two chains of one genesis (deposits credited again after a restart give the same
+    //! transactions); an anchor block, committed on the mainchain, is of one chain only.
+    uint256 first_bond_anchor;
 
     CAmount Unbonding() const;
     CAmount Weight() const { return bonded + genesis_stake; }
@@ -67,7 +75,7 @@ struct ValidatorRecord {
 
     SERIALIZE_METHODS(ValidatorRecord, obj)
     {
-        READWRITE(obj.owner, obj.bonded, obj.genesis_stake, obj.unbonding, obj.unbond_seq, obj.jailed_until_epoch, obj.tombstoned, obj.first_bond_height);
+        READWRITE(obj.owner, obj.bonded, obj.genesis_stake, obj.unbonding, obj.unbond_seq, obj.jailed_until_epoch, obj.tombstoned, obj.first_bond_height, obj.first_bond, obj.first_bond_anchor);
     }
     friend bool operator==(const ValidatorRecord&, const ValidatorRecord&) = default;
 };
@@ -140,12 +148,14 @@ public:
 
     /**
      * The bonds and unbonds of a transaction (sidechain::ChainHooks::ApplyTx). `anchors`: the anchors
-     * of the chain so far (an unbond is paid unbonding_anchors after).
-     * Reasons: bad-pos-bond (does not read), bad-pos-bond-amount, bad-pos-bond-pop, bad-pos-bond-tombstoned,
+     * of the chain so far (an unbond is paid unbonding_anchors after). `anchor_point`: the newest anchor
+     * block of the chain so far (FastState::anchor_point), which a first bond records (first_bond_anchor);
+     * a first bond before the chain's first anchor is refused (bad-pos-bond-unanchored).
+     * Reasons: bad-pos-bond (does not read), bad-pos-bond-amount, bad-pos-bond-pop, bad-pos-bond-tombstoned, bad-pos-bond-unanchored,
      * bad-pos-bond-owner; bad-pos-unbond (does not read), bad-pos-unbond-value (not 0), bad-pos-unbond-unknown,
      * bad-pos-unbond-sequence, bad-pos-unbond-amount, bad-pos-unbond-remainder, bad-pos-unbond-sig.
      */
-    bool ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason) const;
+    bool ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason, const uint256& anchor_point) const;
 
     struct PegStepResult {
         //! The share of the reserve released, for the pot's payee.
@@ -165,6 +175,9 @@ public:
      */
     PegStepResult PegStep(sidechain::StoreOverlay& out, const uint256& anchor, uint64_t anchors, int64_t slot, int64_t epoch, int64_t set_epoch, std::vector<CTxOut>& owed_tx) const;
 
+    /** Coins the chain could not pay to the reserve (a BMM block's pot whose payee is no address: IsRewardPayee). */
+    void ToReserve(sidechain::StoreOverlay& out, CAmount amount) const;
+
     /** A block of stake at `slot` made by `producer`; the leaders of the slots it skipped (`missed`) are charged. */
     void NoteLiveness(sidechain::StoreOverlay& out, int64_t slot, const uint256& producer, const std::vector<std::pair<int64_t, uint256>>& missed) const;
 
@@ -172,7 +185,8 @@ public:
      * Punish an offence a block carried proof of (checked by the caller: the slot's leader signed two
      * headers): slash_bps of its stake, a ban, the rest unbonded; 1/reporter_share_divisor of the
      * penalty to `reporter`, at the next peg step, the rest to the reserve. No reporter (the offender
-     * carried the proof itself): all of it to the reserve. Once: a banned validator loses nothing more.
+     * carried the proof itself), or one that is not an address (IsRewardPayee): all of it to the
+     * reserve. Once: a banned validator loses nothing more.
      * Reasons: bad-pos-evidence-known (punished before), bad-pos-evidence-banned (the validator is banned).
      */
     bool Punish(sidechain::StoreOverlay& out, const Offence& offence, const std::optional<CScript>& reporter, uint64_t anchors, std::string& reject_reason) const;

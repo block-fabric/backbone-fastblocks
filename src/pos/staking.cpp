@@ -221,7 +221,7 @@ void Staking::LoadGenesis(sidechain::StoreOverlay& out) const
     STAKE_STATE.Put(out, stake);
 }
 
-bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason) const
+bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason, const uint256& anchor_point) const
 {
     std::optional<StakeState> stake;
     for (const CTxOut& txout : tx.vout) {
@@ -234,6 +234,10 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const auto before{VALIDATORS.Get(out, bond->pubkey)};
             ValidatorRecord after{before.value_or(ValidatorRecord{})};
             if (after.tombstoned) return Fail(reject_reason, "bad-pos-bond-tombstoned");
+            // A first bond names the newest anchor block of the chain, which its unbonds name too: of
+            // this chain instance only. Before the chain's first anchor there is none (every chain of
+            // the genesis would name the same nothing): no first bond then (audit 7, finding 3).
+            if (after.first_bond_height < 0 && anchor_point.IsNull()) return Fail(reject_reason, "bad-pos-bond-unanchored");
             // The first bond names the owner; more bonds must name the same. The owner signs every bond
             // (its amount, and the first coin the transaction spends, so that the signature serves
             // once): otherwise anyone could top up a bond, by a satoshi, and so leave a remainder under
@@ -255,7 +259,11 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             after.owner = bond->owner;
             after.bonded += bond->amount;
             if (!MoneyRange(after.bonded)) return Fail(reject_reason, "bad-pos-bond-amount");
-            if (after.first_bond_height < 0) after.first_bond_height = height;
+            if (after.first_bond_height < 0) {
+                after.first_bond_height = height;
+                after.first_bond = tx.vin[0].prevout;
+                after.first_bond_anchor = anchor_point;
+            }
             PutValidator(out, bond->pubkey, before, after);
             if (!stake) stake = STAKE_STATE.Get(out);
             stake->bonded += bond->amount;
@@ -273,7 +281,7 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const CAmount remainder{before->bonded - amount};
             if (remainder != 0 && remainder < m_params.min_stake) return Fail(reject_reason, "bad-pos-unbond-remainder");
             CPubKey signer;
-            if (!signer.RecoverCompact(MessageHash(UnbondMessage(unbond->pubkey, unbond->amount, unbond->sequence, m_genesis)), unbond->signature) ||
+            if (!signer.RecoverCompact(MessageHash(UnbondMessage(unbond->pubkey, unbond->amount, unbond->sequence, before->first_bond, before->first_bond_anchor, m_genesis)), unbond->signature) ||
                 !signer.IsCompressed() || signer.GetID() != CKeyID{before->owner}) {
                 return Fail(reject_reason, "bad-pos-unbond-sig");
             }
@@ -409,6 +417,15 @@ Staking::PegStepResult Staking::PegStep(sidechain::StoreOverlay& out, const uint
     return PegStepResult{.release = release, .set_active = set.Active()};
 }
 
+void Staking::ToReserve(sidechain::StoreOverlay& out, CAmount amount) const
+{
+    if (amount <= 0) return;
+    LoadGenesis(out);
+    StakeState stake{STAKE_STATE.Get(out)};
+    stake.pot_reserve += amount;
+    STAKE_STATE.Put(out, stake);
+}
+
 void Staking::NoteLiveness(sidechain::StoreOverlay& out, int64_t slot, const uint256& producer, const std::vector<std::pair<int64_t, uint256>>& missed) const
 {
     const auto add{[&](int64_t at, const uint256& pubkey, bool made) {
@@ -455,8 +472,12 @@ bool Staking::Punish(sidechain::StoreOverlay& out, const Offence& offence, const
     std::erase_if(after.unbonding, [](const UnbondingEntry& entry) { return entry.amount == 0; });
 
     // The block that carried the proof is paid its share at the next peg step; the rest goes to the
-    // reserve. The offender carrying it itself is paid nothing: all of it to the reserve.
-    const CAmount reward{reporter && m_params.reporter_share_divisor > 0 ? penalty / m_params.reporter_share_divisor : 0};
+    // reserve. The offender carrying it itself is paid nothing: all of it to the reserve. So is a
+    // carrier whose first coinbase output is not an address (IsRewardPayee): the reward would be owed
+    // to that script at every peg step until paid, and a script no block can carry (the pot's, one of
+    // 80,000 sigops) stopped every peg step for good (audit 7, finding 1).
+    const bool payable{reporter && IsRewardPayee(*reporter)};
+    const CAmount reward{payable && m_params.reporter_share_divisor > 0 ? penalty / m_params.reporter_share_divisor : 0};
     if (reward > 0) {
         REWARDS.Put(out, stake.next_reward++, CTxOut{reward, *reporter});
         stake.rewards_owed += reward;
