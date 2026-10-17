@@ -104,6 +104,13 @@ struct PosParams {
     int64_t jail_epochs{1};
     //! Each anchor pays 1/pot_reserve_anchors of the pot's reserve (penalties) with the pot.
     int64_t pot_reserve_anchors{1440};
+    /**
+     * SidechainParams::main_activation_height, the mainchain block that activated this chain in its slot:
+     * the leader seed comes from mainchain blocks from it on only (below it, the seed has no mainchain
+     * hash). A new record of the mainchain starts there (Mainchain::Base), one kept from an earlier
+     * release at 0: the seed must not depend on which.
+     */
+    int main_activation_height{0};
 };
 
 } // namespace Consensus

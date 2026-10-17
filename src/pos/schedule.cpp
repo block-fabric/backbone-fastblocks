@@ -74,7 +74,10 @@ std::optional<int> SeedHeight(int64_t epoch, const Consensus::PosParams& params,
     // at or before the time (median times never go down along a chain).
     const auto last{record.GetBlock(tip)};
     if (!last || last->time <= time) return std::nullopt;
-    return record.TimeHeight(time).value_or(-1);
+    // Below the block that activated the chain in its slot, no block: the record may start there
+    // (Mainchain::Base), or below it (a record kept from an earlier release), with the same seed.
+    const int height{record.TimeHeight(time).value_or(-1)};
+    return height < params.main_activation_height ? -1 : height;
 }
 
 std::optional<uint256> EpochSeed(int64_t epoch, const Consensus::PosParams& params, const sidechain::Mainchain& record)

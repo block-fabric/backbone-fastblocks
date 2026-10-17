@@ -243,6 +243,7 @@ public:
                        .message_start = {0x66, 0x62, 0x6c, 0x01}, .default_port = 9155, .bech32_hrp = "fbl"});
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
+        consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
         // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -375,6 +376,7 @@ public:
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         // TODO: set it to the block that activates slot 5 on the test network, once it does.
         consensus.sidechain.main_activation_height = 8621; // the block that activated slot 5 on the test network
+        consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
@@ -510,6 +512,7 @@ public:
         MakeSidechain({.slot = 5, .genesis_message = "FastBlocks signet 17/Oct/2026: a block every 15 seconds", .genesis_time = 1792224000,
                        .message_start = {0x66, 0x62, 0x6c, 0x03}, .default_port = 39155, .bech32_hrp = "tfbl"});
         consensus.sidechain.main_activation_height = 0;
+        consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
         // The Chains signet has the rules of its main network.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -625,6 +628,7 @@ public:
             consensus.sidechain.enabled = true;
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.main_activation_height = opts.sidechain_activation_height;
+            consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
             consensus.sidechain.bundle_retry_delay = 5;
                 // A tenth of the regtest mainchain's withdrawal_min_score (30).
             consensus.sidechain.pending_min_score = 3;
