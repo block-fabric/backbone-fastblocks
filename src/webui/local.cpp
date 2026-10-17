@@ -13,21 +13,30 @@ namespace webui::local {
 
 std::map<std::string, Bridge::Thread> RpcMethods()
 {
-    // For example: {"listnames", Bridge::Thread::WORKER}, {"registername", Bridge::Thread::WORKER}.
+    // For example: {"listnames", Bridge::Thread::WORKER}.
     return {};
 }
 
 std::set<std::string> KeyedRpcMethods()
 {
-    // For example: {"registername"}.
+    // For example: {"listmynames"} (a method that reads with the keys).
     return {};
 }
 
-void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
+std::map<std::string, confirm::Method> ConfirmedRpcMethods()
+{
+    // For example: {"registername", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG,
+    //                                confirm::Generic("Register a name", "Register", "The wallet registers this name.", {"owner"}, {"fee"}),
+    //                                /*fee_unknown=*/true}}.
+    return {};
+}
+
+void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm, confirm::KeysFn keys)
 {
     (void)bridge;
     (void)node;
     (void)confirm;
+    (void)keys;
 }
 
 std::vector<std::string> CoinbaseRoles(interfaces::Chain& chain, const uint256& block)
