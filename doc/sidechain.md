@@ -154,7 +154,7 @@ than 10000 MiB less a block file and that margin: more than 10 GB of the most
 recent blocks and their undo data.
 
 Whatever the size, a pruned sidechain node also keeps the blocks of the last
-`DRIVECHAIN_UNDO_DEPTH` (2880) heights, not only Bitcoin's 288
+`DRIVECHAIN_UNDO_DEPTH` (2880; FastBlocks 5760, a day of 15-second slots) heights, not only Bitcoin's 288
 (`MinBlocksToKeep`): every block a reorg can take back, as deep as the
 drivechain undo data goes. So a reorg a node that does not prune can make, a
 pruned one can make too, and code that reads a block that may lose its

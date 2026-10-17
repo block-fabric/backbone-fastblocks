@@ -688,6 +688,13 @@ BOOST_AUTO_TEST_CASE(network_parameters)
         // Bitcoin's heuristics count a block a slot; version bits periods stay 2016 blocks.
         BOOST_CHECK_EQUAL(params->GetConsensus().nPowTargetSpacing, pos.slot_seconds);
         BOOST_CHECK_EQUAL(params->GetConsensus().DifficultyAdjustmentInterval(), 2016);
+        // Counts of blocks keep their durations (audit 7, finding 4): the drivechain undo data, which
+        // bounds the deepest reorg, covers a day of slots; a pruned node keeps those blocks (and
+        // reorgs need them), and as many full blocks, with their undo data (some 15 % more), fit the
+        // least prune target.
+        BOOST_CHECK_GE(int64_t{DRIVECHAIN_UNDO_DEPTH} * pos.slot_seconds, 24 * 60 * 60);
+        BOOST_CHECK_EQUAL(MinBlocksToKeep(params->GetConsensus()), DRIVECHAIN_UNDO_DEPTH);
+        BOOST_CHECK_LE(int64_t{DRIVECHAIN_UNDO_DEPTH} * params->GetConsensus().max_block_weight * 115 / 100, static_cast<int64_t>(MinPruneTarget(params->GetConsensus())));
     }
     BOOST_CHECK_EQUAL(CChainParams::Main()->GetConsensus().pos.stall_seconds, 30 * 60);
     // Unchecked headers (review of audit 6, item 10): the worst case node-wide. Outbound and manual

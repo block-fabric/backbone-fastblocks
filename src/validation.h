@@ -86,8 +86,13 @@ inline constexpr unsigned int MIN_BLOCKS_TO_KEEP = 288;
  * Blocks of the active chain at this depth or more lose the data that takes their changes to the
  * sidechain database back (what they did that sidechains follow stays): no reorg can take them back.
  * A reorg deeper than this, like one past the blocks a pruned node keeps, cannot be made.
+ *
+ * FastBlocks: 5760 blocks, 24 hours of 15-second slots (the template's 2880 is two days of one-minute
+ * blocks; at 15 seconds it was twelve hours: audit 7, finding 4). A sidechain node keeps the blocks
+ * of these heights whatever its prune target (MinBlocksToKeep), and 5760 full blocks (1.5 MB each,
+ * with undo data) fit the least prune target, MIN_SIDECHAIN_PRUNE_TARGET (network_parameters checks it).
  */
-inline constexpr int DRIVECHAIN_UNDO_DEPTH{2880};
+inline constexpr int DRIVECHAIN_UNDO_DEPTH{5760};
 /** Keys of the sidechain state noted as changed between two checks of the mempool, at most (Chainstate::NoteSideChanges): past it, all may have. */
 inline constexpr size_t MAX_SIDE_CHANGES_NOTED{100000};
 /** Transactions whose sidechain rules the mempool checks again at each change of the tip, at most (Chainstate::RemoveStaleDrivechainTxs): the others wait for the next. */

@@ -74,6 +74,29 @@ slot: `nPowTargetSpacing` is the slot, 15 s on the networks (60 s before the
 slot was used, which gave initial block download half the headers timeout it
 needs).
 
+Counts of blocks that stand for durations were rescaled with the 15-second slot
+(audit 7, finding 4):
+
+- `DRIVECHAIN_UNDO_DEPTH` (the deepest reorg: blocks below it lose their
+  drivechain undo data, and a pruned node keeps the blocks above it whatever
+  its target) is 5760 blocks, 24 hours of slots (2880 were 12 hours at 15 s;
+  the template's 2880 are two days of one-minute blocks). 5760 full blocks of
+  1.5 MB with their undo data (about 9.9 GB) fit the least prune target of
+  10000 MiB, so the target still covers what the undo depth keeps;
+- the block download timeout counts in a minute per block at least (Bitcoin's
+  rule: one block interval, plus half of one per other peer downloading), not
+  15 seconds for a block of up to 1.5 MB, which slow links (Tor) missed;
+- a pruned node offers the blocks it keeps less an hour (`MinBlocksToKeep`,
+  5760 here), not Bitcoin's 288 less an hour of slots (48, below zero under
+  12.5-second slots);
+- the budget of unchecked headers stays 10000 a peer (41.7 hours of slots; see
+  "The limit of a long branch"), for the memory bound.
+
+Jailing (`liveness_min_assigned`, 20 of a 40-slot epoch) is a decision left as
+it is (audit 7, finding 6: with the test network's stakes, an offline large
+validator is jailed after about 2.3 hours on average, a small one never; its
+slots stay empty meanwhile).
+
 Without enough validators a network has no PoS blocks: it is the template's
 chain, merged mined only (and its BMM blocks carry the transactions). That is
 how the main and test networks start: validators bond, and once a validator set
@@ -468,11 +491,16 @@ Each against any number of peers, reconnections and new addresses.
   node takes such headers only on a branch that leaves its chain at or above its
   final block (`bad-pos-fork-too-deep`), which its side's anchors, net of the
   commitments it skipped (the other side's), have not covered `final_anchors`
-  times; with an anchor in every mainchain block (about 20 slots apart), the
-  other side leads within 10000 slots as long as the node's side made fewer
-  than about 500 anchors since the fork: a partition of three days and more in
-  which both sides anchored about as often, or one whose blocks past the first
-  epochs weigh more than 32 MiB before the branch leads (five full blocks). The
+  times. The other side's headers are one a slot (15 s), so 10000 of them are
+  41.7 hours of its blocks: the limit is a partition of more than about 40
+  hours in which both sides anchored about as often (an anchor in every
+  mainchain block, four slots apart), or one whose blocks past the first
+  epochs weigh more than 32 MiB before the branch leads (some 22 full blocks).
+  (With 30-second slots it was some 83 hours; audit 7, finding 4. The budget
+  stays at 10000 headers: twice that would put the worst case of unchecked
+  headers node-wide, 19 x 20000 + 8 x 500, over the 200 MiB that
+  `network_parameters` holds it to. Past the limit, the operator's steps below
+  apply.) The
   node cannot take more without a new denial of service: before the branch
   leads it cannot tell it from an attacker's, since a header it cannot check
   counts an anchor for any commitment on record after the last one below it
