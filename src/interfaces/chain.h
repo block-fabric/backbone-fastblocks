@@ -336,6 +336,7 @@ public:
         uint32_t unbond_seq{0};
         //! The first coin its first bond spent: what its unbonds name.
         COutPoint first_bond;
+        uint256 first_bond_anchor;
         bool eligible{false};
         bool banned{false};
         int64_t jailed_until_epoch{0};

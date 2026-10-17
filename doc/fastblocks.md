@@ -645,11 +645,17 @@ which the owner's would then need a signature for.
 
 **Unbond** (`createunbond`): an output of value 0, `OP_RETURN 0xDC'UNB' |
 validator key | amount (8) | sequence (4) | signature (65)`, the owner's signed
-message `FastBlocks unbond <key> <amount> <sequence> <txid>:<n> <genesis>`,
-naming the first coin the validator's first bond spent (`firstbond` in
-`getvalidator`; audit 7, finding 3: an unbond signed on another chain with the
-same genesis, where the same owner bonded the same key with another coin, the
-same sequence, is no unbond here); an amount of 0
+message `FastBlocks unbond <key> <amount> <sequence> <txid>:<n> <anchor>
+<genesis>`, naming the first coin the validator's first bond spent and the
+newest anchor block of the chain when that bond was applied (`firstbond` and
+`firstbondanchor` in `getvalidator`; audit 7, finding 3). An unbond signed on
+another chain with the same genesis, where the same owner bonded the same key,
+with the same sequence, is no unbond here: its first bond spent another coin,
+or, if it spent the same one (deposits credited again after a restart give the
+same transactions), it did so under another anchor block, a block of that chain
+only. (The block that confirms the bond is not known to the rules of a
+transaction, which the mempool applies too; the anchor block before it is
+state.) An amount of 0
 (`all` in the message) unbonds all that is bonded when the unbond is applied.
 The sequence is the validator's next: an unbond counts once, and each top-up of
 the bond moves it on, so that an unbond signed before a top-up (and not mined:

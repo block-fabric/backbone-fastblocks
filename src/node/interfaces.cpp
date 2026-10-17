@@ -906,6 +906,7 @@ public:
             for (const pos::UnbondingEntry& entry : record.unbonding) bond.unbonds.emplace_back(entry.amount, entry.release_anchor);
             bond.unbond_seq = record.unbond_seq;
             bond.first_bond = record.first_bond;
+            bond.first_bond_anchor = record.first_bond_anchor;
             bond.eligible = record.Eligible(params);
             bond.banned = record.tombstoned;
             bond.jailed_until_epoch = record.jailed_until_epoch;

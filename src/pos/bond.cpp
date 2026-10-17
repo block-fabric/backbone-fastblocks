@@ -98,10 +98,10 @@ bool CheckBondPop(const uint256& pubkey, const uint160& owner, const std::array<
     return key.VerifySchnorr(BondPopHash(owner, genesis_hash), pop);
 }
 
-std::string UnbondMessage(const uint256& pubkey, CAmount amount, uint32_t sequence, const COutPoint& first_bond, const uint256& genesis_hash)
+std::string UnbondMessage(const uint256& pubkey, CAmount amount, uint32_t sequence, const COutPoint& first_bond, const uint256& first_bond_anchor, const uint256& genesis_hash)
 {
     const std::string what{amount == UNBOND_ALL ? std::string{"all"} : strprintf("%d", amount)};
-    return strprintf("FastBlocks unbond %s %s %u %s:%u %s", HexStr(pubkey), what, sequence, first_bond.hash.GetHex(), first_bond.n, genesis_hash.GetHex());
+    return strprintf("FastBlocks unbond %s %s %u %s:%u %s %s", HexStr(pubkey), what, sequence, first_bond.hash.GetHex(), first_bond.n, first_bond_anchor.GetHex(), genesis_hash.GetHex());
 }
 
 std::string BondMessage(const uint256& pubkey, CAmount amount, const COutPoint& spent, const uint256& genesis_hash)

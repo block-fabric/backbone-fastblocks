@@ -63,6 +63,11 @@ struct ValidatorRecord {
     //! The first coin the transaction of its first bond spent (what the owner's signature of it names):
     //! unbonds name it (UnbondMessage), so that they serve on this chain only. Null before a first bond.
     COutPoint first_bond;
+    //! The newest anchor block of this chain (FastState::anchor_point) when its first bond was applied:
+    //! a block of this chain instance, which unbonds name too (UnbondMessage). The coin alone could be
+    //! the same on two chains of one genesis (deposits credited again after a restart give the same
+    //! transactions); an anchor block, committed on the mainchain, is of one chain only.
+    uint256 first_bond_anchor;
 
     CAmount Unbonding() const;
     CAmount Weight() const { return bonded + genesis_stake; }
@@ -70,7 +75,7 @@ struct ValidatorRecord {
 
     SERIALIZE_METHODS(ValidatorRecord, obj)
     {
-        READWRITE(obj.owner, obj.bonded, obj.genesis_stake, obj.unbonding, obj.unbond_seq, obj.jailed_until_epoch, obj.tombstoned, obj.first_bond_height, obj.first_bond);
+        READWRITE(obj.owner, obj.bonded, obj.genesis_stake, obj.unbonding, obj.unbond_seq, obj.jailed_until_epoch, obj.tombstoned, obj.first_bond_height, obj.first_bond, obj.first_bond_anchor);
     }
     friend bool operator==(const ValidatorRecord&, const ValidatorRecord&) = default;
 };
@@ -143,12 +148,13 @@ public:
 
     /**
      * The bonds and unbonds of a transaction (sidechain::ChainHooks::ApplyTx). `anchors`: the anchors
-     * of the chain so far (an unbond is paid unbonding_anchors after).
+     * of the chain so far (an unbond is paid unbonding_anchors after). `anchor_point`: the newest anchor
+     * block of the chain so far (FastState::anchor_point), which a first bond records (first_bond_anchor).
      * Reasons: bad-pos-bond (does not read), bad-pos-bond-amount, bad-pos-bond-pop, bad-pos-bond-tombstoned,
      * bad-pos-bond-owner; bad-pos-unbond (does not read), bad-pos-unbond-value (not 0), bad-pos-unbond-unknown,
      * bad-pos-unbond-sequence, bad-pos-unbond-amount, bad-pos-unbond-remainder, bad-pos-unbond-sig.
      */
-    bool ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason) const;
+    bool ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason, const uint256& anchor_point = uint256{}) const;
 
     struct PegStepResult {
         //! The share of the reserve released, for the pot's payee.

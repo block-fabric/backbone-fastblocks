@@ -165,6 +165,7 @@ std::vector<RPCResult> BondFields()
         }},
         {RPCResult::Type::NUM, "unbondsequence", "The sequence its next unbond has"},
         {RPCResult::Type::STR, "firstbond", "The first coin its first bond spent (txid:n), which its unbonds name; empty before a bond"},
+        {RPCResult::Type::STR_HEX, "firstbondanchor", "The newest anchor block of the chain when its first bond was applied, which its unbonds name too"},
         {RPCResult::Type::BOOL, "eligible", "Whether its stake lets it take part (not banned, enough bonded)"},
         {RPCResult::Type::NUM, "jaileduntilepoch", "Left out of the sets made before this epoch (0: never jailed)"},
         {RPCResult::Type::BOOL, "banned", "Signed two blocks for a slot: never in a set again"},
@@ -228,6 +229,7 @@ UniValue BondToJSON(const pos::ValidatorRecord& record, const Consensus::PosPara
     }
     bond.pushKV("unbonds", std::move(unbonds));
     bond.pushKV("unbondsequence", static_cast<uint64_t>(record.unbond_seq));
+    bond.pushKV("firstbondanchor", record.first_bond_anchor.GetHex());
     bond.pushKV("firstbond", record.first_bond.IsNull() ? std::string{} : strprintf("%s:%u", record.first_bond.hash.GetHex(), record.first_bond.n));
     bond.pushKV("eligible", record.Eligible(params));
     bond.pushKV("jaileduntilepoch", record.jailed_until_epoch);

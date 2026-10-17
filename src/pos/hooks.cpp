@@ -821,7 +821,8 @@ bool FastBlocksHooks::ApplyTx(sidechain::State& state, const CTransaction& tx, i
 {
     // Bonds and unbonds: an unbond is paid unbonding_anchors after the anchors of the chain so far.
     ++m_tx_rule_checks;
-    return m_staking.ApplyTx(state.Writable(), tx, height, FAST_STATE.Get(state.View()).anchors, reject_reason);
+    const FastState fast{FAST_STATE.Get(state.View())};
+    return m_staking.ApplyTx(state.Writable(), tx, height, fast.anchors, reject_reason, fast.anchor_point);
 }
 
 std::optional<std::vector<std::vector<unsigned char>>> FastBlocksHooks::TxRuleKeys(const CTransaction& tx) const { return ValidatorRuleKeys(tx); }
