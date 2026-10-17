@@ -24,6 +24,8 @@ constexpr uint32_t RECORD_VERSION{3};
 constexpr uint8_t DB_SLOT_IDENTITY{'i'};
 //! Why blocks of this chain failed (Mainchain::Failure), by hash.
 constexpr uint8_t DB_FAILURE{'F'};
+//! The height above which the record changed (blocks dropped) and the follower has not acted on it yet.
+constexpr uint8_t DB_UNACTED{'u'};
 
 /** Key of a block: its height, big endian so that the blocks are stored in order. */
 struct BlockKey {
@@ -70,6 +72,7 @@ Mainchain::Mainchain(const std::optional<DBParams>& db_params)
         m_blocks.push_back(std::move(block));
     }
     if (SlotIdentity identity; m_db->Read(DB_SLOT_IDENTITY, identity)) m_slot_identity = identity;
+    if (int32_t unacted; m_db->Read(DB_UNACTED, unacted)) m_unacted = unacted;
     {
         const std::unique_ptr<CDBIterator> failures{m_db->NewIterator()};
         for (failures->Seek(std::make_pair(DB_FAILURE, uint256{})); failures->Valid(); failures->Next()) {
@@ -321,11 +324,17 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
     const size_t keep{height < 0 ? 0 : static_cast<size_t>(height) + 1};
     if (keep >= m_blocks.size()) return removed;
     removed.assign(m_blocks.begin() + keep, m_blocks.end());
+    // What the follower acts on when blocks are dropped is kept in memory until it has; noted with the
+    // drop (in the same write), a node that stops in between checks its chain from there at its next
+    // start (Follower::CheckActiveChain).
+    const int unacted{m_unacted ? std::min(*m_unacted, height) : height};
     if (m_db) {
         CDBBatch batch{*m_db};
         for (size_t i{keep}; i < m_blocks.size(); ++i) batch.Erase(BlockKey{static_cast<uint32_t>(i)});
+        batch.Write(DB_UNACTED, int32_t{unacted});
         m_db->WriteBatch(batch, /*fSync=*/true);
     }
+    m_unacted = unacted;
     for (size_t i{keep}; i < m_blocks.size(); ++i) {
         IndexEvents(m_blocks[i], i, /*add=*/false);
         if (!m_blocks[i].bmm) continue;
@@ -334,6 +343,20 @@ std::vector<MainBlock> Mainchain::Truncate(int height)
     }
     m_blocks.resize(keep);
     return removed;
+}
+
+std::optional<int> Mainchain::UnactedFrom() const
+{
+    LOCK(m_mutex);
+    return m_unacted;
+}
+
+void Mainchain::ClearUnacted()
+{
+    LOCK(m_mutex);
+    if (!m_unacted) return;
+    m_unacted.reset();
+    if (m_db) m_db->Erase(DB_UNACTED, /*fSync=*/true);
 }
 
 } // namespace sidechain

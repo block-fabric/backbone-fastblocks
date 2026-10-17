@@ -1798,6 +1798,39 @@ BOOST_AUTO_TEST_CASE(record_keeps_what_the_follower_needs)
     BOOST_CHECK(record.GetFailure(block_b) == sidechain::Mainchain::Failure::MANUAL);
 }
 
+BOOST_AUTO_TEST_CASE(record_notes_changes_not_acted_on)
+{
+    // Blocks dropped from the record are noted with the drop, on disk, until the follower acted on them
+    // (audit 7 B3): a node stopped in between checks its chain from there at its next start.
+    const DBParams params{.path = m_args.GetDataDirBase() / "mainchain_unacted", .cache_bytes = 1 << 20};
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK(!record.UnactedFrom());
+        for (int h{0}; h <= 10; ++h) {
+            sidechain::MainBlock block;
+            block.hash = uint256{static_cast<uint8_t>(h + 1)};
+            block.prev_hash = uint256{static_cast<uint8_t>(h)};
+            BOOST_REQUIRE(record.Append(block));
+        }
+        // Nothing dropped: nothing noted.
+        record.Truncate(10);
+        BOOST_CHECK(!record.UnactedFrom());
+        record.Truncate(8);
+        BOOST_CHECK(record.UnactedFrom() == 8);
+        // The lowest drop counts.
+        record.Truncate(7);
+        BOOST_CHECK(record.UnactedFrom() == 7);
+    }
+    {
+        sidechain::Mainchain record{params};
+        BOOST_CHECK(record.UnactedFrom() == 7);
+        record.ClearUnacted();
+        BOOST_CHECK(!record.UnactedFrom());
+    }
+    sidechain::Mainchain record{params};
+    BOOST_CHECK(!record.UnactedFrom());
+}
+
 BOOST_AUTO_TEST_CASE(record_format)
 {
     // A block on record round-trips, with the bundles it proposed and those pending after it.

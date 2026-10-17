@@ -21,6 +21,7 @@
 #include <util/strencodings.h>
 #include <sidechain/hooks.h>
 #include <sidechain/mainchain.h>
+#include <util/signalinterrupt.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
 #include <txmempool.h>
@@ -255,6 +256,8 @@ bool Follower::UpdateRecord(bool may_drop)
                 const std::vector<MainBlock> removed{record.Truncate(common)};
                 LogInfo("The mainchain dropped %d blocks above height %d", removed.size(), common);
                 LOCK(m_mutex);
+                // To be acted on (Sync, which clears the note of the record once it did).
+                ++m_record_drops;
                 for (const MainBlock& block : removed) {
                     // A block the mainchain committed to twice keeps its first commitment, below the
                     // blocks dropped: dropping the second one changes nothing for it.
@@ -326,8 +329,18 @@ bool Follower::Sync(std::string& error)
             // One at a time: two callers acting on the same changes could otherwise invalidate a
             // block after the other found it committed again.
             LOCK(m_act_mutex);
+            // The drops of the record so far: Act takes up what they left to act on.
+            const uint64_t drops{WITH_LOCK(m_mutex, return m_record_drops)};
             Act();
             CheckActiveChain();
+            // Acted on every drop of the record so far, and checked the chain: the record's note of
+            // where it changed (Mainchain::UnactedFrom) is no longer needed. Not if another drop came
+            // meanwhile (another caller updating the record), whose changes may not have been taken up
+            // yet; nor while the record is updated (its next drop is counted only after it is made).
+            if (!m_stop && !m_node.chainman->m_interrupt) {
+                LOCK(m_sync_mutex);
+                if (WITH_LOCK(m_mutex, return m_record_drops == drops)) m_node.chainman->m_mainchain->ClearUnacted();
+            }
         }
         SendBundle();
     } catch (const std::exception& e) {
@@ -500,6 +513,10 @@ void Follower::CheckActiveChain()
     // takes back each block that lost its commitment (Act); as far as a reorg could reach.
     CBlockIndex* lowest{nullptr};
     CBlockIndex* moved{nullptr};
+    // The window reaches as far below the record as a reorg of the mainchain could: from its tip, or
+    // from where it last changed without the node acting on it (stopped in between, Mainchain::UnactedFrom),
+    // which may be far below a tip that moved on meanwhile.
+    const int top{std::min(record.Height(), record.UnactedFrom().value_or(record.Height()))};
     {
         LOCK(::cs_main);
         // Blocks that need no commitment (none, in the template) are valid whatever the record says.
@@ -507,7 +524,7 @@ void Follower::CheckActiveChain()
             const auto commitment{Hooks().CommitmentOf(*pindex)};
             if (!commitment) continue;
             if (const auto height{record.CommittedHeight(*commitment)}) {
-                if (*height < record.Height() - MOVED_CHECK_DEPTH) break;
+                if (*height < top - MOVED_CHECK_DEPTH) break;
                 continue;
             }
             lowest = pindex;
@@ -525,7 +542,7 @@ void Follower::CheckActiveChain()
                     const auto bmm_height{record.CommittedHeight(*commitment)};
                     if (!bmm_height) break;
                     if (*bmm_height - 1 != main_height) moved = pindex;
-                    if (*bmm_height < record.Height() - MOVED_CHECK_DEPTH) break;
+                    if (*bmm_height < top - MOVED_CHECK_DEPTH) break;
                 }
                 // What the mainchain had done before this block is what it had done after its parent.
                 drivechain::BlockUndo undo;
