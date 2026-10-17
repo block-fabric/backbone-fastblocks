@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <kernel/chainparams.h>
+#include <kernel/testnet_activation.h>
 
 #include <arith_uint256.h>
 
@@ -368,14 +369,14 @@ public:
         // This chain is a sidechain of the Chains testnet.
         // A new genesis at each restart of the test network (audit 7, finding 3): a chain of an earlier
         // start shares no genesis with this one, so it is no branch of it (its blocks, bonds, unbonds
-        // and signatures name another genesis). 2026-10-17 08:00 UTC; was "FastBlocks testnet", 1791763200.
-        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet 17/Oct/2026: a block every 15 seconds", .genesis_time = 1792224000,
+        // and signatures name another genesis). The reset of 2026-10-17 04:10 UTC; was "FastBlocks testnet
+        // 17/Oct/2026: a block every 15 seconds", 1792224000 (and "FastBlocks testnet", 1791763200, before).
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet 17/Oct/2026: a fresh start", .genesis_time = 1792210200,
                        .message_start = {0x66, 0x62, 0x6c, 0x02}, .default_port = 19155, .bech32_hrp = "tfbl"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
-        // TODO: set it to the block that activates slot 5 on the test network, once it does.
-        consensus.sidechain.main_activation_height = 8621; // the block that activated slot 5 on the test network
+        consensus.sidechain.main_activation_height = TESTNET_MAIN_ACTIVATION_HEIGHT; // set once slot 5 activates on the reset test network (kernel/testnet_activation.h)
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
@@ -508,8 +509,9 @@ public:
         };
 
         // This chain is a sidechain of the Chains signet. Its own blocks are not signed.
-        // A new genesis, as the test network's (audit 7, finding 3). Was "FastBlocks signet", 1791763200.
-        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks signet 17/Oct/2026: a block every 15 seconds", .genesis_time = 1792224000,
+        // A new genesis, as the test network's (audit 7, finding 3). Was "FastBlocks signet 17/Oct/2026: a block
+        // every 15 seconds", 1792224000 (and "FastBlocks signet", 1791763200, before).
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks signet 17/Oct/2026: a fresh start", .genesis_time = 1792210200,
                        .message_start = {0x66, 0x62, 0x6c, 0x03}, .default_port = 39155, .bech32_hrp = "tfbl"});
         consensus.sidechain.main_activation_height = 0;
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
