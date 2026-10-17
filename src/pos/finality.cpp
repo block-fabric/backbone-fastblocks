@@ -11,7 +11,9 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <deque>
 #include <limits>
+#include <queue>
 #include <set>
 
 namespace pos {
@@ -30,7 +32,7 @@ std::vector<ChainAnchor> RecentAnchors(const FastBlocksHooks& hooks, const CBloc
     return anchors;
 }
 
-std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count)
+std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, const std::vector<SkippedCommitment>& skipped, int count, const std::optional<DeepForks>& deep)
 {
     std::vector<int> heights;
     if (anchors.empty() || count <= 0) return heights;
@@ -38,7 +40,7 @@ std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, con
     // it shares the anchors acknowledged at or below F, and may acknowledge again those that anchor a
     // block at or below F (both have them: they cancel), and every commitment this chain skipped
     // after the last anchor it shares. What this chain has more: the anchors of blocks above F, less
-    // the commitments skipped since. (Forks below the oldest acknowledgement walked are not looked at.)
+    // the commitments skipped since. (Forks below the oldest acknowledgement walked: `deep`.)
     const int oldest{anchors.back().block->nHeight};
     const auto margin{[&](int fork) -> std::optional<int> {
         if (fork < oldest) return std::nullopt;
@@ -63,7 +65,16 @@ std::vector<int> NetAnchoredHeights(const std::vector<ChainAnchor>& anchors, con
         for (const SkippedCommitment& commitment : skipped) {
             if (commitment.exact_fork && *commitment.exact_fork < height - 1) take(*commitment.exact_fork);
         }
-        // Deeper than every acknowledgement walked: as many anchors as were walked.
+        // Deeper than every acknowledgement walked: DeepForkMargin (audit 7, finding 2), else as many
+        // anchors as were walked.
+        if (deep) {
+            // (The forks kept as one bound are below every height but the lowest ones: taken for each
+            // height above genesis, which is fewer final blocks, never more.)
+            if (deep->kept_height >= 0 && height >= 1) least = std::min(least, deep->kept_margin);
+            for (const auto& [fork, m] : deep->forks) {
+                if (fork < height) least = std::min(least, m);
+            }
+        }
         return least == std::numeric_limits<int>::max() ? static_cast<int>(anchors.size()) : least;
     }};
     std::set<int> candidates;
@@ -123,7 +134,146 @@ std::vector<int> AnchoredHeights(const FastBlocksHooks& hooks, const CBlockIndex
     AssertLockHeld(::cs_main);
     if (final_anchors <= 0) return {};
     const std::vector<ChainAnchor> anchors{RecentAnchors(hooks, tip, AnchorsWalked(final_anchors))};
-    return NetAnchoredHeights(anchors, SkippedCommitments(hooks, tip, anchors), final_anchors);
+    return NetAnchoredHeights(anchors, SkippedCommitments(hooks, tip, anchors), final_anchors, hooks.DeepForkMargin(tip, anchors));
+}
+
+std::optional<DeepForks> FastBlocksHooks::DeepForkMargin(const CBlockIndex& tip, const std::vector<ChainAnchor>& anchors) const
+{
+    // A chain that leaves this one above F (a block of this chain at height F, below the oldest
+    // acknowledgement walked, O) can have every commitment this chain skipped since its last anchor
+    // at or below F (the shared one, at mainchain height sh(F)), and the acknowledgements this chain
+    // made above F of blocks at or below F (both chains may have them: `pending`). This chain has more
+    // than it, at least:
+    //
+    //   margin(F) = (acks above F - pending(F)) - (commitments on record after sh(F) - acks above F)
+    //             = 2 A(tip) - C(record tip) - G(F),  G(F) = 2 A(F) + pending(F) - C(sh(F))
+    //
+    // with A(X) the anchors of the chain up to X (its fork-choice key: ChainKey) and C(m) the
+    // commitments on record up to mainchain height m (from the floor on: none can be of this chain
+    // before its genesis was known). Every skipped commitment counts for every such fork, known or
+    // not (unlike the window, which places those it knows): fewer final blocks, never more. G(F) does
+    // not depend on the tip once a block above F anchors a block above F (P only grows along a chain),
+    // so the largest G of the forks below the block before the one O anchors is kept between calls,
+    // and each call walks only the blocks the window left since: down to genesis once, then a few.
+    AssertLockHeld(::cs_main);
+    ChainstateManager* chainman{Chainman()};
+    if (anchors.empty() || !chainman || !chainman->m_mainchain) return std::nullopt;
+    const sidechain::Mainchain& record{*chainman->m_mainchain};
+    const CBlockIndex* oldest{anchors.back().block};
+    const int p_oldest{anchors.back().anchored->nHeight};
+    if (oldest->nHeight <= 0 || oldest->GetAncestor(0) != tip.GetAncestor(0)) return std::nullopt;
+
+    LOCK(m_deep_mutex);
+    DeepFinality& cache{m_deep};
+    // The commitments on record, counted from the floor on: kept, and counted again from where the
+    // record changed (a mainchain reorg) only.
+    const int floor{record.TimeHeight(m_params.genesis_time - FINALITY_RECORD_MARGIN).value_or(-1)};
+    const auto reset{[&] {
+        cache = DeepFinality{};
+        cache.floor = floor;
+    }};
+    if (cache.floor != floor) reset();
+    while (!cache.recent.empty() && record.HashAt(cache.recent.back().first) != cache.recent.back().second) {
+        cache.counted.resize(cache.recent.back().first - floor - 1);
+        cache.recent.pop_back();
+        if (cache.recent.empty()) reset();
+    }
+    const int record_height{record.Height()};
+    for (int height{floor + 1 + static_cast<int>(cache.counted.size())}; height <= record_height; ++height) {
+        const uint32_t before{cache.counted.empty() ? 0 : cache.counted.back()};
+        cache.counted.push_back(before + (record.BmmAt(height) ? 1 : 0));
+        if (const auto hash{record.HashAt(height)}) cache.recent.emplace_back(height, *hash);
+        while (cache.recent.size() > 256) cache.recent.pop_front();
+    }
+    const auto counted_up_to{[&](int64_t main_height) -> int64_t {
+        if (main_height <= floor || cache.counted.empty()) return 0;
+        return cache.counted[std::min<int64_t>(main_height - floor - 1, cache.counted.size() - 1)];
+    }};
+
+    // The block G was kept for, and the chain it was kept on: still this one, with the same record.
+    const auto on_chain{[&](int height, const uint256& hash) {
+        const CBlockIndex* at{tip.GetAncestor(height)};
+        return at && at->GetBlockHash() == hash;
+    }};
+    if (cache.valid && (!on_chain(cache.through_height, cache.through_hash) || !on_chain(cache.guard_height, cache.guard_hash) ||
+                        (cache.main_height >= 0 && record.HashAt(cache.main_height) != cache.main_hash))) {
+        cache.valid = false;
+    }
+    const int stop{cache.valid ? cache.through_height : -1};
+
+    // The acknowledgements above F of blocks at or below F: the anchored heights (largest first) of
+    // those known; and, for those whose ticket the node no longer has in memory deeper than the blocks
+    // it keeps undo data for (not read from disk: a pruned node may not have them), their heights,
+    // taken to anchor as low as a block can (an acknowledgement anchors a block at most
+    // max_unanchored_slots blocks of stake and a BMM block below it).
+    std::priority_queue<int> known;
+    std::deque<int> unknown;
+    const int reach{static_cast<int>(m_params.max_unanchored_slots) + 2};
+    for (const ChainAnchor& anchor : anchors) {
+        if (anchor.anchored->nHeight <= oldest->nHeight - 1) known.push(anchor.anchored->nHeight);
+    }
+    const int64_t base{2 * static_cast<int64_t>(ChainKey::FromWork(tip.nChainWork).anchors)};
+    const auto margin_of{[&](int64_t g) {
+        return static_cast<int>(std::clamp<int64_t>(base - counted_up_to(record_height) - g, std::numeric_limits<int>::min() / 2, std::numeric_limits<int>::max() / 2));
+    }};
+    DeepForks deep;
+    int64_t kept_max{std::numeric_limits<int64_t>::min()};
+    const CBlockIndex* above{nullptr};
+    const CBlockIndex* through{nullptr};
+    for (const CBlockIndex* index{oldest->pprev}; index && index->nHeight > stop; above = index, index = index->pprev) {
+        const int height{index->nHeight};
+        const ChainKey key{ChainKey::FromWork(index->nChainWork)};
+        if (above && ChainKey::FromWork(above->nChainWork).anchors > key.anchors) {
+            // `above` is an anchor (it adds one): the block it anchors.
+            if (!above->m_ext) {
+                if (above->nHeight - 1 <= height) known.push(above->nHeight - 1);
+            } else {
+                const CBlockIndex* anchored{nullptr};
+                if (above->nHeight >= tip.nHeight - DRIVECHAIN_UNDO_DEPTH) {
+                    anchored = AnchoredBy(*above);
+                } else {
+                    std::optional<uint256> hash;
+                    {
+                        LOCK(m_acks_mutex);
+                        if (const auto found{m_anchored_by.find(above->GetBlockHash())}; found != m_anchored_by.end()) hash = found->second;
+                    }
+                    if (hash) anchored = chainman->m_blockman.LookupBlockIndex(*hash);
+                }
+                if (anchored && anchored->nHeight < above->nHeight) {
+                    if (anchored->nHeight <= height) known.push(anchored->nHeight);
+                } else {
+                    unknown.push_back(above->nHeight);
+                }
+            }
+        }
+        while (!known.empty() && known.top() > height) known.pop();
+        while (!unknown.empty() && unknown.front() > height + reach) unknown.pop_front();
+        const int64_t pending{static_cast<int64_t>(known.size() + unknown.size())};
+        const int64_t g{2 * static_cast<int64_t>(key.anchors) + pending - counted_up_to(key.last_anchor_height)};
+        if (height <= p_oldest - 1) {
+            kept_max = std::max(kept_max, g);
+            if (!through) through = index;
+        } else {
+            deep.forks.emplace_back(height, margin_of(g));
+        }
+    }
+    // Kept: the forks at or below the block before the one the oldest acknowledgement anchors.
+    if (through) {
+        const ChainKey key{ChainKey::FromWork(through->nChainWork)};
+        cache.max_g = cache.valid ? std::max(cache.max_g, kept_max) : kept_max;
+        cache.valid = true;
+        cache.through_height = through->nHeight;
+        cache.through_hash = through->GetBlockHash();
+        cache.guard_height = oldest->nHeight;
+        cache.guard_hash = oldest->GetBlockHash();
+        cache.main_height = key.last_anchor_height > 0 ? static_cast<int>(key.last_anchor_height) : -1;
+        if (cache.main_height >= 0) cache.main_hash = record.HashAt(cache.main_height).value_or(uint256{});
+    }
+    if (cache.valid) {
+        deep.kept_height = cache.through_height;
+        deep.kept_margin = margin_of(cache.max_g);
+    }
+    return deep;
 }
 
 Finality FinalityOf(const FastBlocksHooks& hooks, const CBlockIndex& block, const CBlockIndex& tip, int final_anchors)

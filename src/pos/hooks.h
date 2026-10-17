@@ -6,6 +6,7 @@
 #define BITCOIN_POS_HOOKS_H
 
 #include <pos/evidence.h>
+#include <pos/finality.h>
 #include <pos/header.h>
 #include <pos/schedule.h>
 #include <pos/staking.h>
@@ -373,6 +374,22 @@ public:
      */
     const CBlockIndex* AnchoredBy(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_acks_mutex);
     /**
+     * The margins (finality.h, NetAnchoredHeights) of the forks below the oldest of `anchors`
+     * (the newest anchors of the chain that ends at `tip`, newest first): down to genesis, every
+     * commitment on record since the chain's genesis could be known that the chain skipped counts
+     * against every such fork (audit 7, finding 2: forks below the window were not looked at, and a
+     * bidder that won more commitments in a row than the window holds took "final" blocks back).
+     * Nothing if there are no anchors. Incremental: what is below the window is kept between calls.
+     * Defined in finality.cpp. Called with cs_main held.
+     */
+    std::optional<DeepForks> DeepForkMargin(const CBlockIndex& tip, const std::vector<ChainAnchor>& anchors) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_deep_mutex, !m_acks_mutex);
+    /** Forget what DeepForkMargin keeps (tests: the same as computed at once). */
+    void ForgetDeepFinality() const EXCLUSIVE_LOCKS_REQUIRED(!m_deep_mutex)
+    {
+        LOCK(m_deep_mutex);
+        m_deep = DeepFinality{};
+    }
+    /**
      * Blocks of stake on the active chain whose leader the record no longer agrees with (a mainchain
      * reorg moved the seed of their epoch): taken back, as blocks that lost their commitment are; and
      * those taken back so whose leader it agrees with again, given back; and the blocks of stake from the
@@ -419,6 +436,27 @@ private:
     mutable Mutex m_staking_mutex;
     mutable bool m_staking_seen GUARDED_BY(m_staking_mutex){false};
     mutable uint256 m_staking_for GUARDED_BY(m_staking_mutex);
+    //! What DeepForkMargin keeps between calls (finality.cpp).
+    struct DeepFinality {
+        //! The record's height at and below which commitments are not counted (before the genesis could be known).
+        int floor{-2};
+        //! Commitments on record above `floor`, up to each height from floor + 1 on.
+        std::vector<uint32_t> counted;
+        //! The last heights counted and their hashes, to find where the record changed.
+        std::deque<std::pair<int, uint256>> recent;
+        //! The largest G (finality.cpp) of the forks at or below the block `through`, on a chain with
+        //! the block `guard` (the oldest anchor walked then), and the record with `main_hash` at `main_height`.
+        bool valid{false};
+        int through_height{-1};
+        uint256 through_hash;
+        int guard_height{-1};
+        uint256 guard_hash;
+        int main_height{-1};
+        uint256 main_hash;
+        int64_t max_g{0};
+    };
+    mutable Mutex m_deep_mutex;
+    mutable DeepFinality m_deep GUARDED_BY(m_deep_mutex);
     //! The final height of the active chain, as of the tip and the record's tip m_final_for.
     mutable Mutex m_final_mutex;
     mutable int m_final_height GUARDED_BY(m_final_mutex){-1};

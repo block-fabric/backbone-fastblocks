@@ -582,6 +582,33 @@ commitments this is the number of anchors that cover the block. Finality is
 what a node knows: one that never saw a ticket counts its commitment against
 every fork.
 
+**Forks below the window** (audit 7, finding 2). The newest 4 · `final_anchors`
++ 8 anchors are placed exactly; forks below them were not looked at, so a
+bidder that won more commitments in a row than that since a fork, and kept the
+blocks to itself until the chain had made as many anchors again, took back
+blocks shown as final. Now every fork down to genesis is counted
+(`DeepForkMargin`), conservatively: every commitment on record that the chain
+skipped since the fork's last shared anchor counts for it, known or not. For a
+fork at F (A: the chain's anchors, from its fork-choice key; C: the commitments
+on record):
+
+    margin(F) = (anchors after F, less those of blocks at or below F)
+              − (commitments after the shared one − anchors after F)
+
+The part that does not change with the tip (the forks at or below the block
+before the one the oldest walked acknowledgement anchors) is kept between calls
+as one maximum, and only the blocks the window left since are walked: the whole
+chain once after a start, then a few blocks per tip (counted again only where
+a mainchain reorg changed the record). Commitments on record from before the
+genesis could be known (mainchain median time two hours or more before
+`genesis_time`, `FINALITY_RECORD_MARGIN`) are not counted: a new genesis is
+published at its `genesis_time` or later. Commitments of another chain of the
+slot made since (an old testnet chain still merged mined after a restart) count
+like any skipped one, so "final" waits until the new chain has that many more
+anchors; stop the old chain's merged mining before a restart's genesis time.
+Wallets see fewer final blocks than before only after a run of skipped
+commitments, never more.
+
 `getblock` gives a block's `finality` (`status`, `anchors`), and its `kind`
 (`pos` or `bmm`), `slot`, `proposer` and `ack`, and for a merged mined block the
 `mainheight` of the mainchain block that committed to it; `getblockchaininfo` the

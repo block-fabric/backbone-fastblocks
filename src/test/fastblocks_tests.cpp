@@ -6194,4 +6194,98 @@ BOOST_FIXTURE_TEST_CASE(audit7_bmm_payee_not_address_pays_reserve, FastBlocksSet
     BOOST_CHECK_LT(Stake().pot_reserve, reserve);
 }
 
+
+// AUDIT 7, finding 2 (regression; the PoC took a "final" block back): commitments older than the
+// oldest of the AnchorsWalked newest anchors were not counted against forks. A bidder that won more
+// commitments since a fork (blocks kept to itself) than the window holds won the order of chains after
+// the chain called blocks after the fork final. Now every skipped commitment since the fork counts
+// (DeepForkMargin): no block above the fork is final, and no final block is taken back.
+BOOST_FIXTURE_TEST_CASE(audit7_final_block_taken_back_by_old_hidden_commitments, FastBlocksSetup)
+{
+    StartPos();
+    Take(PosBlock(1));
+    const CBlockIndex* fork{Tip()};
+    const size_t walked{pos::AnchorsWalked(Pos().final_anchors)};
+    // The bidder's branch: walked + 1 BMM blocks on the fork, each committed (the mainchain's record
+    // has them); "kept to itself" here = taken, then marked invalid so that the node's chain leaves it.
+    std::vector<uint256> hidden;
+    for (size_t n{0}; n <= walked; ++n) {
+        Slot(2 + static_cast<int>(n));
+        const CBlock block{BmmBlock(/*use_mempool=*/false)};
+        MineBmm(block);
+        hidden.push_back(block.GetHash());
+    }
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().InvalidateBlock(state, Index(hidden[0])));
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    BOOST_REQUIRE(Tip() == fork);
+    // The chain: `walked` anchors since the fork (BMM blocks of another payee), one fewer than the branch.
+    for (size_t n{0}; n < walked; ++n) {
+        Slot(40 + static_cast<int>(n));
+        MineBmm(BmmBlock(/*use_mempool=*/false, Wpkh(2)));
+    }
+    const int final_height{WITH_LOCK(::cs_main, return Hooks().FinalHeight())};
+    BOOST_TEST_MESSAGE("audit7: fork at " << fork->nHeight << ", chain tip " << Tip()->nHeight << ", final height " << final_height);
+    // Nothing above the fork is final: the branch has as many anchors since it, and more.
+    BOOST_CHECK_LE(final_height, fork->nHeight);
+    const CBlockIndex* was_final{final_height >= 0 ? WITH_LOCK(::cs_main, return Chain().m_chain[final_height]) : nullptr};
+    // The bidder shows its branch (here: the operator's mark taken back, as if it came from a peer).
+    {
+        LOCK(::cs_main);
+        Chain().ResetBlockFailureFlags(Index(hidden[0]));
+        Chainman().RecalculateBestHeader();
+    }
+    {
+        BlockValidationState state;
+        BOOST_REQUIRE(Chain().ActivateBestChain(state));
+    }
+    // The branch wins (the order of chains is unchanged), and the final block stays.
+    BOOST_CHECK(Tip()->GetBlockHash() == hidden.back());
+    if (was_final) BOOST_CHECK(WITH_LOCK(::cs_main, return Chain().m_chain.Contains(*was_final)));
+
+    // Once the chain has more anchors since the fork than the commitments it skipped (all of them, the
+    // branch's included), blocks are final again: here the branch's own chain, which skipped the
+    // `walked` commitments of the other.
+    for (size_t n{0}; n < 2 * walked; ++n) {
+        Slot(80 + static_cast<int>(n));
+        MineBmm(BmmBlock(/*use_mempool=*/false));
+    }
+    const int later{WITH_LOCK(::cs_main, return Hooks().FinalHeight())};
+    BOOST_CHECK_GT(later, fork->nHeight);
+    BOOST_CHECK_LT(later, Tip()->nHeight);
+}
+
+// AUDIT 7, finding 2: the margin of deep forks is the same whether computed at once or step by step
+// (what DeepForkMargin keeps between calls), and a mainchain reorg that takes commitments away is seen.
+BOOST_FIXTURE_TEST_CASE(audit7_deep_fork_margin_incremental, FastBlocksSetup)
+{
+    StartPos();
+    Take(PosBlock(1));
+    const size_t walked{pos::AnchorsWalked(Pos().final_anchors)};
+    std::vector<std::vector<int>> stepwise;
+    for (size_t n{0}; n < 3 * walked; ++n) {
+        Slot(2 + static_cast<int>(n));
+        MineBmm(BmmBlock(/*use_mempool=*/false));
+        // A commitment nobody shows (a skipped one), every fourth mainchain block.
+        if (n % 4 == 0) Commit(uint256{static_cast<uint8_t>(0x80 + n)});
+        stepwise.push_back(WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), Pos().final_anchors)));
+    }
+    const auto heights{[&] { return WITH_LOCK(::cs_main, return pos::AnchoredHeights(Hooks(), *Tip(), Pos().final_anchors)); }};
+    // Computed at once (nothing kept), the same at the tip.
+    Hooks().ForgetDeepFinality();
+    const auto at_once{heights()};
+    BOOST_CHECK(at_once == stepwise.back());
+    BOOST_REQUIRE(!at_once.empty());
+    BOOST_CHECK_LT(at_once.back(), Tip()->nHeight);
+    // The record loses its last blocks (a mainchain reorg): counted again where it changed, the same
+    // as computed at once.
+    BOOST_CHECK(heights() == at_once);
+    Record().Truncate(Record().Height() - 3);
+    const auto after_reorg{heights()};
+    Hooks().ForgetDeepFinality();
+    BOOST_CHECK(heights() == after_reorg);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
