@@ -60,6 +60,9 @@ struct ValidatorRecord {
     //! Signed two blocks for a slot: never in a set again, bonds refused.
     bool tombstoned{false};
     int32_t first_bond_height{-1};
+    //! The first coin the transaction of its first bond spent (what the owner's signature of it names):
+    //! unbonds name it (UnbondMessage), so that they serve on this chain only. Null before a first bond.
+    COutPoint first_bond;
 
     CAmount Unbonding() const;
     CAmount Weight() const { return bonded + genesis_stake; }
@@ -67,7 +70,7 @@ struct ValidatorRecord {
 
     SERIALIZE_METHODS(ValidatorRecord, obj)
     {
-        READWRITE(obj.owner, obj.bonded, obj.genesis_stake, obj.unbonding, obj.unbond_seq, obj.jailed_until_epoch, obj.tombstoned, obj.first_bond_height);
+        READWRITE(obj.owner, obj.bonded, obj.genesis_stake, obj.unbonding, obj.unbond_seq, obj.jailed_until_epoch, obj.tombstoned, obj.first_bond_height, obj.first_bond);
     }
     friend bool operator==(const ValidatorRecord&, const ValidatorRecord&) = default;
 };

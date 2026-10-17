@@ -255,7 +255,10 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             after.owner = bond->owner;
             after.bonded += bond->amount;
             if (!MoneyRange(after.bonded)) return Fail(reject_reason, "bad-pos-bond-amount");
-            if (after.first_bond_height < 0) after.first_bond_height = height;
+            if (after.first_bond_height < 0) {
+                after.first_bond_height = height;
+                after.first_bond = tx.vin[0].prevout;
+            }
             PutValidator(out, bond->pubkey, before, after);
             if (!stake) stake = STAKE_STATE.Get(out);
             stake->bonded += bond->amount;
@@ -273,7 +276,7 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const CAmount remainder{before->bonded - amount};
             if (remainder != 0 && remainder < m_params.min_stake) return Fail(reject_reason, "bad-pos-unbond-remainder");
             CPubKey signer;
-            if (!signer.RecoverCompact(MessageHash(UnbondMessage(unbond->pubkey, unbond->amount, unbond->sequence, m_genesis)), unbond->signature) ||
+            if (!signer.RecoverCompact(MessageHash(UnbondMessage(unbond->pubkey, unbond->amount, unbond->sequence, before->first_bond, m_genesis)), unbond->signature) ||
                 !signer.IsCompressed() || signer.GetID() != CKeyID{before->owner}) {
                 return Fail(reject_reason, "bad-pos-unbond-sig");
             }

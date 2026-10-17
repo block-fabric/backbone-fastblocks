@@ -645,7 +645,11 @@ which the owner's would then need a signature for.
 
 **Unbond** (`createunbond`): an output of value 0, `OP_RETURN 0xDC'UNB' |
 validator key | amount (8) | sequence (4) | signature (65)`, the owner's signed
-message `FastBlocks unbond <key> <amount> <sequence> <genesis>`; an amount of 0
+message `FastBlocks unbond <key> <amount> <sequence> <txid>:<n> <genesis>`,
+naming the first coin the validator's first bond spent (`firstbond` in
+`getvalidator`; audit 7, finding 3: an unbond signed on another chain with the
+same genesis, where the same owner bonded the same key with another coin, the
+same sequence, is no unbond here); an amount of 0
 (`all` in the message) unbonds all that is bonded when the unbond is applied.
 The sequence is the validator's next: an unbond counts once, and each top-up of
 the bond moves it on, so that an unbond signed before a top-up (and not mined:
@@ -1065,6 +1069,14 @@ the mainchain held for slot 5 after the block `mainheight`; with them, less.
 Every FastBlocks functional test checks this on every node after every step
 (`test_framework/fastblocks.py`, `assert_peg_balance`).
 
+`checkpegbalance` (audit 7, finding 3) asks the mainchain node for the escrow
+of the slot after the block `mainheight` (`listsidechaindeposits`) and compares:
+`status` `ok` when the escrow covers `total`, `deficit` when the chain holds
+coins the escrow does not back (a bundle of another chain of the slot was paid:
+an earlier test network's, say), with `escrow` and `difference`. Run it after
+every restart of a network from a new genesis. (Not at start-up: it reads the
+whole UTXO set and the mainchain's escrow changes.)
+
 ## Producer and anchorer
 
 - `-validatorkeyfile=<file>`: 32-byte secret keys in hex, one per line. At
@@ -1096,6 +1108,15 @@ Every FastBlocks functional test checks this on every node after every step
   keeps the key, and so must keep what it signed. The `validator_protection.dat`
   of older versions, in the data directory, is read too (the highest slot of
   each key) and its slots written to the new file at start.
+- The file names the chain's genesis (format 2, `fastblocks-slashing-protection
+  2 <genesis>`; audit 7, finding 3). A file of another genesis counts for
+  nothing (a block signed on another chain names its genesis in the signature:
+  it is no block here, nor half a proof), and is kept beside as
+  `<file>.<genesis>.old`: a test network restarted from a new genesis whose
+  slots count from a later time signs again without anyone deleting the file.
+  A file of format 1 (no genesis: written before) counts, whatever chain it
+  was for, and becomes format 2 at the next slot signed; so at the restart
+  that brings format 2, delete it by hand if the genesis time moved later.
 - A slot whose block could not be made before the slashing protection noted it
   (nothing signed: the node still taking in a block that came as the slot
   started, the tip moving while the block was built, the seed of the epoch not
@@ -1361,8 +1382,8 @@ Unchanged: `stall_seconds`, `seed_lookahead_seconds`, `max_future_seconds`
 the same length); the budgets of unchecked headers and their bytes (counts
 of headers, not durations); the producer's retry (a third of the slot) and the
 past limit of a header's slot (`MAX_FUTURE_BLOCK_TIME` / slot) follow the slot.
-A validator's slashing protection file (the last slot each key signed) stays
-safe across the change on the test network: its genesis time is the same, so
+A validator's slashing protection file (the last slot each key signed) stayed
+safe across the change on the test network: its genesis time was the same, so
 the slot of a moment under 15-second slots is twice its slot under 30-second
 ones, above any slot signed before; a node that never signs a slot at or below
 the one it signed last refuses nothing it should sign now.

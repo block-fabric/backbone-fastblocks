@@ -19,7 +19,9 @@
 namespace pos {
 
 namespace {
+//! The first format, and the second, which names the chain's genesis after it.
 constexpr const char* HEADER{"fastblocks-slashing-protection 1"};
+constexpr const char* HEADER_V2{"fastblocks-slashing-protection 2"};
 
 //! The locks this process holds: the filesystem lock does not tell one holder from another within a process.
 std::mutex g_locks_mutex;
@@ -29,7 +31,7 @@ fs::path LockPath(const fs::path& dir, const fs::path& name) { return fs::absolu
 } // namespace
 
 std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& path, const fs::path& lock_dir, const fs::path& lock_name, std::string& error,
-                                                             const std::vector<fs::path>& merge_from)
+                                                             const std::vector<fs::path>& merge_from, const std::optional<uint256>& genesis)
 {
     {
         std::lock_guard lock{g_locks_mutex};
@@ -46,23 +48,36 @@ std::unique_ptr<SlashingProtection> SlashingProtection::Open(const fs::path& pat
     // Made once the lock is taken (its destructor gives it back), and loaded in its constructor (m_slots
     // is set before anyone else can see the object).
     bool loaded{false};
-    std::unique_ptr<SlashingProtection> protection{new SlashingProtection(path, lock_dir, lock_name, merge_from, error, loaded)};
+    std::unique_ptr<SlashingProtection> protection{new SlashingProtection(path, lock_dir, lock_name, merge_from, genesis, error, loaded)};
     if (!loaded) return nullptr;
     return protection;
 }
 
-SlashingProtection::SlashingProtection(fs::path path, fs::path lock_dir, fs::path lock_name, const std::vector<fs::path>& merge_from, std::string& error, bool& loaded)
-    : m_path{std::move(path)}, m_lock_dir{std::move(lock_dir)}, m_lock_name{std::move(lock_name)}
+SlashingProtection::SlashingProtection(fs::path path, fs::path lock_dir, fs::path lock_name, const std::vector<fs::path>& merge_from, std::optional<uint256> genesis, std::string& error, bool& loaded)
+    : m_path{std::move(path)}, m_lock_dir{std::move(lock_dir)}, m_lock_name{std::move(lock_name)}, m_genesis{std::move(genesis)}
 {
     std::map<uint256, int64_t> slots;
-    if (!ReadSlots(m_path, slots, error)) return;
+    std::optional<uint256> other_genesis;
+    if (!ReadSlots(m_path, slots, error, m_genesis, other_genesis)) return;
+    // A file of another chain (a test network restarted from a new genesis): kept beside, and this
+    // file starts again for this chain.
+    bool rewrite{false};
+    if (other_genesis) {
+        const fs::path old{fs::PathFromString(fs::PathToString(m_path) + "." + other_genesis->GetHex() + ".old")};
+        if (!RenameOver(m_path, old)) {
+            error = strprintf("cannot move %s aside (it is of another chain, genesis %s)", fs::PathToString(m_path), other_genesis->GetHex());
+            return;
+        }
+        rewrite = true;
+    }
     // Files kept elsewhere before (an older version of the node): what they hold counts too, the highest
     // slot of each key, and goes into this file at once. A file that does not read stops the node: it
     // may hold the last slot a key signed.
     bool merged{false};
     for (const fs::path& other : merge_from) {
         std::map<uint256, int64_t> other_slots;
-        if (!ReadSlots(other, other_slots, error)) return;
+        std::optional<uint256> ignored;
+        if (!ReadSlots(other, other_slots, error, m_genesis, ignored)) return;
         for (const auto& [key, slot] : other_slots) {
             auto [it, inserted]{slots.try_emplace(key, slot)};
             if (inserted || it->second < slot) {
@@ -71,20 +86,30 @@ SlashingProtection::SlashingProtection(fs::path path, fs::path lock_dir, fs::pat
             }
         }
     }
-    if (merged && !Write(slots, error)) return;
+    if ((merged || rewrite) && !Write(slots, error)) return;
     m_slots = std::move(slots);
     loaded = true;
 }
 
-bool SlashingProtection::ReadSlots(const fs::path& path, std::map<uint256, int64_t>& slots, std::string& error)
+bool SlashingProtection::ReadSlots(const fs::path& path, std::map<uint256, int64_t>& slots, std::string& error, const std::optional<uint256>& genesis,
+                                   std::optional<uint256>& other_genesis)
 {
     std::ifstream file{path.std_path()};
     if (!file.is_open()) return true;
     std::string line;
-    if (!std::getline(file, line) || line != HEADER) {
+    if (!std::getline(file, line)) line.clear();
+    std::optional<uint256> named;
+    if (line.starts_with(std::string{HEADER_V2} + " ")) {
+        named = uint256::FromHex(line.substr(std::string{HEADER_V2}.size() + 1));
+        if (!named) {
+            error = strprintf("%s names no genesis that reads: %s", fs::PathToString(path), line);
+            return false;
+        }
+    } else if (line != HEADER) {
         error = strprintf("%s is not a slashing protection file", fs::PathToString(path));
         return false;
     }
+    std::map<uint256, int64_t> read;
     while (std::getline(file, line)) {
         if (line.empty()) continue;
         const auto parts{util::SplitString(line, ' ')};
@@ -95,8 +120,18 @@ bool SlashingProtection::ReadSlots(const fs::path& path, std::map<uint256, int64
             return false;
         }
         const uint256 pubkey{std::span<const unsigned char>{*key}};
-        auto [it, inserted]{slots.try_emplace(pubkey, *slot)};
+        auto [it, inserted]{read.try_emplace(pubkey, *slot)};
         if (!inserted) it->second = std::max(it->second, *slot);
+    }
+    // (Read in full first: a file that does not read stops the node, whatever chain it names.) A file
+    // of another chain: none of its slots count.
+    if (named && genesis && *named != *genesis) {
+        other_genesis = named;
+        return true;
+    }
+    for (const auto& [pubkey, slot] : read) {
+        auto [it, inserted]{slots.try_emplace(pubkey, slot)};
+        if (!inserted) it->second = std::max(it->second, slot);
     }
     return true;
 }
@@ -119,7 +154,11 @@ std::optional<int64_t> SlashingProtection::LastSigned(const uint256& key) const
 bool SlashingProtection::Write(const std::map<uint256, int64_t>& slots, std::string& error) const
 {
     std::ostringstream text;
-    text << HEADER << '\n';
+    if (m_genesis) {
+        text << HEADER_V2 << ' ' << m_genesis->GetHex() << '\n';
+    } else {
+        text << HEADER << '\n';
+    }
     for (const auto& [key, slot] : slots) text << HexStr(key) << ' ' << slot << '\n';
     const std::string bytes{text.str()};
     const fs::path temp{fs::PathFromString(fs::PathToString(m_path) + ".new")};

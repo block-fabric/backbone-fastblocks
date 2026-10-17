@@ -334,6 +334,8 @@ public:
         //! Unbonded, not paid yet: amount and the anchor it is paid at.
         std::vector<std::pair<CAmount, uint64_t>> unbonds;
         uint32_t unbond_seq{0};
+        //! The first coin its first bond spent: what its unbonds name.
+        COutPoint first_bond;
         bool eligible{false};
         bool banned{false};
         int64_t jailed_until_epoch{0};
