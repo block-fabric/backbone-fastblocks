@@ -433,7 +433,7 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
         LOCK(::cs_main);
         sidechain::StoreOverlay overlay{Chain().SideState().View()};
         std::string reason;
-        if (Hooks().GetStaking().ApplyTx(overlay, tx, Tip()->nHeight + 1, Fast().anchors, reason)) return {};
+        if (Hooks().GetStaking().ApplyTx(overlay, tx, Tip()->nHeight + 1, Fast().anchors, reason, Fast().anchor_point)) return {};
         return reason;
     }
     /** The coin TxWith spends. */
@@ -2445,7 +2445,7 @@ BOOST_AUTO_TEST_CASE(jailing)
         tx.vout.emplace_back(5000, pos::BondScript(XOnly(k), owner, pop, owner_sig));
     }
     std::string reason;
-    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{tx}, 1, 0, reason));
+    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{tx}, 1, 0, reason, uint256{9}));
     const uint256 a{XOnly(validators[0])}, b{XOnly(validators[1])}, c{XOnly(validators[2])};
     // Epoch 0: A made its ten; B led twelve and made none; C led four and made none (too few to tell).
     for (int64_t slot{0}; slot < 10; ++slot) staking.NoteLiveness(out, slot, a, {});
@@ -3246,16 +3246,16 @@ BOOST_AUTO_TEST_CASE(penalty_from_unbonding)
     std::vector<unsigned char> owner_sig;
     BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::BondMessage(pubkey, 10000, bond.vin[0].prevout, genesis)), owner_sig));
     bond.vout.emplace_back(10000, pos::BondScript(pubkey, owner_hash, pop, owner_sig));
-    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{bond}, 1, 0, reason));
+    BOOST_REQUIRE(staking.ApplyTx(out, CTransaction{bond}, 1, 0, reason, uint256{9}));
     const auto unbond{[&](CAmount amount, uint32_t sequence, uint64_t anchors) {
         pos::Unbond u;
         u.pubkey = pubkey;
         u.amount = amount;
         u.sequence = sequence;
-        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(pubkey, amount, sequence, bond.vin[0].prevout, uint256{}, genesis)), u.signature));
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::UnbondMessage(pubkey, amount, sequence, bond.vin[0].prevout, uint256{9}, genesis)), u.signature));
         CMutableTransaction tx;
         tx.vout.emplace_back(0, pos::UnbondScript(u));
-        BOOST_REQUIRE_MESSAGE(staking.ApplyTx(out, CTransaction{tx}, 2, anchors, reason), reason);
+        BOOST_REQUIRE_MESSAGE(staking.ApplyTx(out, CTransaction{tx}, 2, anchors, reason, uint256{9}), reason);
     }};
     unbond(9400, 0, 0);
     unbond(500, 1, 1);
@@ -6388,23 +6388,41 @@ BOOST_AUTO_TEST_CASE(audit7_unbond_not_replayable_across_chains)
     bond_on(chain_a, coin, anchor_a);
     const CTransaction unbond_a{unbond_tx(coin, anchor_a)};
     std::string reason;
-    BOOST_CHECK_MESSAGE(staking.ApplyTx(chain_a, unbond_a, 2, 0, reason), reason);
+    BOOST_CHECK_MESSAGE(staking.ApplyTx(chain_a, unbond_a, 2, 0, reason, anchor_a), reason);
     // Chain B, same genesis, keys, owner and sequence, and the same first coin, under another anchor:
     // A's unbond is no unbond here; B's own is.
     sidechain::EmptyStore empty_b;
     sidechain::StoreOverlay chain_b{empty_b};
     bond_on(chain_b, coin, anchor_b);
-    BOOST_CHECK(!staking.ApplyTx(chain_b, unbond_a, 2, 0, reason));
+    BOOST_CHECK(!staking.ApplyTx(chain_b, unbond_a, 2, 0, reason, anchor_b));
     BOOST_CHECK_EQUAL(reason, "bad-pos-unbond-sig");
     BOOST_CHECK_EQUAL(pos::GetValidator(chain_b, pubkey)->bonded, 10000);
-    BOOST_CHECK_MESSAGE(staking.ApplyTx(chain_b, unbond_tx(coin, anchor_b), 2, 0, reason), reason);
+    BOOST_CHECK_MESSAGE(staking.ApplyTx(chain_b, unbond_tx(coin, anchor_b), 2, 0, reason, anchor_b), reason);
     BOOST_CHECK_EQUAL(pos::GetValidator(chain_b, pubkey)->bonded, 0);
     // Chain C, the same anchor block as A but another first coin: refused too.
     sidechain::EmptyStore empty_c;
     sidechain::StoreOverlay chain_c{empty_c};
     bond_on(chain_c, other_coin, anchor_a);
-    BOOST_CHECK(!staking.ApplyTx(chain_c, unbond_a, 2, 0, reason));
+    BOOST_CHECK(!staking.ApplyTx(chain_c, unbond_a, 2, 0, reason, anchor_a));
     BOOST_CHECK_EQUAL(reason, "bad-pos-unbond-sig");
+    // Before a chain's first anchor (no anchor block to name: every chain of the genesis would name the
+    // same nothing), no first bond: so no unbond of one chain instance can serve on another.
+    for (int instance{0}; instance < 2; ++instance) {
+        sidechain::EmptyStore empty;
+        sidechain::StoreOverlay unanchored{empty};
+        CMutableTransaction bond;
+        bond.vin.emplace_back(coin);
+        std::vector<unsigned char> owner_sig;
+        BOOST_REQUIRE(owner.SignCompact(MessageHash(pos::BondMessage(pubkey, 10000, coin, genesis)), owner_sig));
+        bond.vout.emplace_back(10000, pos::BondScript(pubkey, owner_hash, pop, owner_sig));
+        BOOST_CHECK(!staking.ApplyTx(unanchored, CTransaction{bond}, 1, 0, reason, uint256{}));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-bond-unanchored");
+        BOOST_CHECK(!pos::GetValidator(unanchored, pubkey));
+        BOOST_CHECK(!staking.ApplyTx(unanchored, unbond_tx(coin, uint256{}), 2, 0, reason, uint256{}));
+        BOOST_CHECK_EQUAL(reason, "bad-pos-unbond-unknown");
+    }
+    // A top-up (not a first bond) needs none: the binding is the first bond's.
+    BOOST_CHECK(pos::GetValidator(chain_c, pubkey)->first_bond_anchor == anchor_a);
 }
 
 // AUDIT 7, finding 3: on a chain, the first bond records the newest anchor block (FastState::

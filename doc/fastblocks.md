@@ -702,6 +702,7 @@ unbonding.
 | The owner it names signed it (its amount and the transaction's first input), the first bond too | `bad-pos-bond-owner-sig` |
 | Its proof of possession verifies | `bad-pos-bond-pop` |
 | The key is not banned | `bad-pos-bond-tombstoned` |
+| A first bond comes after the chain's first anchor (it names the newest anchor block, which its unbonds name: audit 7, finding 3) | `bad-pos-bond-unanchored` |
 | An unbond output reads | `bad-pos-unbond` |
 | Its value is 0 | `bad-pos-unbond-value` |
 | The validator has an owner | `bad-pos-unbond-unknown` |

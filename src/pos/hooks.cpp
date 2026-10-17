@@ -440,7 +440,7 @@ bool FastBlocksHooks::RecordIndependent(const std::string& reject_reason) const
         "bad-pos-ticket-payee", "bad-pos-ack-anchored", "bad-pos-ack-chain", "bad-pos-unanchored",
         "bad-pos-evidence-not-bmm", "bad-pos-evidence-count", "bad-pos-evidence-output", "bad-pos-evidence-kind", "bad-pos-evidence-slot",
         "bad-pos-evidence-same", "bad-pos-evidence-late", "bad-pos-evidence-known", "bad-pos-evidence-banned",
-        "bad-pos-bond", "bad-pos-bond-amount", "bad-pos-bond-owner", "bad-pos-bond-owner-sig", "bad-pos-bond-pop", "bad-pos-bond-tombstoned",
+        "bad-pos-bond", "bad-pos-bond-amount", "bad-pos-bond-owner", "bad-pos-bond-owner-sig", "bad-pos-bond-pop", "bad-pos-bond-tombstoned", "bad-pos-bond-unanchored",
         "bad-pos-unbond", "bad-pos-unbond-value", "bad-pos-unbond-unknown", "bad-pos-unbond-sequence", "bad-pos-unbond-amount",
         "bad-pos-unbond-remainder", "bad-pos-unbond-sig",
     };

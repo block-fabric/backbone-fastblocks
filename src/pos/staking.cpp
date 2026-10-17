@@ -234,6 +234,10 @@ bool Staking::ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int 
             const auto before{VALIDATORS.Get(out, bond->pubkey)};
             ValidatorRecord after{before.value_or(ValidatorRecord{})};
             if (after.tombstoned) return Fail(reject_reason, "bad-pos-bond-tombstoned");
+            // A first bond names the newest anchor block of the chain, which its unbonds name too: of
+            // this chain instance only. Before the chain's first anchor there is none (every chain of
+            // the genesis would name the same nothing): no first bond then (audit 7, finding 3).
+            if (after.first_bond_height < 0 && anchor_point.IsNull()) return Fail(reject_reason, "bad-pos-bond-unanchored");
             // The first bond names the owner; more bonds must name the same. The owner signs every bond
             // (its amount, and the first coin the transaction spends, so that the signature serves
             // once): otherwise anyone could top up a bond, by a satoshi, and so leave a remainder under

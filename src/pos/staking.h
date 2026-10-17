@@ -149,12 +149,13 @@ public:
     /**
      * The bonds and unbonds of a transaction (sidechain::ChainHooks::ApplyTx). `anchors`: the anchors
      * of the chain so far (an unbond is paid unbonding_anchors after). `anchor_point`: the newest anchor
-     * block of the chain so far (FastState::anchor_point), which a first bond records (first_bond_anchor).
-     * Reasons: bad-pos-bond (does not read), bad-pos-bond-amount, bad-pos-bond-pop, bad-pos-bond-tombstoned,
+     * block of the chain so far (FastState::anchor_point), which a first bond records (first_bond_anchor);
+     * a first bond before the chain's first anchor is refused (bad-pos-bond-unanchored).
+     * Reasons: bad-pos-bond (does not read), bad-pos-bond-amount, bad-pos-bond-pop, bad-pos-bond-tombstoned, bad-pos-bond-unanchored,
      * bad-pos-bond-owner; bad-pos-unbond (does not read), bad-pos-unbond-value (not 0), bad-pos-unbond-unknown,
      * bad-pos-unbond-sequence, bad-pos-unbond-amount, bad-pos-unbond-remainder, bad-pos-unbond-sig.
      */
-    bool ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason, const uint256& anchor_point = uint256{}) const;
+    bool ApplyTx(sidechain::StoreOverlay& out, const CTransaction& tx, int height, uint64_t anchors, std::string& reject_reason, const uint256& anchor_point) const;
 
     struct PegStepResult {
         //! The share of the reserve released, for the pot's payee.

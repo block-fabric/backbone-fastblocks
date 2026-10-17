@@ -1373,7 +1373,7 @@ FUZZ_TARGET(pos_staking, .init = initialize_staking)
                 }
             }
             std::string reason;
-            kept = staking.ApplyTx(step, CTransaction{tx}, fdp.ConsumeIntegralInRange<int>(0, 1000), anchors, reason);
+            kept = staking.ApplyTx(step, CTransaction{tx}, fdp.ConsumeIntegralInRange<int>(0, 1000), anchors, reason, uint256::ONE);
             assert(kept || !reason.empty());
             // (A bond counted, if the transaction is: one that does not read or count fails it.)
             if (kept) in += bonding;
