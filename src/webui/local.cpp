@@ -20,7 +20,6 @@
 #include <node/context.h>
 #include <pos/hooks.h>
 #include <rpc/util.h>
-#include <support/allocators/secure.h>
 #include <tinyformat.h>
 #include <uint256.h>
 #include <univalue.h>
@@ -117,42 +116,6 @@ std::unique_ptr<interfaces::Wallet> WalletNamed(interfaces::Node& node, const st
     throw HostError(-18, "This wallet is not loaded");
 }
 
-/**
- * The keys of an encrypted wallet unlocked for one call alone, and locked again after it (as UnlockScope of
- * walletapi.cpp). Checked before the desktop asks: a locked wallet answers WalletApi::UNLOCK_NEEDED at once,
- * the page asks for the passphrase and calls again, and only then does the desktop ask.
- */
-class Unlock
-{
-public:
-    Unlock(interfaces::Wallet& wallet, const UniValue& params) : m_wallet{wallet}
-    {
-        if (wallet.privateKeysDisabled()) throw HostError(-4, "This wallet has no private keys: it cannot bond.");
-        if (!wallet.isCrypted() || !wallet.isLocked()) return;
-        const UniValue& pass{Param(params, "passphrase")};
-        if (!pass.isStr() || pass.get_str().empty()) throw HostError(WalletApi::UNLOCK_NEEDED, "This operation needs your wallet passphrase to unlock the wallet.");
-        m_passphrase.assign(pass.get_str().begin(), pass.get_str().end());
-    }
-    /** After the desktop's yes: the keys unlocked until this goes. */
-    void Now()
-    {
-        if (m_passphrase.empty()) return;
-        if (!m_wallet.unlock(m_passphrase)) throw HostError(WalletApi::PASSPHRASE_INCORRECT, "The passphrase entered for the wallet decryption was incorrect.");
-        m_relock = true;
-    }
-    ~Unlock()
-    {
-        if (m_relock) m_wallet.lock();
-    }
-    Unlock(const Unlock&) = delete;
-    Unlock& operator=(const Unlock&) = delete;
-
-private:
-    interfaces::Wallet& m_wallet;
-    SecureString m_passphrase;
-    bool m_relock{false};
-};
-
 /** The wallet's bond to a validator key (listbonds), if it has one. */
 std::optional<UniValue> WalletBond(interfaces::Node& node, const std::string& wallet, const std::string& key)
 {
@@ -185,6 +148,12 @@ void Ask(const guard::ConfirmFn& confirm, const Window::ConfirmDialog& dialog, c
 Window::ConfirmDialog BondConfirmation(const std::string& wallet, const std::string& key, CAmount amount, const std::optional<UniValue>& existing, int unbonding_anchors, bool other_node)
 {
     Window::ConfirmDialog dialog;
+    dialog.kind = "bond";
+    // The facts, decoded by the host (audit 7 #1): the key whole, then the amount.
+    dialog.rows = confirm::WalletRows(wallet);
+    dialog.rows.push_back(confirm::Destination("Validator key", key));
+    if (existing) dialog.rows.push_back(confirm::Amount("Bonded now", AmountOf(existing->find_value("bonded"))));
+    dialog.rows.push_back(confirm::Amount(existing ? "Added" : "Amount", amount));
     dialog.title = existing ? "Add to a bond" : "Bond coins";
     const std::string what{existing ? strprintf("Add %s to this wallet's bond of %s to the validator key", Shown(amount), Shown(AmountOf(existing->find_value("bonded")))) :
                                       strprintf("Bond %s of this wallet to the validator key", Shown(amount))};
@@ -202,7 +171,14 @@ Window::ConfirmDialog UnbondConfirmation(const std::string& wallet, const std::s
 {
     Window::ConfirmDialog dialog;
     dialog.title = "Unbond";
+    dialog.kind = "unbond";
     const CAmount bonded{AmountOf(bond.find_value("bonded"))};
+    dialog.rows = confirm::WalletRows(wallet);
+    dialog.rows.push_back(confirm::Destination("Validator key", key));
+    if (bond.find_value("owner").isStr()) dialog.rows.push_back(confirm::Destination("Paid back to", bond.find_value("owner").get_str()));
+    dialog.rows.push_back(confirm::Amount("Bonded now", bonded));
+    if (amount) dialog.rows.push_back(confirm::Amount("Unbonded", *amount));
+    else dialog.rows.push_back(confirm::Text("Unbonded", "all of it"));
     const std::string what{amount ? strprintf("Unbond %s of the %s bonded to the validator key", Shown(*amount), Shown(bonded)) :
                                     strprintf("Unbond all of the bond to the validator key (%s now, and whatever is added before the unbond is mined)", Shown(bonded))};
     const UniValue& owner{bond.find_value("owner")};
@@ -243,12 +219,19 @@ Window::ConfirmDialog PopConfirmation(const std::string& owner, const std::strin
 }
 } // namespace
 
-void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
+std::map<std::string, confirm::Method> ConfirmedRpcMethods()
 {
-    // fastblocks.bond {wallet, pubkey, amount, pop?, owner?, passphrase?}: createbond, after the desktop's yes. A new
-    // bond, or more coins to the wallet's bond (only its owner may add); with pop and owner, to the key of another
-    // node, whose proof of possession that node signed (fastblocks.pop there).
-    bridge.RegisterHost("fastblocks.bond", [node, confirm](const UniValue& params) -> UniValue {
+    // None: bonds are made through fastblocks.bond and fastblocks.unbond, which the host confirms (below).
+    return {};
+}
+
+void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm, confirm::KeysFn keys)
+{
+    // fastblocks.bond {wallet, pubkey, amount, pop?, owner?}: createbond, after the desktop's yes, the passphrase of a
+    // locked wallet typed in the same dialog of the host (audit 7 #1). A new bond, or more coins to the wallet's bond
+    // (only its owner may add); with pop and owner, to the key of another node, whose proof of possession that node
+    // signed (fastblocks.pop there).
+    bridge.RegisterHost("fastblocks.bond", [node, keys](const UniValue& params) -> UniValue {
         const std::string wallet_name{Text(params, "wallet")};
         const std::string key{ValidatorKey(params)};
         const std::string amount_text{Text(params, "amount", 32)};
@@ -259,10 +242,9 @@ void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
         if (!owner.isNull() && (!owner.isStr() || owner.get_str().size() > 90)) throw HostError(BRIDGE_INVALID_REQUEST, "owner: an address");
         interfaces::Node& n{node()};
         auto wallet{WalletNamed(n, wallet_name)};
-        Unlock unlock{*wallet, params};
+        if (wallet->privateKeysDisabled()) throw HostError(-4, "This wallet has no private keys: it cannot bond.");
+        if (!keys) throw HostError(-18, "Wallets are disabled in this node (-disablewallet).");
         const auto existing{WalletBond(n, wallet_name, key)};
-        Ask(confirm, BondConfirmation(wallet_name, key, amount, existing, UnbondingAnchors(n), !pop.isNull()), "Nothing was bonded: it was declined.");
-        unlock.Now();
         UniValue args{UniValue::VARR};
         args.push_back(key);
         args.push_back(FormatMoney(amount));
@@ -270,26 +252,28 @@ void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm)
             args.push_back(pop.get_str());
             if (!owner.isNull()) args.push_back(owner.get_str());
         }
-        return n.executeRpc("createbond", args, WalletUri(wallet_name));
+        return keys(wallet_name, BondConfirmation(wallet_name, key, amount, existing, UnbondingAnchors(n), !pop.isNull()), /*always=*/true, /*fee_unknown=*/true,
+                    [&] { return n.executeRpc("createbond", args, WalletUri(wallet_name)); });
     }, Bridge::Thread::LONG);
 
-    // fastblocks.unbond {wallet, pubkey, amount ("all" or coins), passphrase?}: createunbond, after the desktop's yes.
-    bridge.RegisterHost("fastblocks.unbond", [node, confirm](const UniValue& params) -> UniValue {
+    // fastblocks.unbond {wallet, pubkey, amount ("all" or coins)}: createunbond, after the desktop's yes (the passphrase
+    // in the same dialog).
+    bridge.RegisterHost("fastblocks.unbond", [node, keys](const UniValue& params) -> UniValue {
         const std::string wallet_name{Text(params, "wallet")};
         const std::string key{ValidatorKey(params)};
         const std::string amount_text{Text(params, "amount", 32)};
         const std::optional<CAmount> amount{amount_text == "all" ? std::nullopt : std::optional{Coins(amount_text)}};
         interfaces::Node& n{node()};
         auto wallet{WalletNamed(n, wallet_name)};
-        Unlock unlock{*wallet, params};
+        if (wallet->privateKeysDisabled()) throw HostError(-4, "This wallet has no private keys: it cannot unbond.");
+        if (!keys) throw HostError(-18, "Wallets are disabled in this node (-disablewallet).");
         const auto bond{WalletBond(n, wallet_name, key)};
         if (!bond || AmountOf(bond->find_value("bonded")) <= 0) throw HostError(-8, "This wallet has nothing bonded to this validator key.");
-        Ask(confirm, UnbondConfirmation(wallet_name, key, amount, *bond, UnbondingAnchors(n)), "Nothing was unbonded: it was declined.");
-        unlock.Now();
         UniValue args{UniValue::VARR};
         args.push_back(key);
         args.push_back(amount ? FormatMoney(*amount) : std::string{"all"});
-        return n.executeRpc("createunbond", args, WalletUri(wallet_name));
+        return keys(wallet_name, UnbondConfirmation(wallet_name, key, amount, *bond, UnbondingAnchors(n)), /*always=*/true, /*fee_unknown=*/true,
+                    [&] { return n.executeRpc("createunbond", args, WalletUri(wallet_name)); });
     }, Bridge::Thread::LONG);
 
     // fastblocks.staking {enabled}: setstaking; turning it off asks the desktop first (the validator may be jailed).

@@ -112,7 +112,7 @@
     busy = true;
     try {
       const all = { wallet, ...params };
-      const result = await withUnlock(wallet, (passphrase) => request<Record<string, unknown>>('host', method, passphrase ? { ...all, passphrase } : all));
+      const result = await withUnlock(wallet, () => request<Record<string, unknown>>('host', method, all));
       await refreshFb();
       return result ?? null;
     } catch (e) {

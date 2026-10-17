@@ -1,7 +1,7 @@
 <script lang="ts">
   // Staking, Bonds: the bonds of the wallet (bonded, unbonding and when it is paid, the state of the key) and the
   // form that bonds, adds to a bond, unbonds or unbonds all (createbond, createunbond through the host, which asks
-  // the desktop with the key and the amount in full; the passphrase first for a locked wallet). A bond to the key of
+  // the desktop with the key and the amount in full; the passphrase of a locked wallet typed in that dialog). A bond to the key of
   // another node takes the proof of possession that node signs: this node signs one for an owner here.
   import Amount from '../../components/Amount.svelte';
   import AmountInput from '../../components/AmountInput.svelte';
@@ -79,7 +79,7 @@
         params.pop = pop.trim();
         params.owner = owner.trim();
       }
-      const result = await withUnlock(wallet, (passphrase) => request<Record<string, unknown>>('host', unbond ? 'fastblocks.unbond' : 'fastblocks.bond', passphrase ? { ...params, passphrase } : params));
+      const result = await withUnlock(wallet, () => request<Record<string, unknown>>('host', unbond ? 'fastblocks.unbond' : 'fastblocks.bond', params));
       if (!result) return;
       amountKey++;
       amount = null;

@@ -654,11 +654,20 @@ describe('the host side of the pages (local.cpp)', () => {
   });
 
   it('bonds, unbonds, staking off and proofs of possession ask the desktop first', () => {
-    for (const [method, rpc] of [['fastblocks.bond', 'createbond'], ['fastblocks.unbond', 'createunbond'], ['fastblocks.pop', 'signbondpop']]) {
+    // Bonds and unbonds: in the dialog of the host with the keys (the passphrase of a locked wallet typed there), the RPC run
+    // only inside it (audit 7 #1).
+    for (const [method, rpc] of [['fastblocks.bond', 'createbond'], ['fastblocks.unbond', 'createunbond']]) {
       const body = local.slice(local.indexOf(`"${method}"`));
+      const ask = body.indexOf('return keys(wallet_name, ');
+      expect(ask).toBeGreaterThan(0);
+      expect(body.indexOf(`[&] { return n.executeRpc("${rpc}"`)).toBeGreaterThan(ask);
+      expect(body.slice(0, body.indexOf('}, Bridge::Thread::LONG);'))).not.toMatch(/passphrase/);
+    }
+    {
+      const body = local.slice(local.indexOf('"fastblocks.pop"'));
       const ask = body.indexOf('Ask(confirm');
       expect(ask).toBeGreaterThan(0);
-      expect(body.indexOf(`executeRpc("${rpc}"`)).toBeGreaterThan(ask);
+      expect(body.indexOf('executeRpc("signbondpop"')).toBeGreaterThan(ask);
     }
     expect(local).toMatch(/if \(!enabled\.get_bool\(\)\) Ask\(confirm, StopStakingConfirmation\(\)/);
   });

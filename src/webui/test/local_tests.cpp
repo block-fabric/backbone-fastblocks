@@ -65,6 +65,8 @@ struct Host {
     std::atomic<int> node_asked{0};
     std::atomic<int> asked{0};
     std::atomic<bool> yes{false};
+    //! The questions with the keys (bonds, unbonds: the passphrase in the dialog of the host, audit 7 #1).
+    std::atomic<int> keys_asked{0};
     std::string shown;
     webui::dialog::Level level{webui::dialog::Level::INFO};
     int next{0};
@@ -82,6 +84,11 @@ struct Host {
                 shown = dialog.title + "\n" + dialog.message;
                 level = dialog.level;
                 return yes.load();
+            },
+            [this](const std::string&, webui::Window::ConfirmDialog, bool, bool, const std::function<UniValue()>& run) {
+                ++keys_asked;
+                if (!yes) throw webui::HostError(webui::BRIDGE_CANCELLED, "declined");
+                return run();
             });
     }
     ~Host() { bridge.Stop(); }
@@ -118,6 +125,7 @@ BOOST_AUTO_TEST_CASE(the_pages_read_and_never_bond_on_their_own)
     for (const char* m : {"createbond", "createunbond", "setstaking", "signbondpop"}) BOOST_CHECK_MESSAGE(!methods.contains(m), m);
     BOOST_CHECK_EQUAL(methods.size(), 9U);
     BOOST_CHECK(webui::local::KeyedRpcMethods().empty());
+    BOOST_CHECK(webui::local::ConfirmedRpcMethods().empty());
 }
 
 BOOST_AUTO_TEST_CASE(staking_off_waits_for_the_desktop)
@@ -189,6 +197,8 @@ BOOST_AUTO_TEST_CASE(bonds_refuse_what_is_not_a_key_an_amount_or_a_proof_first)
     BOOST_CHECK_EQUAL(unbond("all"), -4242);
     BOOST_CHECK_EQUAL(unbond("0.25"), -4242);
     BOOST_CHECK_EQUAL(host.asked.load(), 0);
+    // Never asked before the node told what the wallet holds; never a passphrase from the page.
+    BOOST_CHECK_EQUAL(host.keys_asked.load(), 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

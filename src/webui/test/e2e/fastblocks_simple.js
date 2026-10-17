@@ -32,6 +32,8 @@
   }
   const W_ = 'fb';
   try {
+    // What pays or signs is confirmed in the dialog of the host (audit 7 #1): every question accepted here, checked at the end.
+    await host('test.confirmAnswer', { always: true });
     await waitFor('the node to run', () => T() && T().app.phase === 'ready' && T().node.tip, 120000);
     await check('Advanced on a first start (user decision), Simple once chosen', window.__E2E_FIRST_MODE === 'advanced' && T().prefs.uiMode === 'simple', `${window.__E2E_FIRST_MODE} ${T().prefs.uiMode}`);
     await waitFor('the node to reach the mainchain', async () => (await rpc('getmainchaininfo')).connected, 60000);
@@ -94,6 +96,12 @@
     await check('the stake on its way back', true);
     await sleep(2000);
     await shot('stopping-midnight');
+    {
+      // The confirmations of the desktop: what the chain's pages paid or signed, each with its facts.
+      const titles = ["Add to a bond", "Bond coins", "Unbond"];
+      const asked = (await host('test.confirmed', {})).filter((q) => titles.includes(q.title));
+      await check(`the desktop confirmed what the pages paid or signed (${asked.length})`, asked.length > 0 && asked.every((q) => q.rows.length > 1), JSON.stringify(asked.map((q) => q.title)));
+    }
     await finish();
   } catch (e) {
     await finish(e);
