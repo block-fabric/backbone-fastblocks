@@ -1828,6 +1828,35 @@ The security review of the attack8 fix found two issues in `BlocksCommittedBy`
   `review8_forged_signature_failing_against_the_record`. Plain sidechains have
   no signature in their blocks: nothing to check first.
 
+## Audit 7 (2026-10-16): the 15-second chain
+
+Six findings (`~/skydoge/audit/2026-10-16-audit-7-C-fastblocks.md`), each fixed
+with a regression test (`fastblocks_tests.cpp`, `audit7_*`, from the audit's
+proofs of concept: each fails before its fix):
+
+1. **CRITICAL, rewards to any script.** A proof's reward was owed to the
+   carrier's first coinbase output verbatim (and a BMM block's pot to its own),
+   so a script no block can carry (the pot's, 80,000 sigops) made every later
+   peg step invalid and halted the chain. Only addresses are paid now
+   (`IsRewardPayee`: P2PKH, P2SH, P2WPKH, P2WSH, P2TR); anything else goes to
+   the reserve. Consensus. ("Staking", "Fees and the pot".)
+2. **MEDIUM, finality's window.** Forks below the newest 4k+8 anchors were not
+   looked at; every fork down to genesis is now (`DeepForkMargin`, "Finality").
+3. **MEDIUM, one genesis for every testnet restart.** The test network and
+   signet have a new genesis (testnet `90349e06…1b14`, signet `45c28d19…4301`,
+   `genesis_time` 2026-10-17 08:00 UTC); unbonds name the first bond's coin and
+   the anchor block it was applied under; slashing protection files name their
+   genesis; `checkpegbalance` compares the chain's coins with the escrow.
+   Restarting the test network: stop the old chain's merged mining first (its
+   commitments after the genesis time count against "final"), delete each
+   validator's `<key file>.protection` once (format 1, slots of the old
+   genesis time, which was earlier), and run `checkpegbalance` once synced.
+4. **LOW, counts of blocks.** Undo depth 5760 (a day), the block download
+   timeout at least a minute a block, pruned peers' window; the unchecked
+   header budget kept (memory bound).
+5. **INFO.** Main had the old prune minimum: the template's 10000 MiB merged.
+6. **INFO, jailing.** Left as decided (see "Counts of blocks").
+
 ## Deviations from the design (phase 5)
 
 - Leaders do not move to an anchored branch they left (§4.2): such an anchor
