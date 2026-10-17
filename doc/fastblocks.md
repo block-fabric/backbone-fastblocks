@@ -28,7 +28,9 @@ audit).
 Programs: `fastblocksd`, `fastblocks-cli`, `fastblocks-qt`; data directory
 `~/.fastblocks`. The main network refuses to start until
 `main_activation_height` names the mainchain block that activated slot 5; the
-test network and signet only warn (it is 0 there until the slot activates).
+test network and signet only warn (it is 0 there until the slot activates; the
+test network's is `TESTNET_MAIN_ACTIVATION_HEIGHT` in `src/kernel/testnet_activation.h`,
+set once slot 5 activates on the test network reset on 17/Oct/2026).
 
 ## Parameters
 
