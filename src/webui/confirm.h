@@ -71,6 +71,14 @@ struct Call {
 /** The names of the parameters of an RPC method, in order, as the node's own help says them (cached); empty when unknown. */
 std::vector<std::string> ArgNames(interfaces::Node& node, const std::string& method);
 
+/**
+ * The parameters of a call as the RPC server would take them, positional: an array as it is; an object only of the
+ * parameters' own names (ArgNames: no alias, no "args", no field of an options object), put at their positions with null in
+ * the gaps. Throws HostError(BRIDGE_INVALID_REQUEST) for anything else, or an object when the names are unknown. The host
+ * describes this array and runs this array, nothing else (audit 7 review: no parser differential).
+ */
+UniValue CanonicalParams(interfaces::Node& node, const std::string& method, const UniValue& params);
+
 /** The value of a parameter as a dialog shows it: a string as itself, anything else as JSON. */
 std::string ValueText(const UniValue& value);
 
@@ -94,6 +102,10 @@ struct Method {
     Bridge::Thread thread{Bridge::Thread::LONG};
     std::function<std::optional<Window::ConfirmDialog>(const Call&)> describe;
     bool fee_unknown{false};
+    //! How many of the first parameters must be given (not null): a call without one is refused before it is described.
+    size_t required{0};
+    //! Whether several calls may be confirmed in one question (rpc.confirmed {calls}): never for what moves coins.
+    bool batch{false};
 };
 
 /** A describer of the generic kind: the title and the button, and which parameters are destinations and amounts. */

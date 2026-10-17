@@ -89,6 +89,27 @@ std::vector<std::string> ArgNames(interfaces::Node& node, const std::string& met
     return names[method];
 }
 
+UniValue CanonicalParams(interfaces::Node& node, const std::string& method, const UniValue& params)
+{
+    if (params.isNull()) return UniValue{UniValue::VARR};
+    if (params.isArray()) return params;
+    if (!params.isObject()) throw HostError(BRIDGE_INVALID_REQUEST, "params: an array or an object");
+    const auto names{ArgNames(node, method)};
+    if (names.empty()) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s: give its parameters in order (an array)", method));
+    std::vector<UniValue> at;
+    for (size_t i{0}; i < params.size(); ++i) {
+        const std::string& key{params.getKeys()[i]};
+        const auto it{std::ranges::find(names, key)};
+        if (key.empty() || it == names.end()) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s has no parameter named \"%s\": give its parameters in order (an array)", method, guard::OneLine(key, 60)));
+        const size_t pos{static_cast<size_t>(it - names.begin())};
+        if (at.size() <= pos) at.resize(pos + 1);
+        at[pos] = params.getValues()[i];
+    }
+    UniValue out{UniValue::VARR};
+    for (UniValue& v : at) out.push_back(std::move(v));
+    return out;
+}
+
 UniValue Call::Arg(size_t index) const
 {
     if (params.isArray()) return index < params.size() ? params[index] : UniValue{};
@@ -381,7 +402,8 @@ std::optional<Window::ConfirmDialog> Ack(const Call& call)
 {
     const std::string hash{ValueText(call.Arg(0))};
     const UniValue ack{call.Arg(1)};
-    const bool on{ack.isNull() || ack.isTrue()};
+    // Stopping only when the call says so in so many words (false).
+    const bool on{!(ack.isBool() && !ack.get_bool())};
     Window::ConfirmDialog dialog;
     dialog.title = on ? "Ack a sidechain proposal" : "Stop acking a sidechain proposal";
     dialog.kind = "ack";
@@ -429,7 +451,8 @@ std::optional<Window::ConfirmDialog> RemoveProposal(const Call& call)
 std::optional<Window::ConfirmDialog> Generate(const Call& call)
 {
     // Turning the miner off needs no question.
-    if (!call.Arg(0).isTrue()) return std::nullopt;
+    // Only when the call says so in so many words (false): a missing, null or other value is asked about.
+    if (const UniValue generate{call.Arg(0)}; generate.isBool() && !generate.get_bool()) return std::nullopt;
     Window::ConfirmDialog dialog;
     dialog.title = "Mine with this computer";
     dialog.kind = "mine";
@@ -449,22 +472,22 @@ std::map<std::string, Method> KitMethods()
     using enum Method::Kind;
     std::map<std::string, Method> methods{
         // Signing a message with a key of the wallet (proofs of funds sign one message with each of their addresses).
-        {"signmessage", {SPEND, Bridge::Thread::LONG, SignMessage}},
+        {"signmessage", {SPEND, Bridge::Thread::LONG, SignMessage, false, 2, /*batch=*/true}},
 #if WEBUI_SIDECHAIN
         // The peg of a sidechain: a withdrawal burns the coins of the wallet (the network fee set by the wallet), a refund
         // takes one back.
-        {"createwithdrawal", {SPEND, Bridge::Thread::LONG, Withdraw, /*fee_unknown=*/true}},
-        {"refundwithdrawal", {SPEND, Bridge::Thread::LONG, Refund, /*fee_unknown=*/true}},
+        {"createwithdrawal", {SPEND, Bridge::Thread::LONG, Withdraw, /*fee_unknown=*/true, 2}},
+        {"refundwithdrawal", {SPEND, Bridge::Thread::LONG, Refund, /*fee_unknown=*/true, 2}},
 #else
         // Drivechains: a deposit pays the wallet; votes, acks and proposals change what the blocks of this node say.
-        {"createsidechaindeposit", {SPEND, Bridge::Thread::LONG, Deposit}},
-        {"setwithdrawalvote", {NODE, Bridge::Thread::LONG, WithdrawalVote}},
-        {"setdefaultwithdrawalvote", {NODE, Bridge::Thread::LONG, DefaultVote}},
-        {"acksidechain", {NODE, Bridge::Thread::LONG, Ack}},
-        {"createsidechainproposal", {NODE, Bridge::Thread::LONG, Propose}},
-        {"removesidechainproposal", {NODE, Bridge::Thread::LONG, RemoveProposal}},
+        {"createsidechaindeposit", {SPEND, Bridge::Thread::LONG, Deposit, false, 3}},
+        {"setwithdrawalvote", {NODE, Bridge::Thread::LONG, WithdrawalVote, false, 2}},
+        {"setdefaultwithdrawalvote", {NODE, Bridge::Thread::LONG, DefaultVote, false, 1}},
+        {"acksidechain", {NODE, Bridge::Thread::LONG, Ack, false, 1}},
+        {"createsidechainproposal", {NODE, Bridge::Thread::LONG, Propose, false, 2}},
+        {"removesidechainproposal", {NODE, Bridge::Thread::LONG, RemoveProposal, false, 1}},
         // Mining with the processor: it loads the computer (and the rewards go to an address the page gives).
-        {"setgenerate", {NODE, Bridge::Thread::LONG, Generate}},
+        {"setgenerate", {NODE, Bridge::Thread::LONG, Generate, false, 1}},
 #endif
     };
     // The chain's own (local.cpp): what its pages do that pays, signs or changes the node, with its describers.
@@ -552,30 +575,53 @@ UniValue ConfirmedRpc::Call(const UniValue& params)
     if (const auto it{Methods().find(name)}; it != Methods().end()) {
         method = it->second;
     } else if (KeyedWalletRpc(name)) {
-        method = {Method::Kind::KEYS, Bridge::Thread::LONG, Keys};
+        method = {Method::Kind::KEYS, Bridge::Thread::LONG, Keys, false, 0, /*batch=*/true};
     } else {
         throw HostError(BRIDGE_METHOD_NOT_FOUND, strprintf("%s is not a method the pages call through the host", name));
     }
     if (method.kind == Method::Kind::NODE && !wallet.empty()) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s is a method of the node, not of a wallet", name));
     if (method.kind != Method::Kind::NODE && wallet.empty()) throw HostError(BRIDGE_INVALID_REQUEST, "wallet: the wallet is needed");
-    if (method.kind == Method::Kind::NODE && batch) throw HostError(BRIDGE_INVALID_REQUEST, "calls: only methods of a wallet");
+    // Several calls in one question only for what moves no coins (signatures of a proof, reads with the keys): a spend is one
+    // call, one question.
+    if (batch && !method.batch) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s: one call at a time", name));
 
     interfaces::Node& node{m_node()};
-    // The question: each call described by the host; for several, the facts of each that the first did not say already.
+    // The parameters as the RPC server takes them: what is described is what runs.
+    for (auto& [m, p] : calls) {
+        p = CanonicalParams(node, m, p);
+        for (size_t i{0}; i < method.required; ++i) {
+            if (i >= p.size() || p[i].isNull()) throw HostError(BRIDGE_INVALID_REQUEST, strprintf("%s: parameter %u is missing", name, i + 1));
+        }
+    }
+    // The question: each call described by the host. For several, the rows of the wallet once, then every row of every call,
+    // none left out; more than a dialog shows is refused, never cut.
     std::optional<Window::ConfirmDialog> dialog;
-    for (const auto& [m, p] : calls) {
-        confirm::Call call{node, wallet, m, p};
+    const auto wallet_rows{wallet.empty() ? std::vector<dialog::Row>{} : WalletRows(wallet)};
+    // Several reads with the keys: the passphrase of a locked wallet is asked once for the command (it spends nothing).
+    if (method.kind == Method::Kind::KEYS && calls.size() > 1) {
+        dialog = Keys(confirm::Call{node, wallet, name, UniValue{UniValue::VARR}});
+        dialog->rows.push_back(Text("Calls", strprintf("%u", calls.size())));
+    }
+    const bool keys_batch{dialog.has_value()};
+    for (size_t n{0}; n < calls.size() && !keys_batch; ++n) {
+        confirm::Call call{node, wallet, calls[n].first, calls[n].second};
         if (m_fee && !wallet.empty()) call.fee_for = [&](int64_t vsize) { return m_fee(wallet, vsize); };
         auto one{method.describe(call)};
         if (!one) continue;
         if (!dialog) {
             dialog = std::move(one);
+            if (calls.size() > 1) dialog->rows.insert(dialog->rows.begin() + std::min(wallet_rows.size(), dialog->rows.size()), Heading(strprintf("1 of %u", calls.size())));
             continue;
         }
-        for (auto& row : one->rows) {
-            const bool said{std::ranges::any_of(dialog->rows, [&](const dialog::Row& r) { return r.label == row.label && r.value == row.value && r.kind == row.kind; })};
-            if (!said || row.kind == dialog::Row::Kind::ADDRESS) dialog->rows.push_back(std::move(row));
+        dialog->rows.push_back(Heading(strprintf("%u of %u", n + 1, calls.size())));
+        for (size_t i{0}; i < one->rows.size(); ++i) {
+            // The rows of the wallet, the same for every call (one wallet): said once, above.
+            if (i < wallet_rows.size() && one->rows[i].label == wallet_rows[i].label && one->rows[i].value == wallet_rows[i].value) continue;
+            dialog->rows.push_back(std::move(one->rows[i]));
         }
+    }
+    if (dialog && dialog->rows.size() > dialog::MAX_ROWS) {
+        throw HostError(BRIDGE_INVALID_REQUEST, strprintf("Too much for one question (%u facts; at most %u): ask for fewer at once", dialog->rows.size(), dialog::MAX_ROWS));
     }
     if (dialog && calls.size() > 1) dialog->message = strprintf("%u at once.\n\n%s", calls.size(), dialog->message);
 

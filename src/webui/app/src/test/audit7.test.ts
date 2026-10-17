@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { legibleColors, parseColor, PAGE_TEXT_PAIRS, contrastOf, baseColors, checkName } from '../lib/customthemes';
-import { walletRpc, withKeys } from '../lib/dialogs.svelte';
+import { KEYED_BATCH, walletRpc, withKeys } from '../lib/dialogs.svelte';
 import { isHidden, oneLine, revealBidi } from '../lib/format';
 import { rpc } from '../lib/rpc';
 import { parsePaymentUri, SCHEME } from '../lib/uri';
@@ -77,6 +77,20 @@ describe('audit 7 #1: what pays, signs or votes goes to the host, which asks on 
     ]);
     expect(answers).toEqual([{ result: 'sig1' }, { result: 'sig2' }]);
     expect(seen.at(-1)).toMatchObject({ kind: 'host', method: 'rpc.confirmed', params: { wallet: 'w', calls: [{ method: 'signmessage' }, { method: 'signmessage' }] } });
+  });
+});
+
+describe('audit 7 review: a question of the host shows every call, never cut', () => {
+  it('withKeys asks for so many calls at most in one question', async () => {
+    const seen: BridgeRequest[] = [];
+    setTransport(async (r) => {
+      seen.push(r);
+      return (r.params as { calls: unknown[] }).calls.map((_, i) => ({ result: `s${i}` }));
+    });
+    const calls = Array.from({ length: 2 * KEYED_BATCH + 5 }, (_, i) => ({ method: 'signmessage', params: [`a${i}`, 'm'] }));
+    const answers = await withKeys<string>('w', calls);
+    expect(answers).toHaveLength(calls.length);
+    expect(seen.map((r) => (r.params as { calls: unknown[] }).calls.length)).toEqual([KEYED_BATCH, KEYED_BATCH, 5]);
   });
 });
 

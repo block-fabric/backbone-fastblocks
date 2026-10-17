@@ -21,8 +21,7 @@ constexpr size_t MAX_MESSAGE{6000};
 constexpr size_t MAX_DETAILS{6000};
 constexpr size_t MAX_BUTTON{60};
 constexpr size_t MAX_LABEL{200};
-//! The facts of a dialog (Row): at most so many, their labels and values cut to so many characters.
-constexpr size_t MAX_ROWS{80};
+//! The facts of a dialog (Row): at most MAX_ROWS (dialog.h), their labels and values cut to so many characters.
 constexpr size_t MAX_ROW_LABEL{60};
 constexpr size_t MAX_ROW_VALUE{2000};
 constexpr size_t MAX_ERROR{400};

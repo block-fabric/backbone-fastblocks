@@ -54,6 +54,9 @@ inline constexpr int READY_TIMEOUT_MS{10000};
 //! How grave what is asked is: the colour of the icon and of the button that accepts.
 enum class Level { INFO, WARNING, DANGER };
 
+//! The most rows (Row) a dialog shows; more are cut. A confirmation never has more (confirm.cpp refuses it instead).
+constexpr size_t MAX_ROWS{80};
+
 /**
  * A fact the dialog shows apart from its text, on a line of its own: what a spend pays and to whom, what a vote
  * changes (audit 7 #1). The host decodes them from the transaction or the parameters itself; the page shows them as

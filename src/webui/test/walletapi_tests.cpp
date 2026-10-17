@@ -853,6 +853,25 @@ BOOST_AUTO_TEST_CASE(keys_for_one_call)
     BOOST_CHECK_EQUAL(RowValue(asked[0], "Amount"), "1.50000000 " + CURRENCY_UNIT);
     BOOST_CHECK_EQUAL(RowValue(asked[0], "Leaves this wallet"), "1.50100000 " + CURRENCY_UNIT);
     BOOST_CHECK(asked[0].passphrase);
+    // Review of audit 7: what is described is what runs (no "args", alias or unknown name; nothing missing), and a spend is
+    // one call, one question.
+    const auto withdraw{[&](const UniValue& p) { return confirm_call(Obj({{"wallet", "k"}, {"method", "createwithdrawal"}, {"params", p}})).first; }};
+    asked.clear();
+    BOOST_CHECK_EQUAL(withdraw(Obj({{"args", List({UniValue{"mainchainaddress"}, UniValue{"1.5"}})}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(withdraw(Obj({{"mainchainaddress", "x"}, {"amount", "1"}, {"args", List({UniValue{"y"}})}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(withdraw(List({UniValue{"mainchainaddress"}})), webui::BRIDGE_INVALID_REQUEST);
+    const UniValue one_withdrawal{Obj({{"method", "createwithdrawal"}, {"params", List({UniValue{"mainchainaddress"}, UniValue{"1.5"}})}})};
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", List({one_withdrawal, one_withdrawal})}})).first, webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK(asked.empty());
+    BOOST_CHECK_EQUAL(withdraw(Obj({{"amount", "2"}, {"mainchainaddress", "mainchainaddress"}})), webui::BRIDGE_CANCELLED);
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK_EQUAL(RowValue(asked[0], "Amount"), "2.00000000 " + CURRENCY_UNIT);
+    // Signatures of a proof: every call shown, the same twice too.
+    asked.clear();
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", List({sign, sign})}})).first, webui::BRIDGE_CANCELLED);
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK(RowOf(asked[0], "Address", RowOf(asked[0], "Address") + 1) > 0);
+    BOOST_CHECK(RowOf(asked[0], "2 of 2") > 0);
 #else
     BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"method", "setgenerate"}, {"params", List({UniValue{true}, UniValue{a}})}})).first, webui::BRIDGE_INVALID_REQUEST);
     BOOST_CHECK(Call("wallet.info", Obj({{"wallet", "k"}}))["locked"].get_bool());
@@ -870,6 +889,53 @@ BOOST_AUTO_TEST_CASE(keys_for_one_call)
     BOOST_CHECK_EQUAL(confirm_call(Obj({{"method", "setdefaultwithdrawalvote"}, {"params", List({UniValue{"abstain"}})}})).first, 0);
     BOOST_CHECK_EQUAL(RowValue(asked.back(), "Default vote"), "abstain");
     BOOST_CHECK_EQUAL(node->executeRpc("getdrivechaininfo", UniValue{UniValue::VARR}, "/")["defaultwithdrawalvote"].get_str(), "abstain");
+
+    // Review of audit 7: what is described is what runs. Named parameters only by the method's own names, put in order; never
+    // "args", an alias or a name the method does not have (the RPC server would read them otherwise than the dialog).
+    asked.clear();
+    const auto gen_call{[&](const UniValue& p) { return confirm_call(Obj({{"method", "setgenerate"}, {"params", p}})).first; }};
+    BOOST_CHECK_EQUAL(gen_call(Obj({{"args", List({UniValue{true}, UniValue{a}})}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(gen_call(Obj({{"generate", false}, {"args", List({UniValue{true}})}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(gen_call(Obj({{"gen", true}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK(asked.empty());
+    BOOST_CHECK_EQUAL(gen_call(Obj({{"address", a}, {"generate", true}})), webui::BRIDGE_CANCELLED);
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    BOOST_CHECK_EQUAL(RowValue(asked[0], "Rewards to"), a);
+    // "Off" only when it says false: missing or null is refused, anything else asked.
+    BOOST_CHECK(gen_call(Obj({{"generate", false}})) != webui::BRIDGE_CANCELLED);
+    BOOST_CHECK_EQUAL(asked.size(), 1U);
+    BOOST_CHECK_EQUAL(gen_call(List({})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(gen_call(List({UniValue{}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(gen_call(Obj({{"address", a}})), webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(asked.size(), 1U);
+    BOOST_CHECK_EQUAL(gen_call(List({UniValue{"false"}})), webui::BRIDGE_CANCELLED);
+    BOOST_CHECK_EQUAL(gen_call(List({UniValue{0}})), webui::BRIDGE_CANCELLED);
+    BOOST_CHECK_EQUAL(asked.size(), 3U);
+    // A call missing a parameter the dialog would show: refused, not described.
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"method", "signmessage"}, {"params", List({UniValue{a}})}})).first, webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(asked.size(), 3U);
+
+    // Batches: never of what moves coins (one call, one question); of signatures, every call shown, the same twice too; more
+    // than a dialog shows refused, never cut.
+    const UniValue deposit{Obj({{"method", "createsidechaindeposit"}, {"params", List({UniValue{1}, UniValue{"s1_x_y"}, UniValue{"1"}})}})};
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", List({deposit})}})).first, webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", List({deposit, deposit})}})).first, webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK_EQUAL(asked.size(), 3U);
+    asked.clear();
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", List({sign, sign})}})).first, webui::BRIDGE_CANCELLED);
+    BOOST_REQUIRE_EQUAL(asked.size(), 1U);
+    const int first{RowOf(asked[0], "Address")};
+    BOOST_CHECK(first >= 0);
+    BOOST_CHECK(RowOf(asked[0], "Address", first + 1) > first);
+    BOOST_CHECK(RowOf(asked[0], "Message", RowOf(asked[0], "Message") + 1) > 0);
+    BOOST_CHECK(RowOf(asked[0], "1 of 2") >= 0);
+    BOOST_CHECK(RowOf(asked[0], "2 of 2") > RowOf(asked[0], "1 of 2"));
+    UniValue many{UniValue::VARR};
+    for (int i{0}; i < 30; ++i) many.push_back(sign);
+    std::string why;
+    BOOST_CHECK_EQUAL(confirm_call(Obj({{"wallet", "k"}, {"calls", many}}), &why).first, webui::BRIDGE_INVALID_REQUEST);
+    BOOST_CHECK(why.find("Too much for one question") != std::string::npos);
+    BOOST_CHECK_EQUAL(asked.size(), 1U);
 #endif
 }
 

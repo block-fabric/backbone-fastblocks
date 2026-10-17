@@ -154,13 +154,19 @@ export interface KeyedAnswer<T = unknown> {
  * keys unlocked for these calls alone (rpc.confirmed). Resolves with the answer of each call, or null when the user said no.
  */
 export async function withKeys<T = unknown>(wallet: string, calls: { method: string; params: unknown[] | Record<string, unknown> }[]): Promise<KeyedAnswer<T>[] | null> {
+  // The host shows every call of a question, never cut: so many at most in one (confirm.cpp refuses more).
+  const answers: KeyedAnswer<T>[] = [];
   try {
-    return await request<KeyedAnswer<T>[]>('host', 'rpc.confirmed', { wallet, calls });
+    for (let i = 0; i < calls.length; i += KEYED_BATCH) answers.push(...(await request<KeyedAnswer<T>[]>('host', 'rpc.confirmed', { wallet, calls: calls.slice(i, i + KEYED_BATCH) })));
+    return answers;
   } catch (e) {
     if (declined(e)) return null;
     throw e;
   }
 }
+
+/** The most calls in one question of the host (withKeys): every row of each fits in its dialog. */
+export const KEYED_BATCH = 20;
 
 /**
  * One wallet RPC method; its error is thrown. One that pays or signs goes through the host, which asks the user on the
