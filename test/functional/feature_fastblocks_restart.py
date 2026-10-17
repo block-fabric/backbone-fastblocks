@@ -118,7 +118,10 @@ class FastBlocksRestartTest(SidechainTest):
         """The slot the slashing protection next to validator i's key file has (written when it signs)."""
         with open(self.key_files[i] + ".protection", encoding="utf-8") as f:
             lines = f.read().splitlines()
-        assert_equal(lines[0], "fastblocks-slashing-protection 1")
+        # Format 2: it names the chain's genesis (audit 7, finding 3).
+        header = lines[0].split()
+        assert_equal(header[:2], ["fastblocks-slashing-protection", "2"])
+        assert_equal(len(header[2]), 64)
         slots = dict(line.split() for line in lines[1:])
         return int(slots[XONLY[i]])
 

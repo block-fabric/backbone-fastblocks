@@ -138,7 +138,8 @@ class FastBlocksTest(SidechainTest):
         for i, node in enumerate(self.nodes):
             with open(self.key_file(i) + ".protection") as f:
                 lines = f.read().splitlines()
-            assert_equal(lines[0], "fastblocks-slashing-protection 1")
+            # Format 2: it names the chain (audit 7, finding 3).
+            assert_equal(lines[0], f"fastblocks-slashing-protection 2 {node.getblockhash(0)}")
             assert_equal(lines[1].split()[0], compute_xonly_pubkey(KEYS[i])[0].hex())
 
         self.log.info("Anchors: tickets the mainchain commits to, acknowledged by a leader")

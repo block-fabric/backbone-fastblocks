@@ -234,17 +234,19 @@ class SidechainFollowerTest(BitcoinTestFramework):
         self.on_record(10)
 
         self.log.info("A reorg that drops more commitments than the node can take back waits for the operator")
+        # DRIVECHAIN_UNDO_DEPTH: 5760 in FastBlocks (a day of 15-second slots; 2880 in the template).
+        deeper = 5760 + 5
         with main.lock:
-            for i in range(2885):
+            for i in range(deeper):
                 main.add_block(bmm=f"{0xdd:02x}{i:062x}")
-        self.on_record(10 + 2885)
+        self.on_record(10 + deeper)
         with main.lock:
             # The mainchain node says the blocks above height 8 are gone, replaced by a shorter branch.
             main.blocks = main.blocks[:9]
             for _ in range(5):
                 main.add_block(branch=3)
         self.wait_until(lambda: "call syncmainchain true" in node.getmainchaininfo().get("error", ""))
-        assert_equal(node.getmainchaininfo()["height"], 10 + 2885)
+        assert_equal(node.getmainchaininfo()["height"], 10 + deeper)
         assert_equal(node.syncmainchain(True), 13)
         assert_equal(node.getmainchaininfo()["bestblockhash"], block_hash(13, 3))
         self.on_record(13)
