@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <span>
 #include <utility>
@@ -245,6 +246,8 @@ public:
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
+        // The fee split from the first block: the main network has not started (doc/fastblocks.md).
+        consensus.pos.fee_split_height = 0;
         // A tenth of the mainchain's withdrawal_min_score (64800); proposals within a day.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -378,6 +381,7 @@ public:
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = TESTNET_MAIN_ACTIVATION_HEIGHT; // set once slot 5 activates on the reset test network (kernel/testnet_activation.h)
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
+        consensus.pos.fee_split_height = TESTNET_FEE_SPLIT_HEIGHT; // set by the coordinator before the upgrade (kernel/testnet_activation.h)
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
@@ -515,6 +519,7 @@ public:
                        .message_start = {0x66, 0x62, 0x6c, 0x03}, .default_port = 39155, .bech32_hrp = "tfbl"});
         consensus.sidechain.main_activation_height = 0;
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
+        consensus.pos.fee_split_height = SIGNET_FEE_SPLIT_HEIGHT; // kernel/testnet_activation.h
         // The Chains signet has the rules of its main network.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
@@ -631,6 +636,9 @@ public:
             consensus.sidechain.slot = *opts.sidechain_slot;
             consensus.sidechain.main_activation_height = opts.sidechain_activation_height;
             consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
+            // The fee split never, unless a test asks (-testactivationheight=feesplit@<height>): the
+            // tests of the rules before it run unchanged.
+            consensus.pos.fee_split_height = opts.dep_opts.fee_split_height.value_or(std::numeric_limits<int>::max());
             consensus.sidechain.bundle_retry_delay = 5;
                 // A tenth of the regtest mainchain's withdrawal_min_score (30).
             consensus.sidechain.pending_min_score = 3;
