@@ -1045,7 +1045,11 @@ the wallet's transactions:
   chain (`blocksmade`, `blocksmadesince` local midnight) and since the node
   started, and the slots they missed since it started;
 - staking income of the wallet, today and in all: staked, BMM rewards,
-  slashing rewards (the transaction list's records of these types);
+  slashing rewards, validator shares (the transaction list's records of these types);
+- (fastblocks-app's Staking page) the fee split now, "Fee split now: validators X % /
+  BMM Y %" (or the block it starts at), with S, the validator pool not paid yet, and
+  this node's share of the current epoch's pool so far (`getposinfo` / `getstakinginfo`
+  `feesplit`, `poolshare`);
 - the wallet's coins by finality (soft, BMM-confirmed, final), and how far the
   chain is BMM-confirmed and final;
 - the validator set of the epoch (key, stake, share, slots, status: this node,
