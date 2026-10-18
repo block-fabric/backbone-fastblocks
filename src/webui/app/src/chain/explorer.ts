@@ -125,6 +125,8 @@ export const EXPLORER: ChainExplorer = {
         dd: ack
           ? t('yes: it records the BMM commitment of mainchain block %1, which covers block %2. Deposits and withdrawals happen here, and the fee pot goes to the BMM bidder', formatCount(ack.mainheight ?? 0), shortHash(ack.anchored ?? '', 10))
           : t('no (it records no BMM commitment)'),
+        // The block of this chain the commitment covers: a link to it.
+        ...(ack?.anchored ? { link: { kind: 'block' as const, id: ack.anchored } } : {}),
       });
     } else {
       const main = typeof b.mainheight === 'number' ? b.mainheight : null;

@@ -432,6 +432,9 @@ describe('the explorer of FastBlocks', () => {
     const facts = EXPLORER.facts({ ...block(18), evidence: [{ slot: 1, hashes: [] }] });
     expect(facts.map((f) => f.dt)).toEqual(['Kind', 'Producer', 'BMM block', 'Finality', 'Proofs']);
     expect(facts[2].dd).toMatch(/yes: it records the BMM commitment of mainchain block .*401/);
+    // The block of this chain the commitment covers links to its view (when the block names it).
+    const anchored = (block(18).ack as { anchored?: string } | undefined)?.anchored;
+    expect(facts[2].link).toEqual(anchored ? { kind: 'block', id: anchored } : undefined);
     expect(EXPLORER.facts(block(17))[0].dd).toMatch(/PoW: merged mined, committed at mainchain block .*400/);
     expect(EXPLORER.facts({ height: 1 })).toEqual([]);
   });
