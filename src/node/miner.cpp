@@ -244,7 +244,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
 
     // Sidechain: what the coinbase has to pay because of what the mainchain did
     // and of the transactions in the block, and the withdrawal bundle to commit to.
-    std::vector<CTxOut> side_outputs, side_tx_outputs;
+    std::vector<CTxOut> side_outputs, side_tx_outputs, fee_outputs;
+    CAmount fee_take{0};
     if (const Consensus::SidechainParams& side_params{chainparams.GetConsensus().sidechain}; side_params.enabled) {
         const sidechain::Mainchain& mainchain{*Assert(chainman.m_mainchain)};
         // On an overlay of the chainstate's store, dropped after: nothing is copied.
@@ -368,6 +369,8 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         if (m_sidechain.peg == SidechainAssembly::Peg::BMM) {
             const auto own{sidechain::Hooks().MergeMinedOutputs(side.View(), *pindexPrev, pblock->nTime)};
             side_outputs.insert(side_outputs.end(), own.begin(), own.end());
+            // ... and for the fees of its transactions, last in the coinbase, taken from its first output.
+            fee_take = sidechain::Hooks().MergeMinedFeeOutputs(*pblock, nHeight, main_height, pblocktemplate->vTxFees, fee_outputs);
         }
         m_chainstate.ReleaseSideCursor();
     }
@@ -393,7 +396,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
     // Block subsidy + fees
-    const CAmount block_reward{nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus())};
+    const CAmount block_reward{nFees + GetBlockSubsidy(nHeight, chainparams.GetConsensus()) - fee_take};
     coinbaseTx.vout[0].nValue = block_reward;
     coinbase_tx.block_reward_remaining = block_reward;
     // Sidechain payouts come right after the first output, as the rules want them.
@@ -403,6 +406,10 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     // Drivechain messages. Mining clients that build their own coinbase have to include them.
     for (const CTxOut& message : drivechain_additions.coinbase_outputs) {
         coinbaseTx.vout.push_back(message);
+    }
+    // The sidechain's own outputs for the fees (MergeMinedFeeOutputs).
+    for (const CTxOut& output : fee_outputs) {
+        coinbaseTx.vout.push_back(output);
     }
 
     // Start the coinbase scriptSig with the block height as required by BIP34.
@@ -442,6 +449,7 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         coinbase_tx.required_outputs.push_back(final_coinbase->vout[witness_index]);
     }
     coinbase_tx.required_outputs.insert(coinbase_tx.required_outputs.end(), drivechain_additions.coinbase_outputs.begin(), drivechain_additions.coinbase_outputs.end());
+    coinbase_tx.required_outputs.insert(coinbase_tx.required_outputs.end(), fee_outputs.begin(), fee_outputs.end());
 
     LogDebug(BCLog::MINING, "CreateNewBlock(): block weight: %u txs: %u fees: %ld sigops %d\n", GetBlockWeight(*pblock), nBlockTx, nFees, nBlockSigOpsCost);
 
