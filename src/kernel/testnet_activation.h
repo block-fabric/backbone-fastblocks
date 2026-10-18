@@ -28,7 +28,7 @@ inline constexpr int TESTNET_MAIN_ACTIVATION_HEIGHT{69};
  * network needs the same): until then the split never activates and the old rule (the producer keeps
  * up to 50 %, the rest to the pot) holds.
  */
-inline constexpr int TESTNET_FEE_SPLIT_HEIGHT{std::numeric_limits<int>::max()};
+inline constexpr int TESTNET_FEE_SPLIT_HEIGHT{7055};
 inline constexpr int SIGNET_FEE_SPLIT_HEIGHT{std::numeric_limits<int>::max()};
 
 #endif // BITCOIN_KERNEL_TESTNET_ACTIVATION_H
