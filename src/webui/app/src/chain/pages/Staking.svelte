@@ -16,7 +16,7 @@
   import { coinsToSats } from '../../lib/units';
   import '../fb/fb.css';
   import { clock, startClock } from '../fb/clock.svelte';
-  import { incomeOf, midnightOf, nodeState, nodeStateText, sharePercent, formatShare, slotsLed, stateTone, untilText } from '../fb/model';
+  import { feeSplitText, incomeOf, incomeTotal, midnightOf, nodeState, nodeStateText, sharePercent, formatShare, slotsLed, stateTone, untilText } from '../fb/model';
   import { fb, followTip, startFb } from '../fb/store.svelte';
   import BondsTab from '../fb/BondsTab.svelte';
   import NodeTab from '../fb/NodeTab.svelte';
@@ -58,8 +58,11 @@
   const share = $derived(staking ? sharePercent(staking.stake, staking.totalstake) : 0);
   const next = $derived(pos ? slotsLed(fb.schedules, localKeys, pos.slot + 1, 1)[0] : undefined);
   const income = $derived(wallets.current === null ? null : incomeOf(current.records, midnightOf(new Date(clock.now * 1000))));
-  const todayIncome = $derived(income ? income.today.staked + income.today.bmm + income.today.slashing : 0n);
-  const allIncome = $derived(income ? income.staked + income.bmm + income.slashing : 0n);
+  const todayIncome = $derived(income ? incomeTotal(income, true) : 0n);
+  const allIncome = $derived(income ? incomeTotal(income) : 0n);
+  // The fee split (doc/fastblocks.md, "Fees, the pot and the validator pool"): ordinary fees between the
+  // validators (the pool, shared by stake at the end of each epoch) and the BMM bidder, by the mainchain's pace.
+  const split = $derived(pos?.feesplit);
 </script>
 
 <div class="page fb-page staking">
@@ -82,6 +85,19 @@
     </p>
   {:else if pos?.stalled}
     <p class="side-note side-warn" role="status">No blocks of stake lately: merged mined blocks carry the transactions.</p>
+  {/if}
+
+  {#if split}
+    <p class="side-note" id="fb-fee-split" role="status">
+      <strong>{feeSplitText(split)}</strong>
+      <span class="muted">{t('(mainchain blocks every %1 s, the median of the last 11; the fees of withdrawals and refunds go to the BMM bidder whole)', formatCount(split.spacing))}</span>
+      {#if split.pool > 0}
+        <span id="fb-pool">{t('Validator pool:')} <Amount sats={coinsToSats(split.pool)} /> {t('paid to the validators by stake at the first BMM commitment after each epoch')}</span>
+      {/if}
+      {#if staking?.validator && (staking.poolshare ?? 0) > 0}
+        <span id="fb-pool-share">{t("This node's share of this epoch's pool so far:")} <Amount sats={coinsToSats(staking.poolshare ?? 0)} /></span>
+      {/if}
+    </p>
   {/if}
 
   {#if simpleCard}

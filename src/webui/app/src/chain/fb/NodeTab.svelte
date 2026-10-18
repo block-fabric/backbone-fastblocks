@@ -16,7 +16,7 @@
   import { css } from '../../lib/actions';
   import { clock } from './clock.svelte';
   import Key from './Key.svelte';
-  import { slotsLed, stateText, stateTip, stateTone, untilText, validatorState, type Income } from './model';
+  import { incomeTotal, slotsLed, stateText, stateTip, stateTone, untilText, validatorState, type Income } from './model';
   import { fb, refreshFb } from './store.svelte';
 
   let { income }: { income: Income | null } = $props();
@@ -140,7 +140,8 @@
             <tr><td title={t("The producer's share of the fees of the blocks of stake made, paid to this wallet")}>Staked</td><td class="end"><Amount sats={income.today.staked} /></td><td class="end"><Amount sats={income.staked} /></td></tr>
             <tr><td title={t('The fee pot (and a share of the penalties) paid to this wallet for BMM: a BMM commitment it bid for, or a merged mined block')}>BMM rewards</td><td class="end"><Amount sats={income.today.bmm} /></td><td class="end"><Amount sats={income.bmm} /></td></tr>
             <tr><td title={t("The reporter's share of the penalty of a validator that signed two blocks for a slot, for proofs this wallet's blocks carried")}>Slashing rewards</td><td class="end"><Amount sats={income.today.slashing} /></td><td class="end"><Amount sats={income.slashing} /></td></tr>
-            <tr class="total"><td>Total</td><td class="end"><Amount sats={income.today.staked + income.today.bmm + income.today.slashing} /></td><td class="end"><Amount sats={income.staked + income.bmm + income.slashing} /></td></tr>
+            <tr><td title={t("The shares by stake of the validator pool (the validators' part of the fees) paid to this wallet as a bond's owner, at the end of each epoch")}>Validator shares</td><td class="end"><Amount sats={income.today.validator} /></td><td class="end"><Amount sats={income.validator} /></td></tr>
+            <tr class="total"><td>Total</td><td class="end"><Amount sats={incomeTotal(income, true)} /></td><td class="end"><Amount sats={incomeTotal(income)} /></td></tr>
           </tbody>
         </table>
       </div>
