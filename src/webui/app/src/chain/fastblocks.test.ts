@@ -3,20 +3,20 @@
 // in the history, the explorer's columns of the chain, and the pages driven against a pretend node: Staking (this
 // node, bonds through the host which asks the desktop, the validator sets, the schedule), Finality & BMM,
 // Slashing & jail, the cards of the home, where the pages are in the menus, and the RPC policy of local.cpp.
+// Staking is one section (Overview, Validator, Bonds, Network), Finality & BMM and Slashing & jail views of its
+// Network tab (as on the app of Layers).
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CHAIN } from './config';
 import { EXPLORER } from './explorer';
-import { LOCAL_COMMANDS, LOCAL_PAGES, type LocalPage } from './local';
+import { LOCAL_COMMANDS, LOCAL_PAGES, stakingTabOf, type LocalPage } from './local';
 import LocalCards from './LocalCards.svelte';
 import { COINBASE_ROLES } from './roles';
 import DialogHost from '../components/DialogHost.svelte';
 import Explorer from '../pages/Explorer.svelte';
 import Transactions from '../pages/Transactions.svelte';
-import Finality from './pages/Finality.svelte';
-import Slashing from './pages/Slashing.svelte';
 import Staking from './pages/Staking.svelte';
 import {
   blockKind,
@@ -468,9 +468,10 @@ describe('the explorer of FastBlocks', () => {
 });
 
 describe('the pages of FastBlocks', () => {
-  it('are in the Chain section and the menus, before the tools, with Alt+6 to Alt+8 and a quick action', () => {
+  it('are in the Chain section and the menus, before the tools, with Alt+6 and a quick action', () => {
     const own = (LOCAL_PAGES as readonly LocalPage[]).map((p) => p.id);
-    expect(own).toEqual(['staking', 'finality', 'slashing']);
+    // Staking, one section.
+    expect(own).toEqual(['staking']);
     expect(NAV_SECTIONS.find((s) => s.title === 'Chain')!.pages).toEqual(['peg', ...own, 'explorer']);
     expect(AREAS.find((a) => a.id === 'chain')!.tabs.map((t) => t.page)).toEqual(['peg', ...own, 'explorer']);
     expect(chainBeforeTools(HOME_QUICK_ACTIONS.map((q) => q.page), (p) => p)).toBeNull();
@@ -479,7 +480,7 @@ describe('the pages of FastBlocks', () => {
     for (const c of LOCAL_COMMANDS) expect(chain.items.map((i) => i.label)).toContain(c.label);
     chain.items.find((c) => c.label === 'Bond coins…')!.run();
     expect([nav.page, nav.tab]).toEqual(['staking', 'bonds']);
-    for (const [key, page] of [['6', 'staking'], ['7', 'finality'], ['8', 'slashing']]) {
+    for (const [key, page] of [['6', 'staking']]) {
       go('overview');
       expect(handleShortcut(new KeyboardEvent('keydown', { key, altKey: true }))).toBe(true);
       expect(nav.page).toBe(page);
@@ -488,17 +489,36 @@ describe('the pages of FastBlocks', () => {
     expect(CHAIN.uriScheme).toBe('fastblocks');
     expect(CHAIN.networks.test.p2p).toBe(19155);
     expect(CHAIN.networks.main.hrp).toBe('fbl');
+    // The menus' items of the views of Network open Staking there.
+    chain.items.find((c) => c.label === 'BMM blocks and finality')!.run();
+    expect([nav.page, nav.tab]).toEqual(['staking', 'finality']);
+    chain.items.find((c) => c.label === 'Proofs of double signing')!.run();
+    expect([nav.page, nav.tab]).toEqual(['staking', 'slashing']);
   });
 
-  it("Staking, This node: its state, keys, next slots, income and coins by finality; stopping asks the desktop", async () => {
+  it("Staking, Overview: the leader of this slot, the fee split, the wallet's stake, income and coins by finality", async () => {
+    render(Staking);
+    await loaded();
+    expect(screen.getByRole('tab', { name: /Overview/ }).getAttribute('aria-selected')).toBe('true');
+    await waitFor(() => expect(screen.getByRole('table', { name: 'Staking income' }).textContent).toMatch(/0\.10000000.*0\.15000000/));
+    expect(screen.getByText('BMM-confirmed')).toBeTruthy();
+    // (The fee split is in Overview too, when the node says it: 'the fee split' tests below.)
+    expect(document.querySelector('#fb-leader-now')!.textContent).not.toBe('');
+    // No fact of another tab: this node's state is in Validator.
+    expect(document.querySelector('#fb-node-state')).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Slots this node leads next' })).toBeNull();
+  });
+
+  it("Staking, Validator: its state, keys, next slots; stopping asks the desktop", async () => {
+    nav.tab = 'validator';
     render(Staking);
     render(DialogHost);
     await loaded();
     await waitFor(() => expect(document.querySelector('#fb-node-state')!.textContent).toBe('Active'));
     expect(screen.getByText('rsc1qpayout')).toBeTruthy();
     expect(screen.getByRole('list', { name: 'Slots this node leads next' }).textContent).toMatch(/Slot 1.001/);
-    await waitFor(() => expect(screen.getByRole('table', { name: 'Staking income' }).textContent).toMatch(/0\.10000000.*0\.15000000/));
-    expect(screen.getByText('BMM-confirmed')).toBeTruthy();
+    // The wallet's income is in Overview, not here.
+    expect(screen.queryByRole('table', { name: 'Staking income' })).toBeNull();
     // Stop staking: through the host, which asks the desktop (a no changes nothing).
     confirmAnswer = false;
     await fireEvent.click(document.querySelector('#fb-staking-stop')!);
@@ -572,10 +592,12 @@ describe('the pages of FastBlocks', () => {
     expect(called('fastblocks.pop')[0].params).toEqual({ owner: 'rsc1qelsewhere' });
   });
 
-  it('Staking, Validators: the set of an epoch, jailed ones said, another epoch on request; every bond on the chain', async () => {
+  it('Staking, Network, Validator set: the set of an epoch, jailed ones said, another epoch on request; every bond on the chain', async () => {
     nav.tab = 'validators';
     render(Staking);
     await loaded();
+    expect(screen.getByRole('tab', { name: /Network/ }).getAttribute('aria-selected')).toBe('true');
+    expect(document.querySelector('#fb-view-validators')!.getAttribute('aria-selected')).toBe('true');
     const table = await screen.findByRole('table', { name: 'Validator set' });
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(3));
     expect(table.textContent).toMatch(/33\.3 %/);
@@ -601,9 +623,11 @@ describe('the pages of FastBlocks', () => {
     await waitFor(() => expect(within(epochs).getAllByRole('row').length).toBeGreaterThan(5));
   });
 
-  it('Finality & BMM: how far the chain is confirmed, the blocks waiting, the newest BMM blocks, the pot and the bids', async () => {
-    render(Finality);
+  it('Staking, Network, Finality & BMM: how far the chain is confirmed, the blocks waiting, the newest BMM blocks, the pot and the bids', async () => {
+    nav.tab = 'finality';
+    render(Staking);
     await loaded();
+    expect(document.querySelector('#fb-view-finality')!.getAttribute('aria-selected')).toBe('true');
     await waitFor(() => expect(document.querySelector('#fb-anchored-height')!.textContent).toBe('block 18'));
     const waiting = await screen.findByRole('table', { name: 'Blocks waiting for BMM confirmation' });
     await waitFor(() => expect(within(waiting).getAllByRole('row')).toHaveLength(3));
@@ -614,10 +638,15 @@ describe('the pages of FastBlocks', () => {
     expect(screen.getByRole('table', { name: 'Tickets' }).textContent).toMatch(/401/);
   });
 
-  it('Slashing & jail: the proofs, the jailed and banned validators, and a proof given by hand', async () => {
-    render(Slashing);
+  it('Staking, Network, Slashing & jail: the proofs, the jailed and banned validators, and a proof given by hand', async () => {
+    nav.tab = 'slashing';
+    render(Staking);
     render(DialogHost);
     await loaded();
+    // The views of Network one click apart.
+    await fireEvent.click(document.querySelector('#fb-view-schedule')!);
+    expect(nav.tab).toBe('schedule');
+    nav.tab = 'slashing';
     const proofs = await screen.findByRole('table', { name: 'Proofs of double signing' });
     expect(proofs.textContent).toMatch(/990/);
     const held = await screen.findByRole('table', { name: 'Jailed and banned validators' });
@@ -744,7 +773,8 @@ describe('Staking in Simple mode', () => {
     await waitFor(() => expect(document.querySelector('#fb-simple-stake')?.textContent).toMatch(/Start staking/));
     expect(document.querySelector('#fb-simple-stop')).toBeNull();
     nav.tab = 'validators';
-    await waitFor(() => expect(screen.getByRole('tab', { name: /Validators/ }).getAttribute('aria-selected')).toBe('true'));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Network/ }).getAttribute('aria-selected')).toBe('true'));
+    expect(document.querySelector('#fb-view-validators')!.getAttribute('aria-selected')).toBe('true');
   });
 
   it('not set up, paused or jailed, in words', async () => {
@@ -777,11 +807,17 @@ describe('Staking in Simple mode', () => {
     expect(document.querySelector('.fb-cards')!.textContent).not.toMatch(/block 18/);
   });
 
-  it('Finality and Slashing leave the navigation; Staking stays', () => {
+  it('Finality and Slashing leave the navigation, in Staking now; Staking stays', () => {
     const pages = LOCAL_PAGES as readonly LocalPage[];
-    expect(pages.find((p) => p.id === 'finality')?.advanced).toBe(true);
-    expect(pages.find((p) => p.id === 'slashing')?.advanced).toBe(true);
+    // One section for staking, in Simple mode as in Advanced; the two pages are views of its Network tab.
+    expect(pages.find((p) => p.id === 'finality')).toBeUndefined();
+    expect(pages.find((p) => p.id === 'slashing')).toBeUndefined();
     expect(pages.find((p) => p.id === 'staking')?.advanced).toBeFalsy();
+    expect(stakingTabOf('finality')).toEqual({ tab: 'network', view: 'finality' });
+    expect(stakingTabOf('slashing')).toEqual({ tab: 'network', view: 'slashing' });
+    expect(stakingTabOf('node')).toEqual({ tab: 'validator', view: 'validators' });
+    expect(stakingTabOf('bonds').tab).toBe('bonds');
+    expect(stakingTabOf('').tab).toBe('overview');
   });
 });
 

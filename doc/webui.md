@@ -474,9 +474,14 @@ export const LOCAL_PAGES = [
 
 #### FastBlocks
 
-FastBlocks' pages (doc/webui-parity.md, section FB) are Staking (Alt+6: This node, Bonds, Validators, Schedule),
-Finality & BMM (Alt+7) and Slashing & jail (Alt+8), with three cards on the home and the explorer's and the
-history's hooks above. `chain/fb/store.svelte.ts` reads the node every 3 s and with each block while one of them is
+FastBlocks' page (doc/webui-parity.md, section FB) is Staking, one section (Alt+6; user decision, 2026-10-18): the
+tabs Overview (the leader of this slot, the fee split now, the wallet's stake, rewards and income, its coins by
+finality), Validator (this node as a validator), Bonds and Network (the validator set, the leader schedule,
+Finality & BMM and Slashing & jail, which were pages of their own); deep links to the old pages and tabs
+(`go('staking', 'finality' | 'slashing' | 'node' | 'validators' | 'schedule')`) land on their place
+(`chain/local.ts` stakingTabOf). Simple mode keeps one card (`fb/SimpleStaking.svelte`). Three cards on the home
+(`fb/Cards.svelte`) and the explorer's and the history's hooks above. The components in `chain/fb/` are the same
+as the app of Layers'. `chain/fb/store.svelte.ts` reads the node every 3 s and with each block while one of them is
 shown; `chain/fb/model.ts` works out the rest (tested in `chain/fastblocks.test.ts`). The pages call only read-only
 RPCs (and submitevidence); bonding, unbonding, turning staking off and signing a proof of possession are host
 methods of local.cpp (`fastblocks.bond`, `.unbond`, `.staking`, `.pop`) that ask the desktop first, with the key in
