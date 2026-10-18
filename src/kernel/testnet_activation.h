@@ -38,7 +38,7 @@ inline constexpr int SIGNET_FEE_SPLIT_HEIGHT{std::numeric_limits<int>::max()};
  * (as TESTNET_FEE_SPLIT_HEIGHT: a little ahead of the tip, every node the same, set before the upgraded
  * nodes start); until then the first curve holds.
  */
-inline constexpr int TESTNET_FEE_CURVE2_HEIGHT{std::numeric_limits<int>::max()};
+inline constexpr int TESTNET_FEE_CURVE2_HEIGHT{8391};
 inline constexpr int SIGNET_FEE_CURVE2_HEIGHT{std::numeric_limits<int>::max()};
 
 #endif // BITCOIN_KERNEL_TESTNET_ACTIVATION_H
