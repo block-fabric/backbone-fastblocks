@@ -142,6 +142,8 @@ public:
         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
         //! FastBlocks: Consensus::PosParams::fee_split_height (-testactivationheight=feesplit@<height>; regtest only).
         std::optional<int> fee_split_height{};
+        //! FastBlocks: Consensus::PosParams::fee_curve2_height (-testactivationheight=feecurve2@<height>; regtest only).
+        std::optional<int> fee_curve2_height{};
     };
 
     /**

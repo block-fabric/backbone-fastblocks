@@ -31,4 +31,14 @@ inline constexpr int TESTNET_MAIN_ACTIVATION_HEIGHT{69};
 inline constexpr int TESTNET_FEE_SPLIT_HEIGHT{7055};
 inline constexpr int SIGNET_FEE_SPLIT_HEIGHT{std::numeric_limits<int>::max()};
 
+/**
+ * The second fee curve (Consensus::PosParams::fee_curve2_height, pos/feesplit.h FeeCurve::LINEAR: "the
+ * fee curve of 2026-10-18 (2)") on the test network and signet: the FastBlocks height of the first
+ * block whose bidder's share takes it. A placeholder until the coordinator of the test network sets it
+ * (as TESTNET_FEE_SPLIT_HEIGHT: a little ahead of the tip, every node the same, set before the upgraded
+ * nodes start); until then the first curve holds.
+ */
+inline constexpr int TESTNET_FEE_CURVE2_HEIGHT{std::numeric_limits<int>::max()};
+inline constexpr int SIGNET_FEE_CURVE2_HEIGHT{std::numeric_limits<int>::max()};
+
 #endif // BITCOIN_KERNEL_TESTNET_ACTIVATION_H
