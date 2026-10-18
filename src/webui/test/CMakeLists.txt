@@ -17,6 +17,7 @@ add_executable(test_chains-app
   i18n_tests.cpp
   nodeapi_tests.cpp
   nodeevents_tests.cpp
+  quitguard_tests.cpp
   singleinstance_tests.cpp
   windowframe_tests.cpp
   $<$<BOOL:${ENABLE_WALLET}>:walletapi_tests.cpp>
