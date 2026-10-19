@@ -5,8 +5,6 @@
 #ifndef BITCOIN_KERNEL_TESTNET_ACTIVATION_H
 #define BITCOIN_KERNEL_TESTNET_ACTIVATION_H
 
-#include <limits>
-
 /**
  * FastBlocks on the Chains test network: the height of the Chains testnet block that activated FastBlocks in
  * slot 5 (Consensus::SidechainParams::main_activation_height of the test network).
@@ -18,27 +16,11 @@
  * `chains-cli -testnet getsidechain 5` shows, rebuild, and start the nodes of the test network
  * only then: a node started before keeps the record of the mainchain it began (from height 0, not from
  * the activation; harmless, but start new datadirs with the height set).
+ *
+ * FastBlocks' test network restarted on 19/Oct/2026 from a new genesis, every rule from its first block
+ * (the fee split and the second fee curve too: no height of the test network to set later); slot 5 stays
+ * the one activated at Chains testnet block 69.
  */
 inline constexpr int TESTNET_MAIN_ACTIVATION_HEIGHT{69};
-
-/**
- * The fee split (Consensus::PosParams::fee_split_height, pos/feesplit.h) on the test network and signet:
- * the FastBlocks height of its first block. A placeholder until the coordinator of the test network
- * sets it (a height a little ahead of the tip, before the upgraded nodes are started; every node of the
- * network needs the same): until then the split never activates and the old rule (the producer keeps
- * up to 50 %, the rest to the pot) holds.
- */
-inline constexpr int TESTNET_FEE_SPLIT_HEIGHT{7055};
-inline constexpr int SIGNET_FEE_SPLIT_HEIGHT{std::numeric_limits<int>::max()};
-
-/**
- * The second fee curve (Consensus::PosParams::fee_curve2_height, pos/feesplit.h FeeCurve::LINEAR: "the
- * fee curve of 2026-10-18 (2)") on the test network and signet: the FastBlocks height of the first
- * block whose bidder's share takes it. A placeholder until the coordinator of the test network sets it
- * (as TESTNET_FEE_SPLIT_HEIGHT: a little ahead of the tip, every node the same, set before the upgraded
- * nodes start); until then the first curve holds.
- */
-inline constexpr int TESTNET_FEE_CURVE2_HEIGHT{8391};
-inline constexpr int SIGNET_FEE_CURVE2_HEIGHT{std::numeric_limits<int>::max()};
 
 #endif // BITCOIN_KERNEL_TESTNET_ACTIVATION_H

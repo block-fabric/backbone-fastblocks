@@ -1,7 +1,7 @@
 {
   "chain": "signet",
   "test_chain": true,
-  "genesis": "45c28d194fe96b80fa74d455009ff70612b81fe4ce417bc2108d0e8895584301",
+  "genesis": "7d4950d9c6039ab5999286affc0a1305c2581a397da6223786fc052a24c85187",
   "subsidy_halving_interval": 210000,
   "pow": {
     "limit": "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
