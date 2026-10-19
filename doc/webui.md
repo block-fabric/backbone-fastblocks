@@ -415,13 +415,13 @@ mode"). `lib/uimode.svelte.ts` holds it:
   | App | Main features in Simple mode |
   |---|---|
   | Chains, the template | none (Move coins is the chain's own) |
-  | Thunder | Pay many people (Batch pay) |
+  | Thunder | none (Batch pay stays Advanced's, user decision) |
   | BitNames | Get a name, My names |
-  | BitAssets | My assets, Swap, Create a token |
-  | zSide | Private money (Private) |
+  | BitAssets | My assets, Create a token, Swap (Explore assets in Advanced) |
+  | zSide | Private payments (Private) |
   | Hivemind | Questions (Markets), My bets (Portfolio) |
   | FastBlocks | Stake and earn (Staking) |
-  | Layers | My assets, Swap, Stake and earn |
+  | Layers | Stake and earn, My assets, Swap (Explore assets in Advanced) |
 * Pages marked `advanced: true` in `PAGES` (the advanced transactions, the
   tools, the node window, solo mining, the kit) leave Home's quick actions in
   Simple mode as well.
