@@ -184,6 +184,7 @@ BASE_SCRIPTS = [
     'feature_fastblocks_unchecked.py',
     'feature_fastblocks_window.py',
     'feature_fastblocks_feesplit.py',
+    'feature_fastblocks_txindex.py',
     'feature_sidechain_network.py',
     'feature_sidechain_headers.py',
     'feature_sidechain_catchup.py',
