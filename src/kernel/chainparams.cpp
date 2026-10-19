@@ -373,17 +373,20 @@ public:
         // This chain is a sidechain of the Chains testnet.
         // A new genesis at each restart of the test network (audit 7, finding 3): a chain of an earlier
         // start shares no genesis with this one, so it is no branch of it (its blocks, bonds, unbonds
-        // and signatures name another genesis). The reset of 2026-10-17 04:10 UTC; was "FastBlocks testnet
-        // 17/Oct/2026: a block every 15 seconds", 1792224000 (and "FastBlocks testnet", 1791763200, before).
-        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet 17/Oct/2026: a fresh start", .genesis_time = 1792210200,
+        // and signatures name another genesis). The restart of 2026-10-19 19:45 UTC, every rule from the first
+        // block; was "FastBlocks testnet 17/Oct/2026: a fresh start", 1792210200 (the reset of 2026-10-17), and
+        // "FastBlocks testnet 17/Oct/2026: a block every 15 seconds", 1792224000, and "FastBlocks testnet",
+        // 1791763200, before.
+        MakeSidechain({.slot = 5, .genesis_message = "FastBlocks testnet 19/Oct/2026: every rule from the first block", .genesis_time = 1792439100,
                        .message_start = {0x66, 0x62, 0x6c, 0x02}, .default_port = 19155, .bech32_hrp = "tfbl"});
         // The mainchain of the test network votes on a withdrawal bundle within 600 blocks.
         consensus.sidechain.bundle_retry_delay = 20;
         // The height of the mainchain block that activated the slot; nothing is left out at 0.
         consensus.sidechain.main_activation_height = TESTNET_MAIN_ACTIVATION_HEIGHT; // set once slot 5 activates on the reset test network (kernel/testnet_activation.h)
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
-        consensus.pos.fee_split_height = TESTNET_FEE_SPLIT_HEIGHT; // set by the coordinator before the upgrade (kernel/testnet_activation.h)
-        consensus.pos.fee_curve2_height = TESTNET_FEE_CURVE2_HEIGHT; // the same
+        // The fee split and the second fee curve from the first block (the test network restarted on 19/Oct/2026).
+        consensus.pos.fee_split_height = 0;
+        consensus.pos.fee_curve2_height = 0;
         // A tenth of the testnet mainchain's withdrawal_min_score (300); proposals within an hour.
         consensus.sidechain.pending_min_score = 30;
         consensus.sidechain.unproposed_expiry_blocks = 60;
@@ -521,8 +524,8 @@ public:
                        .message_start = {0x66, 0x62, 0x6c, 0x03}, .default_port = 39155, .bech32_hrp = "tfbl"});
         consensus.sidechain.main_activation_height = 0;
         consensus.pos.main_activation_height = consensus.sidechain.main_activation_height;
-        consensus.pos.fee_split_height = SIGNET_FEE_SPLIT_HEIGHT; // kernel/testnet_activation.h
-        consensus.pos.fee_curve2_height = SIGNET_FEE_CURVE2_HEIGHT;
+        consensus.pos.fee_split_height = 0; // not launched: from the first block
+        consensus.pos.fee_curve2_height = 0;
         // The Chains signet has the rules of its main network.
         consensus.sidechain.pending_min_score = 6480;
         consensus.sidechain.unproposed_expiry_blocks = 1440;
