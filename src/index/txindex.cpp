@@ -122,7 +122,9 @@ void TxIndex::DB::WriteTxs(const interfaces::BlockInfo& block)
     batch.Write(txindex::BlockHashKey{block.hash}, block_seq);
     batch.Write(txindex::BlockSeqKey{block_seq}, block.hash);
     batch.Write(txindex::DB_NEXT_BLOCK_SEQ, block_seq + 1);
-    uint32_t tx_offset_in_block{txindex::BLOCK_HEADER_SIZE + GetSizeOfCompactSize(block.data->vtx.size())};
+    // The header as serialized: 80 bytes, or more for an extended header (a block of stake).
+    const uint32_t header_size{static_cast<uint32_t>(GetSerializeSize(static_cast<const CBlockHeader&>(*block.data)))};
+    uint32_t tx_offset_in_block{header_size + GetSizeOfCompactSize(block.data->vtx.size())};
     for (const auto& tx : block.data->vtx) {
         const uint32_t stored{std::min(tx_offset_in_block, txindex::BlockTxPosition::OFFSET_UNKNOWN)};
         const txindex::DBKey key{txindex::CreateKeyPrefix(m_hasher, tx->GetHash()),
