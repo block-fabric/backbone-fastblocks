@@ -15,7 +15,7 @@ export interface ChainTx {
 
 /** The filter of the Type list for the transactions the chain knows ('' for none): its label. */
 export const CHAIN_TX_FILTER = '';
-/** The heading of the column of the chain (LocalTxCell), '' for none. */
+/** What the Label column is also called when the chain knows more of a transaction (LocalTxCell shows it there), '' for none. */
 export const CHAIN_TX_COLUMN = '';
 /** The columns the CSV export adds. */
 export const CHAIN_TX_CSV: string[] = [];
