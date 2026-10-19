@@ -176,16 +176,22 @@
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
+    --side-pad-r: 0.6rem;
     width: 15rem;
     flex: none;
-    padding: 0.7rem 0.6rem 0.6rem;
+    padding: 0.7rem var(--side-pad-r) 0.6rem 0.6rem;
     min-height: 0;
   }
+  /* The list scrolls with its bar flush at the right edge of the sidebar (user feedback 2026-10-19: it
+     floated inside, a padding away from the edge): the scroller takes the sidebar's right padding into
+     itself, so the items keep their place and the bar sits at the edge, folded or not. */
   .scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    width: 100%;
+    width: auto;
+    margin-right: calc(-1 * var(--side-pad-r));
+    padding-right: var(--side-pad-r);
   }
   .caption {
     padding: 0.9rem 0.75rem 0.3rem;
@@ -385,6 +391,7 @@
       transition: width 140ms ease-out;
     }
     .sidebar.collapsed {
+      --side-pad-r: 0.45rem;
       width: 4.1rem;
       padding-inline: 0.45rem;
       align-items: stretch;
