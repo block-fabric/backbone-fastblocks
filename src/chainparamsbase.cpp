@@ -13,10 +13,13 @@
 
 void SetupChainParamsBaseOptions(ArgsManager& argsman)
 {
-    argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES ". "
+                   "main, test, signet and regtest are sidechains of the Chains (CHN) mainchain (chainsd), in the data directory of this program; "
+                   "ecash, ecashbeta and ecashtest sidechains of Backbone (backboned) on eCash's main network, its betanet and its test network, in the Backbone data directory of this program (~/.backbone-<name>).", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-sidechainslot=<n>", "Make the regtest chain a sidechain in slot <n> of the mainchain, with the rules of one: blocks are blind merged mined and coins come from deposits. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-testmainenforcer", "With -sidechainslot: the mainchain follows the drivechain rules of the bip300301_enforcer, as on the eCash networks (backboned -testecash): no single payout, and the parameters tied to its blocks scaled as there (see SidechainParams). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-sidechainactivationheight=<n>", "With -sidechainslot: the height of the mainchain block that activated the sidechain in its slot (SidechainParams::main_activation_height; default: 0). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv). (test-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-testdrivechainparam=name@value", "Set the drivechain parameter 'name' (a field of DrivechainParams, such as withdrawal_period) on regtest. (test-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -50,6 +53,16 @@ std::unique_ptr<CBaseChainParams> CreateBaseChainParams(const ChainType chain)
         return std::make_unique<CBaseChainParams>("signet", 39654);
     case ChainType::REGTEST:
         return std::make_unique<CBaseChainParams>("regtest", 29654);
+    // A sidechain of Backbone on eCash: the RPC port of its Chains network less 1000 (8x54), its betanet's
+    // and its test network's in 38x54 and 48x54 (as Backbone's own test network, 48532). The main network
+    // at the root of the Backbone data directory of this program, betanet and the test network in the
+    // folders Backbone has them in.
+    case ChainType::ECASH:
+        return std::make_unique<CBaseChainParams>("", 8654);
+    case ChainType::ECASH_BETANET:
+        return std::make_unique<CBaseChainParams>("betanet", 38654);
+    case ChainType::ECASH_TESTNET:
+        return std::make_unique<CBaseChainParams>("testnet4", 48654);
     }
     assert(false);
 }

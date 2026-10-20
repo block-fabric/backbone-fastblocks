@@ -169,6 +169,7 @@ BASE_SCRIPTS = [
     'wallet_anchor.py',
     'feature_reindex.py',
     'feature_sidechain.py',
+    'feature_sidechain_ecash.py',
     'feature_sidechain_network.py',
     'feature_sidechain_headers.py',
     'feature_sidechain_catchup.py',
