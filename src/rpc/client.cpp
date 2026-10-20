@@ -60,6 +60,12 @@ public:
 static const CRPCConvertParam vRPCConvertParams[] =
 {
     { "syncmainchain", 0, "allowdeepreorg" },
+    { "describeconfirmation", 1, "params" },
+    { "webuihost", 0, "request" },
+    { "webuihost", 3, "files" },
+    { "webuichosenfile", 1, "write" },
+    { "webuievents", 0, "since" },
+    { "webuievents", 1, "timeout" },
     { "setbmm", 0, "mine" },
     { "setbmm", 2, "always" },
     { "setbmm", 3, "amount" },
