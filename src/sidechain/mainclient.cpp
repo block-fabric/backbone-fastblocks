@@ -43,6 +43,37 @@ std::string PercentEncode(const std::string& text)
 }
 } // namespace
 
+std::optional<std::string> DecodeChunked(const std::string& body, size_t max_size, std::string& error)
+{
+    std::string joined;
+    size_t pos{0};
+    for (;;) {
+        const size_t eol{body.find("\r\n", pos)};
+        if (eol == std::string::npos) {
+            error = "a truncated chunked reply";
+            return std::nullopt;
+        }
+        const auto size{ToIntegral<uint64_t>(std::string_view{body}.substr(pos, eol - pos), 16)};
+        if (!size) {
+            error = "a malformed chunk";
+            return std::nullopt;
+        }
+        if (*size == 0) return joined;
+        // The chunk and its CRLF must be in the reply: a size beyond them is malformed, not a reason to skip ahead.
+        const size_t start{eol + 2};
+        if (*size > body.size() - start || body.size() - start - *size < 2 || body.compare(start + *size, 2, "\r\n") != 0) {
+            error = "a malformed chunk";
+            return std::nullopt;
+        }
+        if (joined.size() + *size > max_size) {
+            error = "a reply too large";
+            return std::nullopt;
+        }
+        joined.append(body, start, *size);
+        pos = start + *size + 2; // always ahead of eol, so of pos
+    }
+}
+
 uint16_t DefaultMainchainRPCPort(ChainType chain)
 {
     switch (chain) {
@@ -178,17 +209,10 @@ UniValue MainClient::CallEnforcer(const std::string& procedure, const UniValue& 
     std::string payload{reply.substr(header_end + 4)};
     // A chunked reply (a Connect server may stream a unary one so): put back together.
     if (ToLower(reply.substr(0, header_end)).find("transfer-encoding: chunked") != std::string::npos) {
-        std::string joined;
-        size_t pos{0};
-        while (pos < payload.size()) {
-            const size_t eol{payload.find("\r\n", pos)};
-            if (eol == std::string::npos) break;
-            const auto size{ToIntegral<uint64_t>(payload.substr(pos, eol - pos), 16)};
-            if (!size || *size == 0) break;
-            joined += payload.substr(eol + 2, *size);
-            pos = eol + 2 + *size + 2;
-        }
-        payload = joined;
+        std::string error;
+        auto joined{DecodeChunked(payload, MAX_REPLY_SIZE, error)};
+        if (!joined) throw MainClientError{strprintf("The enforcer interface answered %s with %s", procedure, error), /*rpc_error_in=*/false};
+        payload = std::move(*joined);
     }
     UniValue answer;
     if (!answer.read(payload) || !answer.isObject()) {

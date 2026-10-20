@@ -228,4 +228,23 @@ BOOST_AUTO_TEST_CASE(ecash_networks)
     BOOST_CHECK(Follower::Link(s, "ecash").first == Follower::LinkState::OK);
 }
 
+BOOST_AUTO_TEST_CASE(chunked_replies)
+{
+    // The chunked coding of a Connect reply (MainClient::CallEnforcer): put back together, or refused.
+    std::string error;
+    BOOST_CHECK_EQUAL(*DecodeChunked("3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n", 100, error), "abcde");
+    BOOST_CHECK_EQUAL(*DecodeChunked("0\r\n\r\n", 100, error), "");
+    // A size beyond the reply (or one that would wrap around): refused, not skipped over.
+    BOOST_CHECK(!DecodeChunked("ff\r\nabc\r\n0\r\n\r\n", 100, error));
+    BOOST_CHECK(!DecodeChunked("ffffffffffffffff\r\nabc\r\n", 100, error));
+    // No CRLF after the chunk, a size that is no number, a truncated reply.
+    BOOST_CHECK(!DecodeChunked("3\r\nabcXY0\r\n\r\n", 100, error));
+    BOOST_CHECK(!DecodeChunked("zz\r\nabc\r\n", 100, error));
+    BOOST_CHECK(!DecodeChunked("3\r\nabc\r\n", 100, error));
+    BOOST_CHECK_EQUAL(error, "a truncated chunked reply");
+    // Over the cap.
+    BOOST_CHECK(!DecodeChunked("3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n", 5, error));
+    BOOST_CHECK_EQUAL(error, "a reply too large");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -840,12 +840,10 @@ void Follower::SendBundle()
     const auto vouch{[&](const uint256& bundle) {
         if (WITH_LOCK(m_mutex, return m_vouched == bundle)) return;
         try {
-            if (m_client.HasEnforcer()) {
-                // The enforcer's interface has no word of a sidechain on its bundle: handing it over
-                // (ProposeWithdrawalBundle, below) is that word, which its KNOWN policy (Backbone's default)
-                // upvotes. Its SetWithdrawalBundleAck is the operator's own vote, over any policy: not this
-                // node's to give.
-            } else if (bundle.IsNull()) {
+            // Always over JSON-RPC, also with -mainchaingrpcport: the enforcer's interface cannot take this chain's
+            // word back (no "none", no per-sidechain alarm), and a stale bundle left upvoted could be paid twice.
+            // m_vouched is set below only once the mainchain took the word.
+            if (bundle.IsNull()) {
                 m_client.Call("vouchwithdrawalbundle", Params({slot}));
             } else {
                 m_client.Call("vouchwithdrawalbundle", Params({slot, bundle.GetHex()}));

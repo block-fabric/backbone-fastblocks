@@ -11,6 +11,7 @@
 #include <util/result.h>
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -99,6 +100,13 @@ private:
  * directory is). Errors name the file but never contain what it holds.
  */
 util::Result<std::string> ReadPasswordFile(const fs::path& path);
+
+/**
+ * The body of an HTTP/1.1 reply in the chunked transfer coding, put back together; nullopt (with `error`)
+ * if a chunk is malformed (its size beyond the reply, no CRLF after it), the reply is truncated, or it is
+ * larger than `max_size`.
+ */
+std::optional<std::string> DecodeChunked(const std::string& body, size_t max_size, std::string& error);
 
 } // namespace sidechain
 

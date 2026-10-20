@@ -333,7 +333,14 @@ class SidechainEcashTest(BitcoinTestFramework):
         main.invalidateblock(withdrawal_commitment)
         main.vouchwithdrawalbundle(SLOT, x["hash"])
         main.generateblock(main.getnewaddress(), [])
-        main.vouchwithdrawalbundle(SLOT)
+        if self.options.mainchaingrpc:
+            # The sidechain node takes its word on X back itself (over JSON-RPC: the enforcer's interface
+            # cannot), once it sees that X is not its bundle on the new branch: X is no longer upvoted.
+            for node in self.nodes:
+                node.syncmainchain()
+            self.wait_until(lambda: main.listwithdrawalbundles(SLOT)[0]["vote"] != "upvote")
+        else:
+            main.vouchwithdrawalbundle(SLOT)
         for node in self.nodes:
             node.syncmainchain()
             assert committed != node.getbestblockhash()

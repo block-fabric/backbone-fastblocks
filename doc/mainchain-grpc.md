@@ -18,19 +18,22 @@ JSON-RPC stays the default for everything.
 | Check its slot | `getsidechain` | the same |
 | Ask for blind merged mining | `createbmmrequest` (wallet) | `ValidatorService.GetChainTip` (the tip must be the block the commitment is for), `WalletService.CreateBmmCriticalDataTransaction`; INVALID_ARGUMENT naming `prev_bytes` read as "the mainchain moved", "Outbid:" kept |
 | Hand over a withdrawal bundle | `receivewithdrawalbundle` | `BlockProducerService.ProposeWithdrawalBundle` (the blind bundle, legacy serialization, base64) |
-| Vouch for its bundle | `vouchwithdrawalbundle slot hash` | the hand-off itself: the block producer's KNOWN policy (Backbone's default) upvotes the bundles it was handed. `SetWithdrawalBundleAck` is not used: it is the operator's vote, over any policy (with it, an operator's "abstain" on the slot would be overridden) |
-| Vouch for none (downvote the slot's others) | `vouchwithdrawalbundle slot` | nothing: the interface has no word of a sidechain, nor a per-sidechain alarm (its ALARM policy is for all sidechains) |
+| Vouch for its bundle, or for none | `vouchwithdrawalbundle slot [hash]` | **the same, over JSON-RPC** (security review 2026-10-20): the enforcer's interface cannot take a sidechain's word back (no "none", no per-sidechain alarm; its `SetWithdrawalBundleAck` is the operator's vote, over any policy), and a stale bundle left upvoted could be paid twice. The node remembers its word only once the mainchain took it |
 | Broadcast the payout once the bundle has its votes | `sendwithdrawalbundle` | nothing: the block producer that holds the bundle pays it out (M6) itself |
 | Mainchain addresses of withdrawals | `validateaddress` | the same |
 
-A limit of the interface: this node cannot take its word back. Over JSON-RPC, a bundle the chain gave up (a
-reorg of the sidechain, another bundle of the slot paid) stops being upvoted at once (`vouchwithdrawalbundle
-slot`); over the enforcer's interface the block producer keeps upvoting the last bundle it was handed until a
-new one is handed or the bundle closes. One reason JSON-RPC stays the default.
+Vouching stays on JSON-RPC, which following needs anyway: so a pure bitcoind + enforcer mainchain is not
+supported in this mode (it was not before: bitcoind has no `getsidechainevents`). A full gRPC mode would have to
+refuse to propose bundles, or need a way to withdraw the word (a per-sidechain abstain/alarm in
+`SetWithdrawalBundlePolicy`, asked of LayerTwo Labs: audit 2026-10-19, open question 4).
+
+Chunked replies of the interface are checked (`DecodeChunked`: a chunk's size within the reply, its CRLF, the
+256 MiB cap), `sidechain_mainclient_tests/chunked_replies`.
 
 With Backbone the two ports are one node. Tested by `feature_sidechain_ecash.py --mainchaingrpc` (Backbone's
 `-grpc -grpcauth` on regtest `-testecash`): BMM blocks requested by the sidechain node itself, the deposit, a
-withdrawal proposed, voted and paid, a failed bundle refunded, the reorg case.
+withdrawal proposed, voted and paid, a failed bundle refunded, the reorg case, in which the node itself takes
+back its word on the bundle of the branch the mainchain dropped (it is no longer upvoted).
 
 ## Why following stays on JSON-RPC
 
