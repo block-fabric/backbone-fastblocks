@@ -25,6 +25,7 @@ nodes of this sidechain run with -testmainenforcer: the parameters of a sidechai
 
 import atexit
 import os
+import socket
 import subprocess
 import time
 from decimal import Decimal
@@ -59,7 +60,27 @@ def fresh_connections(proxy):
     return proxy
 
 
+def free_port():
+    """A free port for Backbone's gRPC server (49000-49999 on this machine, not 49x54 or 4966x)."""
+    start = 49000 + p2p_port(0) % 1000
+    for i in range(1000):
+        port = 49000 + (start - 49000 + i) % 1000
+        if port % 100 == 54 or 49660 <= port <= 49669:
+            continue
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise AssertionError("no free port")
+
+
 class SidechainEcashTest(BitcoinTestFramework):
+    def add_options(self, parser):
+        parser.add_argument("--mainchaingrpc", action="store_true", default=False,
+                            help="Send the sidechain's requests (BMM, bundles, vouching) through the enforcer's interface Backbone serves (-mainchaingrpcport)")
+
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
@@ -74,6 +95,8 @@ class SidechainEcashTest(BitcoinTestFramework):
         ]
         self.extra_args = [side_args, side_args]
         self.main_process = None
+        self.grpc_port = None
+
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -91,6 +114,8 @@ class SidechainEcashTest(BitcoinTestFramework):
             binary, "-regtest", "-testecash", f"-datadir={datadir}", f"-rpcport={self.main_rpc_port}", f"-port={p2p_port(self.num_nodes)}",
             "-rpcuser=main", "-rpcpassword=secret", "-fallbackfee=0.0002", "-listen=0", "-server", "-printtoconsole=0",
         ]
+        if self.options.mainchaingrpc:
+            self.main_args += ["-grpc", f"-grpcport={self.grpc_port}", "-grpcwallet=miner", "-grpcauth=tok"]
         self.main_process = subprocess.Popen(self.main_args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Whatever happens to the test, the mainchain node must not outlive it.
         atexit.register(self.kill_mainchain, self.main_process)
@@ -125,6 +150,10 @@ class SidechainEcashTest(BitcoinTestFramework):
         self.main_process = None
 
     def setup_network(self):
+        if self.options.mainchaingrpc:
+            self.grpc_port = free_port()
+            for args in self.extra_args:
+                args += [f"-mainchaingrpcport={self.grpc_port}", "-mainchaingrpcauth=tok"]
         self.start_mainchain()
         super().setup_network()
 
@@ -137,6 +166,17 @@ class SidechainEcashTest(BitcoinTestFramework):
     def bmm(self, node=None, expect=True):
         """Mine one block of the sidechain: build it, have the mainchain commit to it."""
         node = node or self.nodes[0]
+        if self.options.mainchaingrpc:
+            # The sidechain node asks for it itself, through the enforcer's interface
+            # (WalletService.CreateBmmCriticalDataTransaction).
+            request = node.requestbmmblock(self.side_address, Decimal("0.001"))
+            assert_equal(request["mainchainheight"], self.main.getblockcount())
+            assert request["mainchaintxid"] in self.main.getrawmempool()
+            self.mine_main()
+            if expect:
+                assert_equal(node.getbestblockhash(), request["hash"])
+                self.sync_blocks()
+            return request["hash"]
         block = node.createbmmblock(self.side_address)
         assert_equal(block["mainchainblockhash"], self.main.getbestblockhash())
         request = self.main.createbmmrequest(SLOT, block["hash"], Decimal("0.001"))

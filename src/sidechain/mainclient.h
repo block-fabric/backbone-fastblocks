@@ -55,6 +55,11 @@ public:
         //! Name of the mainchain wallet that pays for merged mining; unset to use the only loaded wallet.
         std::string wallet;
         bool wallet_set{false};
+        //! Port of the bip300301_enforcer's interface (Backbone's -grpcport, or an enforcer's) on `host`, for
+        //! the requests of this node (BMM requests, withdrawal bundles, its word on them); 0: JSON-RPC for them.
+        uint16_t enforcer_port{0};
+        //! Its token (Backbone's -grpcauth), if it has one.
+        std::string enforcer_token;
     };
 
     explicit MainClient(Options options) : m_options{std::move(options)} {}
@@ -66,9 +71,21 @@ public:
      */
     UniValue Call(const std::string& method, const UniValue& params, bool wallet = false) const;
 
+    /**
+     * Call a method of the bip300301_enforcer's interface ("cusf.mainchain.v1.WalletService/CreateNewAddress")
+     * with the Connect protocol (JSON over HTTP/1.1, which the enforcer and Backbone serve beside gRPC), at
+     * Options::enforcer_port. Requests and replies are in the proto3 JSON mapping.
+     * @throws MainClientError (rpc_error: the interface answered with an error; rpc_message its code and message)
+     */
+    UniValue CallEnforcer(const std::string& procedure, const UniValue& request) const;
+    bool HasEnforcer() const { return m_options.enforcer_port != 0; }
+
     const Options& GetOptions() const { return m_options; }
 
 private:
+    /** Send an HTTP/1.1 request to `port` of the host and return the whole reply. */
+    std::string Exchange(uint16_t port, const std::string& request) const;
+
     const Options m_options;
 };
 

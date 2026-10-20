@@ -124,27 +124,12 @@ util::Result<std::string> ReadPasswordFile(const fs::path& path)
     return password;
 }
 
-UniValue MainClient::Call(const std::string& method, const UniValue& params, bool wallet) const
+std::string MainClient::Exchange(uint16_t port, const std::string& request) const
 {
     const auto unreachable{[&](const std::string& why) {
-        return MainClientError{strprintf("Cannot reach the mainchain node at %s:%u: %s", m_options.host, m_options.port, why), /*rpc_error_in=*/false};
+        return MainClientError{strprintf("Cannot reach the mainchain node at %s:%u: %s", m_options.host, port, why), /*rpc_error_in=*/false};
     }};
-
-    std::string credentials{m_options.credentials};
-    if (credentials.empty()) {
-        std::ifstream file{m_options.cookie_file.std_path()};
-        if (!file.is_open() || !std::getline(file, credentials)) {
-            throw unreachable(strprintf("no credentials: set -mainchainrpcuser and -mainchainrpcpassword, or check that the cookie file %s can be read", fs::PathToString(m_options.cookie_file)));
-        }
-    }
-
-    const std::string body{JSONRPCRequestObj(method, params, 1).write() + "\n"};
-    std::string uri{"/"};
-    if (wallet && m_options.wallet_set) uri = "/wallet/" + PercentEncode(m_options.wallet);
-    const std::string request{strprintf("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAuthorization: Basic %s\r\nContent-Type: application/json\r\nContent-Length: %u\r\n\r\n%s",
-                                        uri, m_options.host, EncodeBase64(credentials), body.size(), body)};
-
-    const auto address{Lookup(m_options.host, m_options.port, /*fAllowLookup=*/true)};
+    const auto address{Lookup(m_options.host, port, /*fAllowLookup=*/true)};
     if (!address) throw unreachable("unknown host");
     const std::unique_ptr<Sock> sock{ConnectDirectly(*address, /*manual_connection=*/true)};
     if (!sock) throw unreachable("connection refused");
@@ -173,6 +158,72 @@ UniValue MainClient::Call(const std::string& method, const UniValue& params, boo
     } catch (const std::runtime_error& e) {
         throw unreachable(e.what());
     }
+
+    return reply;
+}
+
+UniValue MainClient::CallEnforcer(const std::string& procedure, const UniValue& request) const
+{
+    const std::string body{request.write()};
+    std::string auth;
+    if (!m_options.enforcer_token.empty()) auth = "Authorization: Bearer " + m_options.enforcer_token + "\r\n";
+    // An IP address or localhost as the Host: Backbone refuses other names (DNS rebinding).
+    const std::string reply{Exchange(m_options.enforcer_port, strprintf("POST /%s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\n%sContent-Type: application/json\r\nConnect-Protocol-Version: 1\r\nContent-Length: %u\r\n\r\n%s",
+                                                                      procedure, m_options.host, m_options.enforcer_port, auth, body.size(), body))};
+    const size_t header_end{reply.find("\r\n\r\n")};
+    if (!reply.starts_with("HTTP/1.") || header_end == std::string::npos || reply.size() < 12) {
+        throw MainClientError{strprintf("The enforcer interface at %s:%u did not answer %s over HTTP", m_options.host, m_options.enforcer_port, procedure), /*rpc_error_in=*/false};
+    }
+    const std::string status{reply.substr(9, 3)};
+    std::string payload{reply.substr(header_end + 4)};
+    // A chunked reply (a Connect server may stream a unary one so): put back together.
+    if (ToLower(reply.substr(0, header_end)).find("transfer-encoding: chunked") != std::string::npos) {
+        std::string joined;
+        size_t pos{0};
+        while (pos < payload.size()) {
+            const size_t eol{payload.find("\r\n", pos)};
+            if (eol == std::string::npos) break;
+            const auto size{ToIntegral<uint64_t>(payload.substr(pos, eol - pos), 16)};
+            if (!size || *size == 0) break;
+            joined += payload.substr(eol + 2, *size);
+            pos = eol + 2 + *size + 2;
+        }
+        payload = joined;
+    }
+    UniValue answer;
+    if (!answer.read(payload) || !answer.isObject()) {
+        throw MainClientError{strprintf("The enforcer interface answered %s with HTTP status %s and no JSON", procedure, status), /*rpc_error_in=*/false};
+    }
+    if (status != "200") {
+        // A Connect error: {"code": "invalid_argument", "message": ...}.
+        const std::string code{answer.find_value("code").isStr() ? answer.find_value("code").get_str() : status};
+        const std::string message{answer.find_value("message").isStr() ? answer.find_value("message").get_str() : ""};
+        throw MainClientError{strprintf("The enforcer interface answered %s with an error: %s: %s", procedure, code, message), /*rpc_error_in=*/true, code + ": " + message};
+    }
+    return answer;
+}
+
+UniValue MainClient::Call(const std::string& method, const UniValue& params, bool wallet) const
+{
+    const auto unreachable{[&](const std::string& why) {
+        return MainClientError{strprintf("Cannot reach the mainchain node at %s:%u: %s", m_options.host, m_options.port, why), /*rpc_error_in=*/false};
+    }};
+
+    std::string credentials{m_options.credentials};
+    if (credentials.empty()) {
+        std::ifstream file{m_options.cookie_file.std_path()};
+        if (!file.is_open() || !std::getline(file, credentials)) {
+            throw unreachable(strprintf("no credentials: set -mainchainrpcuser and -mainchainrpcpassword, or check that the cookie file %s can be read", fs::PathToString(m_options.cookie_file)));
+        }
+    }
+
+    const std::string body{JSONRPCRequestObj(method, params, 1).write() + "\n"};
+    std::string uri{"/"};
+    if (wallet && m_options.wallet_set) uri = "/wallet/" + PercentEncode(m_options.wallet);
+    const std::string request{strprintf("POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAuthorization: Basic %s\r\nContent-Type: application/json\r\nContent-Length: %u\r\n\r\n%s",
+                                        uri, m_options.host, EncodeBase64(credentials), body.size(), body)};
+
+    const std::string reply{Exchange(m_options.port, request)};
 
     const size_t header_end{reply.find("\r\n\r\n")};
     if (!reply.starts_with("HTTP/1.") || header_end == std::string::npos || reply.size() < 12) throw unreachable("not an HTTP reply");

@@ -763,6 +763,10 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-mainchainrpcpasswordfile=<file>", "Read the password for the JSON-RPC connection to the mainchain node from the first line of <file>, once at startup. Use with -mainchainrpcuser. On Unix the file must be owned by this user and readable by no one else (chmod 600), or the node refuses to start; on Windows its access list is not checked, so keep it in a directory only you can read. Relative paths are prefixed by the net-specific data directory", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpccookiefile=<file>", "Cookie file of the mainchain node (default: the .cookie file in the data directory of the mainchain node)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchaindatadir=<dir>", "Data directory of the mainchain node, where its cookie file is looked for (default: ~/.chains for the Chains networks, ~/.backbone for ecash, ecashbeta and ecashtest; there in betanet/ and testnet4/ for the last two)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-mainchaingrpcport=<port>", "Send this node's requests to the mainchain (BMM requests, withdrawal bundles, its word on them) through the bip300301_enforcer's interface "
+                   "(the Connect protocol, JSON over HTTP/1.1) at this port of -mainchainrpcconnect: Backbone's -grpcport (50051), or an enforcer's. Following the mainchain stays on JSON-RPC, "
+                   "which reports the withdrawal bundles pending after each block with their scores, which that interface does not (default: JSON-RPC for all)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-mainchaingrpcauth=<token>", "The token of that interface (Backbone's -grpcauth), if it has one", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcwallet=<name>", "Wallet of the mainchain node that pays for blind merged mining (default: its only loaded wallet)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-rpcport=<port>", strprintf("Listen for JSON-RPC connections on <port> (default: %u, testnet: %u, signet: %u, regtest: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), signetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-rpcservertimeout=<n>", strprintf("Timeout during HTTP requests (default: %d)", DEFAULT_HTTP_SERVER_TIMEOUT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
@@ -2256,6 +2260,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (args.IsArgSet("-mainchainrpcwallet")) {
             options.wallet = args.GetArg("-mainchainrpcwallet", "");
             options.wallet_set = true;
+        }
+        if (args.IsArgSet("-mainchaingrpcport")) {
+            const int64_t port{args.GetIntArg("-mainchaingrpcport", 0)};
+            if (port <= 0 || port > 65535) return InitError(Untranslated("-mainchaingrpcport: not a port"));
+            options.enforcer_port = static_cast<uint16_t>(port);
+            options.enforcer_token = args.GetArg("-mainchaingrpcauth", "");
+            LogInfo("Requests to the mainchain (BMM, withdrawal bundles) through the enforcer's interface at %s:%d", options.host, port);
         }
         node.follower = std::make_unique<sidechain::Follower>(node, std::move(options));
         chainman.m_mainchain_poll = [&node] { node.follower->Poll(); };

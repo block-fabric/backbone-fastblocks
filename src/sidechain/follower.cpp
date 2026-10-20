@@ -34,6 +34,21 @@
 #include <string_view>
 
 namespace sidechain {
+
+namespace {
+// The bip300301_enforcer's interface (MainClient::CallEnforcer), in the proto3 JSON mapping: a wrapper is its
+// value, a ConsensusHex/ReverseHex {"hex": ...}; a hash as ConsensusHex is its bytes in order (the reverse of
+// GetHex), as ReverseHex GetHex.
+const std::string WALLET_SERVICE{"cusf.mainchain.v1.WalletService/"};
+const std::string PRODUCER_SERVICE{"cusf.mainchain.v1.BlockProducerService/"};
+const std::string VALIDATOR_SERVICE{"cusf.mainchain.v1.ValidatorService/"};
+UniValue HexOf(const std::string& hex)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("hex", hex);
+    return obj;
+}
+} // namespace
 namespace {
 //! How often the mainchain node is asked for news.
 constexpr auto POLL_INTERVAL{1s};
@@ -825,7 +840,12 @@ void Follower::SendBundle()
     const auto vouch{[&](const uint256& bundle) {
         if (WITH_LOCK(m_mutex, return m_vouched == bundle)) return;
         try {
-            if (bundle.IsNull()) {
+            if (m_client.HasEnforcer()) {
+                // The enforcer's interface has no word of a sidechain on its bundle: handing it over
+                // (ProposeWithdrawalBundle, below) is that word, which its KNOWN policy (Backbone's default)
+                // upvotes. Its SetWithdrawalBundleAck is the operator's own vote, over any policy: not this
+                // node's to give.
+            } else if (bundle.IsNull()) {
                 m_client.Call("vouchwithdrawalbundle", Params({slot}));
             } else {
                 m_client.Call("vouchwithdrawalbundle", Params({slot, bundle.GetHex()}));
@@ -855,7 +875,16 @@ void Follower::SendBundle()
             // chain with its own extended formats, as zSide, could otherwise pick one the mainchain cannot read).
             DataStream blind{};
             blind << TX_NO_WITNESS(CTransaction{*tx});
-            m_client.Call("receivewithdrawalbundle", Params({slot, HexStr(blind)}));
+            if (m_client.HasEnforcer()) {
+                // ProposeWithdrawalBundle: the bytes as a BytesValue (base64 in JSON); the block producer proposes
+                // it (M3), and pays it out (M6) once it has the votes.
+                UniValue request(UniValue::VOBJ);
+                request.pushKV("sidechainId", slot);
+                request.pushKV("transaction", EncodeBase64(MakeUCharSpan(blind)));
+                m_client.CallEnforcer(PRODUCER_SERVICE + "ProposeWithdrawalBundle", request);
+            } else {
+                m_client.Call("receivewithdrawalbundle", Params({slot, HexStr(blind)}));
+            }
         } catch (const std::exception& e) {
             if (WITH_LOCK(m_mutex, return m_bundle_refused != hash)) {
                 LogWarning("The mainchain node did not take the withdrawal bundle %s: %s", hash.ToString(), e.what());
@@ -873,6 +902,8 @@ void Follower::SendBundle()
     // withdrawal that pays it out, and any miner can mine it: one try per
     // mainchain block, since the treasury output it spends can change.
     const int main_height{Assert(chainman.m_mainchain)->Height()};
+    // The enforcer's block producer pays out the bundles it holds itself; its interface has no broadcast.
+    if (m_client.HasEnforcer()) return;
     if (WITH_LOCK(m_mutex, return m_payout_tried == std::make_pair(hash, main_height))) return;
     try {
         const UniValue sent{m_client.Call("sendwithdrawalbundle", Params({slot, hash.GetHex()}))};
@@ -934,8 +965,44 @@ std::optional<std::string> Follower::RequestCommitment(const Candidate& candidat
 
 std::optional<std::string> Follower::RequestCommitment(const uint256& commitment, const uint256& main_prev_hash, CAmount amount, std::string& error) const
 {
+    const uint64_t slot{m_node.chainman->GetConsensus().sidechain.slot};
+    if (m_client.HasEnforcer()) {
+        // CreateBmmCriticalDataTransaction: on the mainchain tip, which has to be the block the commitment was
+        // made for; the bid is the M8's fee.
+        try {
+            const UniValue tip{m_client.CallEnforcer(VALIDATOR_SERVICE + "GetChainTip", UniValue{UniValue::VOBJ})};
+            const UniValue& info{tip.find_value("blockHeaderInfo")};
+            const auto tip_hash{uint256::FromHex(info.find_value("blockHash").find_value("hex").get_str())};
+            if (!tip_hash || *tip_hash != main_prev_hash) {
+                error = "The mainchain moved while the request was made";
+                return std::nullopt;
+            }
+            UniValue request(UniValue::VOBJ);
+            request.pushKV("sidechainId", slot);
+            request.pushKV("valueSats", strprintf("%d", amount));
+            request.pushKV("height", info.find_value("height").isNull() ? 0 : info.find_value("height").getInt<int64_t>());
+            request.pushKV("criticalHash", HexOf(HexStr(commitment)));
+            request.pushKV("prevBytes", HexOf(main_prev_hash.GetHex()));
+            const UniValue result{m_client.CallEnforcer(WALLET_SERVICE + "CreateBmmCriticalDataTransaction", request)};
+            return result.find_value("txid").find_value("hex").get_str();
+        } catch (const MainClientError& e) {
+            // INVALID_ARGUMENT naming prev_bytes: the tip moved (as the enforcer's clients read it); the mainchain
+            // wallet's "Outbid:" kept as it is (see Mine).
+            if (e.rpc_error && e.rpc_message.find("prev_bytes") != std::string::npos) {
+                error = "The mainchain moved while the request was made";
+            } else if (e.rpc_error && e.rpc_message.find("Outbid:") != std::string::npos) {
+                error = e.rpc_message.substr(e.rpc_message.find("Outbid:"));
+            } else {
+                error = e.what();
+            }
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            error = e.what();
+            return std::nullopt;
+        }
+    }
     try {
-        const UniValue result{m_client.Call("createbmmrequest", Params({static_cast<uint64_t>(m_node.chainman->GetConsensus().sidechain.slot), commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
+        const UniValue result{m_client.Call("createbmmrequest", Params({slot, commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
         // The request names the mainchain block it has to follow; it has to be the one the commitment was made for.
         if (Hash256(result["prevblockhash"]) != main_prev_hash) {
             error = "The mainchain moved while the request was made";
