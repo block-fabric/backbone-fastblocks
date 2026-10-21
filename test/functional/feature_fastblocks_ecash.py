@@ -72,20 +72,20 @@ class FastBlocksEcashTest(SidechainEcashTest):
     def wait_in_sync(self):
         self.wait_until(lambda: len({n.getbestblockhash() for n in self.nodes}) == 1, timeout=60)
 
+    def ticket_requested(self):
+        """Whether the merged miner's ticket request (an M8 of this slot, output 0) is in the mainchain's mempool."""
+        prefix = f"6a4400bf00{SLOT:02x}"
+        return any(self.main.getrawtransaction(txid, True)["vout"][0]["scriptPubKey"]["hex"].startswith(prefix)
+                   for txid in self.main.getrawmempool())
+
     def anchor(self):
         """One more anchor: wait for the merged miner's ticket request, mine it, wait for its acknowledgement."""
         before = [n.getposinfo()["anchors"] for n in self.nodes]
-        # A mainchain block may have no commitment of this chain (Backbone left the ticket out of the block
-        # that paid a withdrawal bundle): then the next one anchors.
-        for _ in range(3):
-            self.wait_until(lambda: len(self.main.getrawmempool()) > 0, timeout=60)
-            self.mine_main()
-            try:
-                self.wait_until(lambda: all(n.getposinfo()["anchors"] > b for n, b in zip(self.nodes, before)), timeout=30)
-                return
-            except AssertionError:
-                self.log.debug("No anchor in that mainchain block; one more")
-        raise AssertionError("no anchor in three mainchain blocks")
+        # The ticket request itself, not just anything in the mempool: once a bundle is payable the node sends its
+        # withdrawal (M6) there too, and a block mined on that alone has no ticket (the anchor then waited a block).
+        self.wait_until(self.ticket_requested, timeout=60)
+        self.mine_main()
+        self.wait_until(lambda: all(n.getposinfo()["anchors"] > b for n, b in zip(self.nodes, before)), timeout=30)
 
     def run_test(self):
         super().run_test()
