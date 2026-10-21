@@ -34,6 +34,21 @@
 #include <string_view>
 
 namespace sidechain {
+
+namespace {
+// The bip300301_enforcer's interface (MainClient::CallEnforcer), in the proto3 JSON mapping: a wrapper is its
+// value, a ConsensusHex/ReverseHex {"hex": ...}; a hash as ConsensusHex is its bytes in order (the reverse of
+// GetHex), as ReverseHex GetHex.
+const std::string WALLET_SERVICE{"cusf.mainchain.v1.WalletService/"};
+const std::string PRODUCER_SERVICE{"cusf.mainchain.v1.BlockProducerService/"};
+const std::string VALIDATOR_SERVICE{"cusf.mainchain.v1.ValidatorService/"};
+UniValue HexOf(const std::string& hex)
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("hex", hex);
+    return obj;
+}
+} // namespace
 namespace {
 //! How often the mainchain node is asked for news.
 constexpr auto POLL_INTERVAL{1s};
@@ -70,7 +85,7 @@ CAmount ParseAmount(const UniValue& value)
 std::vector<MainPendingBundle> ParsePending(const UniValue& obj)
 {
     if (!obj.exists("pending")) {
-        throw std::runtime_error("The mainchain node is too old: it does not report the withdrawal bundles pending after blocks, with their scores. Upgrade Chains");
+        throw std::runtime_error("The mainchain node is too old: it does not report the withdrawal bundles pending after blocks, with their scores. Upgrade the mainchain node (Backbone, or Chains)");
     }
     std::vector<MainPendingBundle> pending;
     for (const UniValue& entry : obj["pending"].getValues()) pending.push_back({Hash256(entry["hash"]), entry["score"].getInt<uint32_t>()});
@@ -82,7 +97,7 @@ std::vector<MainPendingBundle> ParsePending(const UniValue& obj)
 std::vector<uint256> ParseProposed(const UniValue& obj)
 {
     if (!obj.exists("proposed")) {
-        throw std::runtime_error("The mainchain node is too old: it does not report the withdrawal bundles that blocks propose. Upgrade Chains");
+        throw std::runtime_error("The mainchain node is too old: it does not report the withdrawal bundles that blocks propose. Upgrade the mainchain node (Backbone, or Chains)");
     }
     std::vector<uint256> proposed;
     for (const UniValue& hash : obj["proposed"].getValues()) proposed.push_back(Hash256(hash));
@@ -98,7 +113,7 @@ MainBlock ParseMainBlock(const UniValue& obj)
     // time of the block itself can be two hours ahead). Rules of sidechains depend on it: a node that
     // does not say is too old to follow, as nodes that took another time would disagree.
     if (!obj.exists("mediantime")) {
-        throw std::runtime_error("The mainchain node is too old: it does not report the median time of blocks. Upgrade Chains");
+        throw std::runtime_error("The mainchain node is too old: it does not report the median time of blocks. Upgrade the mainchain node (Backbone, or Chains)");
     }
     block.time = obj["mediantime"].getInt<int64_t>();
     if (obj.exists("bmm")) block.bmm = Hash256(obj["bmm"]);
@@ -209,7 +224,17 @@ Follower::LinkError Follower::ClassifyError(const std::string& message)
     return LinkError::OTHER;
 }
 
-std::pair<Follower::LinkState, Follower::LinkError> Follower::Link(const Status& status, const std::string& own_chain)
+std::string Follower::MainNetwork(const UniValue& info)
+{
+    // Backbone says "chain" as eCash's own node does (main on ecash and ecashbeta, testnet4 on ecashtest), for
+    // the pools and the enforcer, and its own name of the network as "network". Chains has "chain" only.
+    const UniValue& network{info.find_value("network")};
+    if (network.isStr()) return network.get_str();
+    const UniValue& chain{info.find_value("chain")};
+    return chain.isStr() ? chain.get_str() : "";
+}
+
+std::pair<Follower::LinkState, Follower::LinkError> Follower::Link(const Status& status, const std::string& own_chain, int behind_margin)
 {
     if (!status.connected) {
         const LinkError kind{ClassifyError(status.error)};
@@ -218,7 +243,7 @@ std::pair<Follower::LinkState, Follower::LinkError> Follower::Link(const Status&
         return {LinkState::DOWN, kind == LinkError::NONE ? LinkError::OTHER : kind};
     }
     if (!status.main_chain.empty() && !own_chain.empty() && status.main_chain != own_chain) return {LinkState::DOWN, LinkError::WRONG_NETWORK};
-    if (status.main_ibd || status.Behind() > BEHIND_MARGIN) return {LinkState::SYNCING, LinkError::NOT_SYNCED};
+    if (status.main_ibd || status.Behind() > behind_margin) return {LinkState::SYNCING, LinkError::NOT_SYNCED};
     return {LinkState::OK, LinkError::NONE};
 }
 
@@ -236,7 +261,7 @@ void Follower::Probe()
         m_status.main_blocks = info["blocks"].isNum() ? info["blocks"].getInt<int>() : -1;
         m_status.main_headers = info["headers"].isNum() ? info["headers"].getInt<int>() : -1;
         m_status.main_ibd = info["initialblockdownload"].isTrue();
-        m_status.main_chain = info["chain"].isStr() ? info["chain"].get_str() : "";
+        m_status.main_chain = MainNetwork(info);
     } catch (const std::exception&) {
         // Sync just reached it: the next round says if it no longer answers.
     }
@@ -247,7 +272,7 @@ void Follower::NoteLink(bool ok, const std::string& error)
     const int64_t now{GetTime()};
     if (ok) {
         if (!m_status.connected) {
-            LogInfo("Following the mainchain node at %s:%u", m_client.GetOptions().host, m_client.GetOptions().port);
+            LogInfo("Following the mainchain node at %s%s", m_client.Address(), m_client.EnforcerOnly() ? " (through the enforcer's interface alone)" : "");
             if (m_node.warnings) m_node.warnings->Unset(node::Warning::MAINCHAIN_UNREACHABLE);
         }
         m_status.connected = true;
@@ -264,7 +289,7 @@ void Follower::NoteLink(bool ok, const std::string& error)
         m_last_probe = {};
     }
     m_status.followed_height = m_node.chainman->m_mainchain ? m_node.chainman->m_mainchain->Height() : -1;
-    const auto [state, kind]{Link(m_status, m_node.chainman->GetParams().GetChainTypeString())};
+    const auto [state, kind]{Link(m_status, m_node.chainman->GetParams().GetChainTypeString(), m_node.chainman->GetConsensus().sidechain.main_behind_margin)};
     if (state != m_status.state || m_status.state_since == 0) {
         if (m_status.state_since != 0) LogInfo("The link to the mainchain node is now %s%s", LinkStateName(state), kind == LinkError::NONE ? "" : " (" + LinkErrorName(kind) + ")");
         m_status.state = state;
@@ -786,6 +811,7 @@ void Follower::SendBundle()
     std::optional<CMutableTransaction> tx;
     uint256 hash;
     int side_main_height{-1};
+    int committed_at{-1};
     {
         LOCK(::cs_main);
         const State side{chainman.ActiveChainstate().SideState()};
@@ -794,6 +820,7 @@ void Follower::SendBundle()
             tx = side.BundleTx();
         }
         side_main_height = side.MainHeight();
+        committed_at = side.BundleMainHeight();
     }
     // The record may already say what the next block of this chain will learn: that the bundle was
     // closed, or that the mainchain paid another bundle of the slot, which can hold the same
@@ -814,11 +841,25 @@ void Follower::SendBundle()
         }
     }
     const uint64_t slot{chainman.GetConsensus().sidechain.slot};
+    if (m_client.EnforcerOnly() && !hash.IsNull()) {
+        // An enforcer keeps a bundle handed to it, proposes and upvotes it, until the mainchain closes it: it cannot
+        // be told otherwise. Handed only once its commitment is deep enough that no reorg of the mainchain is
+        // expected to take it back (SidechainParams::bundle_handoff_depth): a bundle of a branch this chain left,
+        // kept by block producers, could be paid besides the one of the new branch with the same withdrawals.
+        const int depth{Assert(chainman.m_mainchain)->Height() - committed_at + 1};
+        if (committed_at < 0 || depth < chainman.GetConsensus().sidechain.bundle_handoff_depth) return;
+    }
     // Tell the mainchain node what this chain vouches for, when it changes: its miners upvote that
     // bundle, and downvote any other of this slot (one a reorg left behind) so that it fails.
     const auto vouch{[&](const uint256& bundle) {
+        // Through the enforcer alone, there is no word to give: its block producer upvotes the bundles handed to
+        // it (its KNOWN policy), and the rules of this chain need no downvotes (SidechainParams::main_events_only).
+        if (m_client.EnforcerOnly()) return;
         if (WITH_LOCK(m_mutex, return m_vouched == bundle)) return;
         try {
+            // Always over JSON-RPC, also with -mainchaingrpcport: the enforcer's interface cannot take this chain's
+            // word back (no "none", no per-sidechain alarm), and a stale bundle left upvoted could be paid twice.
+            // m_vouched is set below only once the mainchain took the word.
             if (bundle.IsNull()) {
                 m_client.Call("vouchwithdrawalbundle", Params({slot}));
             } else {
@@ -849,7 +890,16 @@ void Follower::SendBundle()
             // chain with its own extended formats, as zSide, could otherwise pick one the mainchain cannot read).
             DataStream blind{};
             blind << TX_NO_WITNESS(CTransaction{*tx});
-            m_client.Call("receivewithdrawalbundle", Params({slot, HexStr(blind)}));
+            if (m_client.HasEnforcer()) {
+                // ProposeWithdrawalBundle: the bytes as a BytesValue (base64 in JSON); the block producer proposes
+                // it (M3), and pays it out (M6) once it has the votes.
+                UniValue request(UniValue::VOBJ);
+                request.pushKV("sidechainId", slot);
+                request.pushKV("transaction", EncodeBase64(MakeUCharSpan(blind)));
+                m_client.CallEnforcer(PRODUCER_SERVICE + "ProposeWithdrawalBundle", request);
+            } else {
+                m_client.Call("receivewithdrawalbundle", Params({slot, HexStr(blind)}));
+            }
         } catch (const std::exception& e) {
             if (WITH_LOCK(m_mutex, return m_bundle_refused != hash)) {
                 LogWarning("The mainchain node did not take the withdrawal bundle %s: %s", hash.ToString(), e.what());
@@ -867,6 +917,8 @@ void Follower::SendBundle()
     // withdrawal that pays it out, and any miner can mine it: one try per
     // mainchain block, since the treasury output it spends can change.
     const int main_height{Assert(chainman.m_mainchain)->Height()};
+    // The enforcer's block producer pays out the bundles it holds itself; its interface has no broadcast.
+    if (m_client.HasEnforcer()) return;
     if (WITH_LOCK(m_mutex, return m_payout_tried == std::make_pair(hash, main_height))) return;
     try {
         const UniValue sent{m_client.Call("sendwithdrawalbundle", Params({slot, hash.GetHex()}))};
@@ -928,8 +980,44 @@ std::optional<std::string> Follower::RequestCommitment(const Candidate& candidat
 
 std::optional<std::string> Follower::RequestCommitment(const uint256& commitment, const uint256& main_prev_hash, CAmount amount, std::string& error) const
 {
+    const uint64_t slot{m_node.chainman->GetConsensus().sidechain.slot};
+    if (m_client.HasEnforcer()) {
+        // CreateBmmCriticalDataTransaction: on the mainchain tip, which has to be the block the commitment was
+        // made for; the bid is the M8's fee.
+        try {
+            const UniValue tip{m_client.CallEnforcer(VALIDATOR_SERVICE + "GetChainTip", UniValue{UniValue::VOBJ})};
+            const UniValue& info{tip.find_value("blockHeaderInfo")};
+            const auto tip_hash{uint256::FromHex(info.find_value("blockHash").find_value("hex").get_str())};
+            if (!tip_hash || *tip_hash != main_prev_hash) {
+                error = "The mainchain moved while the request was made";
+                return std::nullopt;
+            }
+            UniValue request(UniValue::VOBJ);
+            request.pushKV("sidechainId", slot);
+            request.pushKV("valueSats", strprintf("%d", amount));
+            request.pushKV("height", info.find_value("height").isNull() ? 0 : info.find_value("height").getInt<int64_t>());
+            request.pushKV("criticalHash", HexOf(HexStr(commitment)));
+            request.pushKV("prevBytes", HexOf(main_prev_hash.GetHex()));
+            const UniValue result{m_client.CallEnforcer(WALLET_SERVICE + "CreateBmmCriticalDataTransaction", request)};
+            return result.find_value("txid").find_value("hex").get_str();
+        } catch (const MainClientError& e) {
+            // INVALID_ARGUMENT naming prev_bytes: the tip moved (as the enforcer's clients read it); the mainchain
+            // wallet's "Outbid:" kept as it is (see Mine).
+            if (e.rpc_error && e.rpc_message.find("prev_bytes") != std::string::npos) {
+                error = "The mainchain moved while the request was made";
+            } else if (e.rpc_error && e.rpc_message.find("Outbid:") != std::string::npos) {
+                error = e.rpc_message.substr(e.rpc_message.find("Outbid:"));
+            } else {
+                error = e.what();
+            }
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            error = e.what();
+            return std::nullopt;
+        }
+    }
     try {
-        const UniValue result{m_client.Call("createbmmrequest", Params({static_cast<uint64_t>(m_node.chainman->GetConsensus().sidechain.slot), commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
+        const UniValue result{m_client.Call("createbmmrequest", Params({slot, commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
         // The request names the mainchain block it has to follow; it has to be the one the commitment was made for.
         if (!main_prev_hash.IsNull() && Hash256(result["prevblockhash"]) != main_prev_hash) {
             error = "The mainchain moved while the request was made";
