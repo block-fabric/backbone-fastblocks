@@ -38,6 +38,9 @@ export interface PosInfo {
   anchorpoint?: string;
   lastposslot: number;
   firstunanchoredslot: number;
+  /** Blocks of stake go on this many slots past the first one no anchor covers (a mainchain gap); older nodes: absent. */
+  maxunanchoredslots?: number;
+  seedlookaheadseconds?: number;
   stalled: boolean;
   pot: { accrued: number; paid: number; reserve: number };
   staking: { bonded: number; unbonding: number; rewardsowed: number; slashed: number; minstake: number; unbondinganchors: number };
@@ -310,8 +313,8 @@ export function untilText(seconds: number): string {
   return t('%1 s', s);
 }
 
-/** About how long n BMM commitments take: one per mainchain block, ten minutes each on the main networks. */
-export function anchorsTime(n: number, mainBlockSeconds = 600): string {
+/** About how long n BMM commitments take: one per mainchain block, a minute apart on the Chains networks. */
+export function anchorsTime(n: number, mainBlockSeconds = 60): string {
   const secs = n * mainBlockSeconds;
   if (secs >= 2 * 86400) return tn('about %n day(s)', Math.round(secs / 86400));
   if (secs >= 2 * 3600) return tn('about %n hour(s)', Math.round(secs / 3600));
