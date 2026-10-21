@@ -186,6 +186,7 @@ BASE_SCRIPTS = [
     'feature_fastblocks_feesplit.py',
     'feature_fastblocks_txindex.py',
     'feature_sidechain_ecash.py',
+    'feature_fastblocks_ecash_gap.py',
     'feature_sidechain_enforcer.py',
     'feature_fastblocks_ecash.py',
     'feature_fastblocks_enforcer.py',
