@@ -984,7 +984,9 @@ std::optional<std::string> Follower::RequestCommitment(const uint256& commitment
             const UniValue tip{m_client.CallEnforcer(VALIDATOR_SERVICE + "GetChainTip", UniValue{UniValue::VOBJ})};
             const UniValue& info{tip.find_value("blockHeaderInfo")};
             const auto tip_hash{uint256::FromHex(info.find_value("blockHash").find_value("hex").get_str())};
-            if (!tip_hash || *tip_hash != main_prev_hash) {
+            // A null main_prev_hash: for whatever block comes next (a commitment that does not depend on it, as a
+            // sidechain's own ones may); the request then follows the tip as it is.
+            if (!tip_hash || (!main_prev_hash.IsNull() && *tip_hash != main_prev_hash)) {
                 error = "The mainchain moved while the request was made";
                 return std::nullopt;
             }
@@ -993,7 +995,7 @@ std::optional<std::string> Follower::RequestCommitment(const uint256& commitment
             request.pushKV("valueSats", strprintf("%d", amount));
             request.pushKV("height", info.find_value("height").isNull() ? 0 : info.find_value("height").getInt<int64_t>());
             request.pushKV("criticalHash", HexOf(HexStr(commitment)));
-            request.pushKV("prevBytes", HexOf(main_prev_hash.GetHex()));
+            request.pushKV("prevBytes", HexOf(tip_hash->GetHex()));
             const UniValue result{m_client.CallEnforcer(WALLET_SERVICE + "CreateBmmCriticalDataTransaction", request)};
             return result.find_value("txid").find_value("hex").get_str();
         } catch (const MainClientError& e) {
@@ -1015,7 +1017,7 @@ std::optional<std::string> Follower::RequestCommitment(const uint256& commitment
     try {
         const UniValue result{m_client.Call("createbmmrequest", Params({slot, commitment.GetHex(), ValueFromAmount(amount)}), /*wallet=*/true)};
         // The request names the mainchain block it has to follow; it has to be the one the commitment was made for.
-        if (Hash256(result["prevblockhash"]) != main_prev_hash) {
+        if (!main_prev_hash.IsNull() && Hash256(result["prevblockhash"]) != main_prev_hash) {
             error = "The mainchain moved while the request was made";
             return std::nullopt;
         }

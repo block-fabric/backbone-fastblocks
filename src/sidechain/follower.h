@@ -132,7 +132,7 @@ public:
     std::optional<std::string> RequestCommitment(const Candidate& candidate, CAmount amount, std::string& error) const;
     /**
      * The same for any hash the mainchain is to commit to, in the mainchain block after `main_prev_hash`
-     * (which the request must follow): a block of this chain, or what a sidechain's own rules commit to.
+     * (which the request must follow; null: whatever block comes next): a block of this chain, or what a sidechain's own rules commit to.
      */
     std::optional<std::string> RequestCommitment(const uint256& commitment, const uint256& main_prev_hash, CAmount amount, std::string& error) const;
 
