@@ -558,6 +558,9 @@ public:
                 // paid with more than 5 votes, in 10 blocks (Thresholds::SHORT), and no single payout.
                 consensus.sidechain.main_single_payout = false;
                 consensus.sidechain.pending_min_score = 2;
+                // The rules of the eCash networks: from the enforcer's events alone (SidechainParams::main_events_only).
+                consensus.sidechain.main_events_only = true;
+                consensus.sidechain.bundle_handoff_depth = 2;
             }
             // A sidechain has no sidechains of its own.
             consensus.drivechain.max_sidechains = 0;
@@ -652,6 +655,12 @@ public:
         consensus.nPowTargetTimespan = 2016 * consensus.nPowTargetSpacing;
         // Without single payout on the mainchain, this chain keeps it (SidechainParams::main_single_payout).
         consensus.sidechain.main_single_payout = false;
+        // Rules that need only what the bip300301_enforcer reports of each block, which a node can follow through
+        // an enforcer alone (-mainchaingrpc): new networks, nothing on them to fork (SidechainParams::main_events_only).
+        consensus.sidechain.main_events_only = true;
+        // A bundle is handed to an enforcer once its commitment is a day deep (144 blocks; two hours on the test
+        // network): nothing next to the three months a bundle takes to be paid.
+        consensus.sidechain.bundle_handoff_depth = chain == ChainType::ECASH_TESTNET ? 12 : 144;
         // Set when the slot activates on the mainchain: the height of the block that activated it.
         consensus.sidechain.main_activation_height = 0;
         // Ten-minute blocks: a block in which a new withdrawal can be taken back, and a link two blocks behind

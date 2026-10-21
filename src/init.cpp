@@ -766,6 +766,10 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-mainchaingrpcport=<port>", "Send this node's requests to the mainchain (BMM requests, withdrawal bundles, its word on them) through the bip300301_enforcer's interface "
                    "(the Connect protocol, JSON over HTTP/1.1) at this port of -mainchainrpcconnect: Backbone's -grpcport (50051), or an enforcer's. Following the mainchain stays on JSON-RPC, "
                    "which reports the withdrawal bundles pending after each block with their scores, which that interface does not (default: JSON-RPC for all)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-mainchaingrpc=<[http://]host:port>", "Follow the mainchain, and make every request of it, through the bip300301_enforcer's interface alone (the Connect protocol, JSON over HTTP/1.1): "
+                   "an eCash node with its enforcer (the enforcer's --serve-grpc-addr, 127.0.0.1:50051 by default), or Backbone's -grpc. No JSON-RPC to the mainchain, no credentials for it. "
+                   "Only on the networks whose rules take what the enforcer reports alone (ecash, ecashbeta, ecashtest; regtest with -testmainenforcer). Not with -mainchaingrpcport. "
+                   "Neither the enforcer nor Backbone serve TLS: beyond this machine, use a tunnel (doc/ecash-enforcer.md)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchaingrpcauth=<token>", "The token of that interface (Backbone's -grpcauth), if it has one", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::CONNECTION);
     argsman.AddArg("-mainchainrpcwallet=<name>", "Wallet of the mainchain node that pays for blind merged mining (default: its only loaded wallet)", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-rpcport=<port>", strprintf("Listen for JSON-RPC connections on <port> (default: %u, testnet: %u, signet: %u, regtest: %u)", defaultBaseParams->RPCPort(), testnetBaseParams->RPCPort(), signetBaseParams->RPCPort(), regtestBaseParams->RPCPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
@@ -2261,7 +2265,29 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             options.wallet = args.GetArg("-mainchainrpcwallet", "");
             options.wallet_set = true;
         }
-        if (args.IsArgSet("-mainchaingrpcport")) {
+        options.chain = chain_type;
+        if (args.IsArgSet("-mainchaingrpc")) {
+            if (args.IsArgSet("-mainchaingrpcport")) return InitError(Untranslated("Set -mainchaingrpc (everything through the enforcer's interface) or -mainchaingrpcport (requests only), not both"));
+            if (!chainman.GetConsensus().sidechain.main_events_only) {
+                return InitError(Untranslated("-mainchaingrpc: the rules of this network need the scores of pending withdrawal bundles, which the enforcer's interface does not report; follow the mainchain node over JSON-RPC"));
+            }
+            std::string url{args.GetArg("-mainchaingrpc", "")};
+            if (url.starts_with("https://")) {
+                return InitError(Untranslated("-mainchaingrpc: TLS is not supported (neither the enforcer nor Backbone serve it); reach a remote interface through a tunnel, as an http:// address on this machine"));
+            }
+            if (url.starts_with("http://")) url = url.substr(7);
+            if (url.ends_with("/")) url.pop_back();
+            uint16_t port{0};
+            std::string host;
+            if (!SplitHostPort(url, port, host) || host.empty() || port == 0 || url.find('/') != std::string::npos) {
+                return InitError(Untranslated(strprintf("-mainchaingrpc: %s is not [http://]host:port", args.GetArg("-mainchaingrpc", ""))));
+            }
+            options.enforcer_host = host;
+            options.enforcer_port = port;
+            options.enforcer_token = args.GetArg("-mainchaingrpcauth", "");
+            options.enforcer_only = true;
+            LogInfo("Following the mainchain through the enforcer's interface alone at %s:%u (no JSON-RPC)", host, port);
+        } else if (args.IsArgSet("-mainchaingrpcport")) {
             const int64_t port{args.GetIntArg("-mainchaingrpcport", 0)};
             if (port <= 0 || port > 65535) return InitError(Untranslated("-mainchaingrpcport: not a port"));
             options.enforcer_port = static_cast<uint16_t>(port);

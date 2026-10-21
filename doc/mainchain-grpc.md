@@ -1,5 +1,9 @@
 # The mainchain over the bip300301_enforcer's interface
 
+> Since branch `ecash-enforcer`: `-mainchaingrpc=host:port` follows the mainchain and makes every request
+> through the interface alone, on the eCash networks, whose peg rules now take only the enforcer's events (no
+> scores): `doc/ecash-enforcer.md`. What follows describes `-mainchaingrpcport` (requests only), kept.
+
 A sidechain node of this template follows its mainchain node over JSON-RPC (`-mainchainrpcport`): Backbone
 on the eCash networks, Chains on the Chains networks. Backbone also serves the bip300301_enforcer's interface
 (gRPC, gRPC-Web and the Connect protocol on one port, `-grpcport`, default 50051; Backbone's

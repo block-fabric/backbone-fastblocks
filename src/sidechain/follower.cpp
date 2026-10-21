@@ -272,7 +272,7 @@ void Follower::NoteLink(bool ok, const std::string& error)
     const int64_t now{GetTime()};
     if (ok) {
         if (!m_status.connected) {
-            LogInfo("Following the mainchain node at %s:%u", m_client.GetOptions().host, m_client.GetOptions().port);
+            LogInfo("Following the mainchain node at %s%s", m_client.Address(), m_client.EnforcerOnly() ? " (through the enforcer's interface alone)" : "");
             if (m_node.warnings) m_node.warnings->Unset(node::Warning::MAINCHAIN_UNREACHABLE);
         }
         m_status.connected = true;
@@ -807,6 +807,7 @@ void Follower::SendBundle()
     std::optional<CMutableTransaction> tx;
     uint256 hash;
     int side_main_height{-1};
+    int committed_at{-1};
     {
         LOCK(::cs_main);
         const State side{chainman.ActiveChainstate().SideState()};
@@ -815,6 +816,7 @@ void Follower::SendBundle()
             tx = side.BundleTx();
         }
         side_main_height = side.MainHeight();
+        committed_at = side.BundleMainHeight();
     }
     // The record may already say what the next block of this chain will learn: that the bundle was
     // closed, or that the mainchain paid another bundle of the slot, which can hold the same
@@ -835,9 +837,20 @@ void Follower::SendBundle()
         }
     }
     const uint64_t slot{chainman.GetConsensus().sidechain.slot};
+    if (m_client.EnforcerOnly() && !hash.IsNull()) {
+        // An enforcer keeps a bundle handed to it, proposes and upvotes it, until the mainchain closes it: it cannot
+        // be told otherwise. Handed only once its commitment is deep enough that no reorg of the mainchain is
+        // expected to take it back (SidechainParams::bundle_handoff_depth): a bundle of a branch this chain left,
+        // kept by block producers, could be paid besides the one of the new branch with the same withdrawals.
+        const int depth{Assert(chainman.m_mainchain)->Height() - committed_at + 1};
+        if (committed_at < 0 || depth < chainman.GetConsensus().sidechain.bundle_handoff_depth) return;
+    }
     // Tell the mainchain node what this chain vouches for, when it changes: its miners upvote that
     // bundle, and downvote any other of this slot (one a reorg left behind) so that it fails.
     const auto vouch{[&](const uint256& bundle) {
+        // Through the enforcer alone, there is no word to give: its block producer upvotes the bundles handed to
+        // it (its KNOWN policy), and the rules of this chain need no downvotes (SidechainParams::main_events_only).
+        if (m_client.EnforcerOnly()) return;
         if (WITH_LOCK(m_mutex, return m_vouched == bundle)) return;
         try {
             // Always over JSON-RPC, also with -mainchaingrpcport: the enforcer's interface cannot take this chain's

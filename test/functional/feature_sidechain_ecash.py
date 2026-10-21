@@ -17,10 +17,9 @@ nodes of this sidechain run with -testmainenforcer: the parameters of a sidechai
 - A withdrawal goes in a bundle (M3), which the mainchain votes up (M4) and pays (M6); the escrow and the
   payout match the bundle.
 - A bundle the mainchain does not vote for fails at its maximum age; its withdrawal is refunded.
-- Single payout on the sidechain's side: a bundle of another branch, left pending by a mainchain reorg with
-  the same withdrawal, holds a new bundle back while it has support ("held"), where on the Chains mainchain a
-  new bundle would be made (the mainchain failing one of the two). Paid, its payout is matched: the
-  withdrawal is paid once, and the escrow pays it once.
+- A bundle of another branch, left pending by a mainchain reorg with the same withdrawal: under the rules of the
+  eCash networks (no scores, SidechainParams::main_events_only) it holds nothing back; the new bundle is vouched
+  for and paid, the other downvoted and failed: the withdrawal is paid once, and the escrow pays it once.
 """
 
 import atexit
@@ -32,6 +31,7 @@ from decimal import Decimal
 from http.client import HTTPException
 
 from test_framework.authproxy import AuthServiceProxy, JSONRPCException
+from test_framework import util as fw_util
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import (
     assert_equal,
@@ -51,7 +51,6 @@ BUNDLE_THRESHOLD = 5
 BUNDLE_MAX_AGE = 10
 # Regtest parameters of this chain with -testmainenforcer.
 BUNDLE_RETRY_DELAY = 5
-PENDING_MIN_SCORE = 2
 
 
 def fresh_connections(proxy):
@@ -61,11 +60,12 @@ def fresh_connections(proxy):
 
 
 def free_port():
-    """A free port for Backbone's gRPC server (49000-49999 on this machine, not 49x54 or 4966x)."""
-    start = 49000 + p2p_port(0) % 1000
+    """A free port for Backbone's gRPC server (49000-49999 on this machine, not 49x54 or 4966x), none of the nodes'."""
+    nodes = {f(n) for f in (p2p_port, rpc_port, lambda n: p2p_port(n) + 2 * fw_util.PORT_RANGE) for n in range(12)}
+    start = 49000 + (p2p_port(0) * 7) % 1000
     for i in range(1000):
         port = 49000 + (start - 49000 + i) % 1000
-        if port % 100 == 54 or 49660 <= port <= 49669:
+        if port % 100 == 54 or 49660 <= port <= 49669 or port in nodes:
             continue
         with socket.socket() as s:
             try:
@@ -304,10 +304,10 @@ class SidechainEcashTest(BitcoinTestFramework):
         self.run_single_payout_test()
 
     def run_single_payout_test(self):
-        """A bundle left pending on the mainchain by a reorg holds a new one back while it has support; paid, the withdrawal is paid once."""
+        """A bundle left pending on the mainchain by a reorg holds nothing back; the new one is paid, the withdrawal once."""
         main = self.main
         side, other = self.nodes
-        self.log.info("Single payout, kept by the sidechain: a bundle of another branch, pending with the same withdrawal")
+        self.log.info("A bundle of another branch, pending with the same withdrawal: the new one paid, the other failed")
         # A clear slot, and a retry delay passed.
         while main.listwithdrawalbundles(SLOT):
             self.mine_main()
@@ -350,30 +350,28 @@ class SidechainEcashTest(BitcoinTestFramework):
         self.sync_mempools()
         self.bmm()
         assert_equal(side.listwithdrawals()[0]["status"], "waiting")
-        # Without support X holds nothing back...
-        assert main.getwithdrawalbundle(SLOT, x["hash"])["score"] < PENDING_MIN_SCORE
+        # The rules of the eCash networks take no scores (SidechainParams::main_events_only): X holds nothing back,
+        # with support or without. A new bundle Y is made; the sidechain node vouches for it, and its mainchain node
+        # upvotes Y and downvotes X, which fails. (Where the bundle goes through an enforcer that cannot be told so,
+        # it is handed over only once deep enough for no reorg to leave it behind: feature_sidechain_enforcer.py.)
         assert_equal(side.getwithdrawalbundle()["status"], "next")
-        # ...with it, it holds the refund back (as on Chains) and, without single payout on the mainchain, a new
-        # bundle too: both could be paid, and the withdrawal twice.
-        main.vouchwithdrawalbundle(SLOT, x["hash"])
-        while main.getwithdrawalbundle(SLOT, x["hash"])["score"] < PENDING_MIN_SCORE:
-            self.mine_main()
-        assert_equal(side.getwithdrawalbundle()["status"], "held")
         escrow = self.escrow()
         self.bmm()
-        assert_equal(side.getwithdrawalbundle()["status"], "held")
-        assert_equal(side.listwithdrawals()[0]["status"], "waiting")
-        # X is paid out (by the mainchain node, which has it): the sidechain matches its payout to the withdrawal.
-        while main.getwithdrawalbundle(SLOT, x["hash"])["status"] == "pending":
+        y = side.getwithdrawalbundle()
+        assert_equal(y["status"], "pending")
+        assert x["hash"] != y["hash"]
+        for _ in range(3 * BUNDLE_MAX_AGE):
+            if main.getwithdrawalbundle(SLOT, y["hash"])["status"] == "paid":
+                break
             self.mine_main()
-        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"]), {"status": "paid"})
-        main.vouchwithdrawalbundle(SLOT)
+        assert_equal(main.getwithdrawalbundle(SLOT, y["hash"]), {"status": "paid"})
         self.bmm()
         assert_equal(side.listwithdrawals(), [])
         bundle = side.getwithdrawalbundle()
         assert_equal((bundle["status"], bundle["waiting"]), ("none", 0))
-        for _ in range(3):
+        while main.getwithdrawalbundle(SLOT, x["hash"])["status"] == "pending":
             self.mine_main()
+        assert_equal(main.getwithdrawalbundle(SLOT, x["hash"]), {"status": "failed"})
         assert_equal(main.getreceivedbyaddress(payout_address), 2)
         assert_equal(self.escrow(), escrow - 2 - fee)
         main.reconsiderblock(withdrawal_commitment)

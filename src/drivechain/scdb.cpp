@@ -38,14 +38,16 @@ uint256 ParamsFingerprint(const Consensus::DrivechainParams& params, const Conse
     // A chain that is no sidechain has nothing of it in the database.
     if (!sidechain.enabled) return ParamsFingerprint(params);
     // Every field: a parameter added later has to be added here as well.
-    // (refund_grace_blocks and main_behind_margin are policy, and not in it.)
-    static_assert(sizeof(Consensus::SidechainParams) == 48, "a new sidechain parameter goes into the fingerprint");
+    // (refund_grace_blocks, main_behind_margin and bundle_handoff_depth are policy, and not in it.)
+    static_assert(sizeof(Consensus::SidechainParams) == 56, "a new sidechain parameter goes into the fingerprint");
     HashWriter hasher{};
     hasher << std::string{"Sidechain parameters"} << ParamsFingerprint(params) << sidechain.slot << sidechain.min_withdrawal
            << sidechain.max_bundle_withdrawals << sidechain.bundle_retry_delay << sidechain.main_activation_height
            << sidechain.pending_min_score << sidechain.unproposed_expiry_blocks;
     // Without single payout on the mainchain (Backbone on eCash); with it, the fingerprint is the one it was.
     if (!sidechain.main_single_payout) hasher << std::string{"no main single payout"};
+    // The rules of the eCash networks, from what the enforcer reports alone; the others keep the fingerprint they had.
+    if (sidechain.main_events_only) hasher << std::string{"main events only"};
     return hasher.GetHash();
 }
 
