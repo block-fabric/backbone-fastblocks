@@ -41,7 +41,7 @@ import {
   type WalletBond,
 } from './fb/model';
 import { fb, refreshFb, resetFb } from './fb/store.svelte';
-import { dailyEstimate, secondsUntilEpoch, simpleState } from './fb/model';
+import { anchorsTime, dailyEstimate, secondsUntilEpoch, simpleState } from './fb/model';
 import { setTransport, type BridgeRequest } from '../lib/bridge';
 import { buildCommands, menuSections } from '../lib/commands.svelte';
 import { dialogs } from '../lib/dialogs.svelte';
@@ -338,6 +338,12 @@ describe('what the pages of FastBlocks work out', () => {
     expect(untilText(42)).toBe('42 s');
     expect(untilText(200)).toBe('3 min 20 s');
     expect(untilText(3900)).toBe('1 h 5 min');
+    // One BMM commitment an eCash block, ten minutes apart: the eCash networks' 1008, a week; ecashtest's 144, a day.
+    expect(anchorsTime(1008)).toBe('about 7 days');
+    expect(anchorsTime(144)).toBe('about 24 hours');
+    expect(anchorsTime(2)).toBe('about 20 minutes');
+    // A minute apart on the Chains networks: the main network's 2880, two days.
+    expect(anchorsTime(2880, 60)).toBe('about 2 days');
   });
 
   it("the wallet's staking income: its coinbase outputs by role, today and in all", () => {
@@ -666,6 +672,25 @@ describe('the pages of FastBlocks', () => {
     expect(text).toMatch(/Active/);
     expect(text).toMatch(/block 18/);
     expect(text).toMatch(/Slot 1.001/);
+  });
+
+  it('the finality card says when no mainchain block has anchored the chain for half an hour, and how long blocks of stake go on', async () => {
+    // 150 slots of 15 s (37 min 30 s) since the first block of stake no anchor covers, of at most 240 (an hour).
+    pos = { ...pos, firstunanchoredslot: SLOT - 150, maxunanchoredslots: 240 };
+    render(LocalCards);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('.fb-cards .gap')).not.toBeNull());
+    expect(document.querySelector('.fb-cards .gap')!.textContent).toBe(
+      `No ${CHAIN.mainchain?.name} block for 37 min 30 s: the new blocks stay soft until one anchors them. Blocks of stake go on for 22 min 30 s more.`,
+    );
+  });
+
+  it('no such notice for a few minutes without an anchor, nor from a node that does not say how long blocks of stake go on', async () => {
+    pos = { ...pos, firstunanchoredslot: SLOT - 150 };
+    render(LocalCards);
+    await loaded();
+    await waitFor(() => expect(document.querySelector('.fb-cards')).not.toBeNull());
+    expect(document.querySelector('.fb-cards .gap')).toBeNull();
   });
 
   it('the store follows the node; a chain without blocks of stake says so', async () => {
