@@ -510,6 +510,8 @@ user's word too: the node sends that machine the credentials of the mainchain no
 What the pages show of the peg (the votes a bundle needs, the bundles and their votes, the escrow) comes from the
 node's `getpeginfo`, the same over JSON-RPC and through the enforcer's interface alone (`-mainchaingrpc`), which has
 no `getdrivechaininfo` nor `listwithdrawalbundles`: the pages do not ask the mainchain node for those (doc/ecash-enforcer.md).
+A node without `getpeginfo`: those two calls through `peg.call`, as before (`lib/sidestate.svelte.ts`, `loadPegInfo`).
+The mainchain's blocks (`getsidechainevents`) and the peg are fetched apart: one failing leaves the other shown.
 
 The RPC policy of a sidechain (rpcpolicy.cpp) adds its methods (`getmainchaininfo`, `getpeginfo`, `getbmminfo`,
 `syncmainchain`, `listwithdrawals`, `getwithdrawalbundle`, `getdepositaddress`, and

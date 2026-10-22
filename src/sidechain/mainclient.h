@@ -151,7 +151,7 @@ UniValue EnforcerBlockEvents(const UniValue& info, int64_t median_time);
  * getpeginfo from the replies of a mainchain node over JSON-RPC: `drivechain` (getdrivechaininfo), `sidechain`
  * (getsidechain of the slot; null if none is active in it) and `bundles` (listwithdrawalbundles of the slot). With
  * the enforcer's rules (Backbone on eCash), the score a bundle needs and the blocks it has are those rules': more
- * votes than bundlethreshold within bundlemaxage blocks.
+ * votes than bundlethreshold within bundlemaxage blocks. What a reply does not say is left out, nothing made up.
  */
 UniValue PegInfoFromRpc(uint32_t slot, const UniValue& drivechain, const UniValue& sidechain, const UniValue& bundles);
 /** The replies of the enforcer's interface getpeginfo is made of (proto3 JSON mapping); a reply not had is null. */

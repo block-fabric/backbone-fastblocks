@@ -738,7 +738,7 @@ UniValue PegInfoFromRpc(uint32_t slot, const UniValue& drivechain, const UniValu
 {
     UniValue out(UniValue::VOBJ);
     out.pushKV("height", Int(drivechain, "height").value_or(-1));
-    const bool enforcer_rules{drivechain.find_value("rules").isStr() && drivechain.find_value("rules").get_str() == "enforcer"};
+    const bool enforcer_rules{drivechain.isObject() && drivechain.find_value("rules").isStr() && drivechain.find_value("rules").get_str() == "enforcer"};
     out.pushKV("rules", enforcer_rules ? "enforcer" : "chains");
     // The votes a bundle needs, within how many blocks: the enforcer's rules pay it with more than the threshold.
     const auto threshold{Int(drivechain, "bundlethreshold")};

@@ -189,7 +189,7 @@ RPCMethod getpeginfo()
             }},
             {RPCResult::Type::BOOL, "votehistory", "Whether the mainchain node reports the votes of the bundles at each past block (getsidechainevents); the enforcer's interface reports them as they are now only"},
         }},
-        RPCExamples{HelpExampleCli("getpeginfo", "")},
+        RPCExamples{HelpExampleCli("getpeginfo", "") + HelpExampleRpc("getpeginfo", "")},
         [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
 {
     NodeContext& node{EnsureAnyNodeContext(request.context)};
