@@ -1,104 +1,209 @@
-Sidechain template
-==================
+# FastBlocks
 
-A sidechain of the Chains mainchain with nothing in it but what every sidechain
-needs: blind merged mining, deposits from the mainchain and withdrawals to it.
-Copy it to make a sidechain. See [doc/sidechain.md](doc/sidechain.md) for how it
-works, how to try it, and how to make your own.
+FastBlocks is a sidechain of **eCash** (ECX): **a block every 15 seconds**. Its blocks of stake are signed by
+validators who stake pegged ECX, a slot every 15 seconds, and anchored to eCash through blind merged mining
+(BMM), with merged mined blocks as the fallback. A payment is *soft* in a block of stake, *BMM-confirmed* once
+an eCash block commits to it, and *final* three anchors later.
 
-Its GUI is `sidechain-app`: the node and its wallet with an HTML interface in a
-native web view (WebKitGTK on Linux, WebView2 on Windows), taken over from
-`chains-app`, the GUI of the mainchain. There is no Qt GUI. The app has the
-pages every sidechain needs (wallet, peg, merged mining, explorer, node window,
-settings); a sidechain adds its own, see [doc/webui.md](doc/webui.md).
+It is a drivechain (BIP300/301) sidechain: ECX comes in by a deposit on eCash and goes back by a withdrawal
+that eCash miners vote on. It follows its mainchain either through [Backbone](https://github.com/block-fabric/backbone)
+(`backboned`, our client of the eCash networks) or through a plain eCash node with LayerTwo Labs'
+`bip300301_enforcer`, over the enforcer's interface alone (`-mainchaingrpc`).
+
+| | `ecash` (eCash main network) | `ecashbeta` (betanet, **the default**) | `ecashtest` (test network) |
+|---|---|---|---|
+| Slot on the mainchain | 45 | 45 | 45 |
+| Coin | ECX, deposited from eCash and withdrawn back to it | the same | the same |
+| Addresses | `fblx1…` | `bfblx1…` | `tfblx1…` |
+| Deposit addresses | `s45_<address>_<checksum>` | the same | the same |
+| P2P port | 8155 | 38155 | 48155 |
+| RPC port | 8154 | 38154 | 48154 |
+| Message start | `66626c21` | `66626c22` | `66626c23` |
+| First block | `34f8e7a3bc8263b42e174f44c8a6cd6173acb9c323940e214ca6552e8fcdc802` | `42cb78757bb141a5817b7636c6bdad378bebed3dcb2bfcf68d4ca532173e3e09` | `2090546968fe903b34651fff7a5440fc0bc8657fd6fc4de0d8afb8e3e8cf9a29` |
+| Data folder | `~/.fastblocks` | `~/.fastblocks/betanet` | `~/.fastblocks/testnet4` |
+
+None of these networks is launched yet: slot 45 has to be proposed and activated on eCash first (below). The
+main network refuses to start until this release names the height of the block that activated slot 45.
+
+FastBlocks on eCash has the rules of FastBlocks on Chains, with an identity of its own and the parameters tied to
+mainchain blocks scaled for eCash's ten-minute blocks: [doc/fastblocks.md](doc/fastblocks.md); everything
+specific to eCash: [doc/ecash-sidechains.md](doc/ecash-sidechains.md) and
+[doc/ecash-enforcer.md](doc/ecash-enforcer.md).
+
+Its GUI is `fastblocks-app`: the node and its wallet with an HTML interface in a native web view (WebKitGTK on
+Linux, WebView2 on Windows), with the Staking section ([doc/webui.md](doc/webui.md)).
+
+## Building from source
+
+On Debian or Ubuntu (24.04):
 
 ```sh
 sudo apt install build-essential cmake pkgconf python3 libevent-dev libboost-dev \
     libsqlite3-dev libzmq3-dev libgtk-3-dev libwebkit2gtk-4.1-dev nodejs npm
-cmake -B build              # -DBUILD_WEBUI=OFF for a node without a window
+git clone https://github.com/block-fabric/backbone-fastblocks.git
+cd backbone-fastblocks
+cmake -B build
 cmake --build build -j$(nproc)
-build/bin/sidechain-app -regtest
 ```
 
-It is derived from the Chains mainchain, which is derived from Bitcoin Core;
-the rest of this file is from there.
+`-DBUILD_WEBUI=OFF` (and no GTK, WebKitGTK or Node.js) for a node without a window. Windows: cross-built
+with the depends system (`make -C depends HOST=x86_64-w64-mingw32 NO_QT=1`), see [doc/webui.md](doc/webui.md).
 
-Bitcoin Core integration/staging tree
-=====================================
+The programs, in `build/bin`:
 
-https://bitcoincore.org
+| Program | What it is |
+|---|---|
+| `fastblocks-app` | the wallet, with its window |
+| `fastblocksd` | the node, without a window |
+| `fastblocks-cli` | commands for a running node or wallet |
+| `fastblocks-wallet`, `fastblocks-tx`, `fastblocks-util` | tools that work without a node |
 
-For an immediately usable, binary version of the Bitcoin Core software, see
-https://bitcoincore.org/en/download/.
+Tests: `ctest --test-dir build` (unit tests) and `build/test/functional/test_runner.py`. The tests against a
+mainchain need a built Backbone tree (`MAINCHAIN_BIN_DIR`, the folder of `backboned`; see
+[doc/ecash-sidechains.md](doc/ecash-sidechains.md)).
 
-What is Bitcoin Core?
----------------------
+## Running it
 
-Bitcoin Core connects to the Bitcoin peer-to-peer network to download and fully
-validate blocks and transactions. It also includes a wallet and graphical user
-interface, which can be optionally built.
+FastBlocks needs an eCash mainchain on the same network, in one of two ways.
 
-Further information about Bitcoin Core is available in the [doc folder](/doc).
+**With Backbone** (`backboned -chain=ecashbeta`, RPC on): FastBlocks finds it by itself, over JSON-RPC at
+127.0.0.1 on Backbone's port (8532 for `ecash` and `ecashbeta`, 48532 for `ecashtest`) with the cookie in
+Backbone's data folder (`~/.backbone`, `~/.backbone/betanet`, `~/.backbone/testnet4`):
 
-License
--------
+```sh
+fastblocks-app                       # betanet, the default (-chain=ecashbeta)
+fastblocksd -chain=ecashtest         # the test network, without a window
+```
 
-Bitcoin Core is released under the terms of the MIT license. See [COPYING](COPYING) for more
-information or see https://opensource.org/license/MIT.
+**With a plain eCash node and the enforcer** (ecash-com/bitcoin with `bip300301_enforcer`): FastBlocks follows
+the mainchain through the enforcer's gRPC interface alone, with no JSON-RPC access to the eCash node:
 
-Development Process
--------------------
+```sh
+fastblocksd -chain=ecashbeta -mainchaingrpc=127.0.0.1:8123        # the enforcer's port on betanet
+fastblocksd -chain=ecash -mainchaingrpc=127.0.0.1:50051 -mainchaingrpcauth=<token>   # or Backbone's -grpc
+```
 
-The `master` branch is regularly built (see `doc/build-*.md` for instructions) and tested, but it is not guaranteed to be
-completely stable. [Tags](https://github.com/bitcoin/bitcoin/tags) are created
-regularly from release branches to indicate new official, stable release versions of Bitcoin Core.
+Withdrawal bundles are handed to the enforcer's block producer once the mainchain block that committed to
+them is a day deep (144 blocks; 12 on `ecashtest`). How the peg rules work from the enforcer's events alone,
+and why they are safe: [doc/ecash-enforcer.md](doc/ecash-enforcer.md).
 
-The https://github.com/bitcoin-core/gui repository is used exclusively for the
-development of the GUI. Its master branch is identical in all monotree
-repositories. Release branches and tags do not exist, so please do not fork
-that repository unless it is for development reasons.
+Options for the mainchain link:
 
-The contribution workflow is described in [CONTRIBUTING.md](CONTRIBUTING.md)
-and useful hints for developers can be found in [doc/developer-notes.md](doc/developer-notes.md).
+| Option | What it is |
+|---|---|
+| `-mainchaingrpc=[http://]host:port` | follow through the enforcer's (or Backbone's) gRPC interface alone |
+| `-mainchaingrpcauth=<token>` | Backbone's `-grpcauth` token (the enforcer has none) |
+| `-mainchainrpcconnect=<ip>`, `-mainchainrpcport=<port>` | Backbone's JSON-RPC (default 127.0.0.1, 8532 / 48532) |
+| `-mainchainrpccookiefile=<file>`, `-mainchaindatadir=<dir>` | its cookie, or the folder it is looked for in (default `~/.backbone`) |
+| `-mainchainrpcuser=<user>`, `-mainchainrpcpassword=<pw>` | credentials, instead of the cookie |
+| `-mainchainrpcwallet=<name>` | the Backbone wallet that pays for merged mining (default: its only loaded wallet) |
 
-Testing
--------
+Data and the configuration file `fastblocks.conf` are in `~/.fastblocks` (Windows `%LOCALAPPDATA%\FastBlocks`,
+macOS `~/Library/Application Support/FastBlocks`); betanet in its subfolder `betanet`, the test network in
+`testnet4`. The app keeps its own settings in `~/.config/FastBlocks` (Windows `%LOCALAPPDATA%\FastBlocks`).
+The networks have no DNS seeds: give the node a peer with `addnode`. A sample `~/.fastblocks/fastblocks.conf`:
 
-Testing and code review is the bottleneck for development; we get more pull
-requests than we can review and test on short notice. Please be patient and help out by testing
-other people's pull requests, and remember this is a security-critical project where any mistake might cost people
-lots of money.
+```ini
+server=1
+fallbackfee=0.0002
+# The network (ecashbeta when not set):
+# chain=ecashtest
 
-### Automated Testing
+[ecashbeta]
+addnode=<peer>:38155
+mainchaingrpc=127.0.0.1:8123
 
-Developers are strongly encouraged to write [unit tests](src/test/README.md) for new code, and to
-submit new unit tests for old code. Unit tests can be compiled and run
-(assuming they weren't disabled during the generation of the build system) with: `ctest`. Further details on running
-and extending unit tests can be found in [/src/test/README.md](/src/test/README.md).
+[ecashtest]
+addnode=<peer>:48155
+```
 
-There are also [regression and integration tests](/test), written
-in Python.
-These tests can be run (if the [test dependencies](/test) are installed) with: `build/test/functional/test_runner.py`
-(assuming `build` is your build directory).
+## Proposing the sidechain (M1)
 
-The CI (Continuous Integration) systems make sure that every pull request is tested on Windows, Linux, and macOS.
-The CI must pass on all commits before merge to avoid unrelated CI failures on new pull requests.
+Slot 45 is taken on eCash by a proposal (M1) that miners ack (M2): on eCash's main network more than 1,815
+acks in 2,016 blocks, on betanet more than 1,008. The proposal:
 
-### Manual Quality Assurance (QA) Testing
+| | |
+|---|---|
+| Slot | 45 |
+| Title | `FastBlocks` |
+| Description | `A block every 15 seconds, anchored by eCash` |
 
-Changes should be tested by somebody other than the developer who wrote the
-code. This is especially important for large or high-risk changes. It is useful
-to add a test plan to the pull request description if testing the changes is
-not straightforward.
+With Backbone: `backbone-cli -chain=ecashbeta createsidechainproposal 45 "FastBlocks" "A block every 15 seconds, anchored by eCash"`;
+with the enforcer, its `CreateSidechainProposal`. Check first that slot 45 is free (`listactivesidechains`).
+Once active, the height of the activating block goes into `SidechainParams::main_activation_height` of that
+network (`src/kernel/chainparams.cpp`, `CEcashSidechainParams`).
 
-Translations
-------------
+## Coins in and out
 
-Changes to translations as well as new translations can be submitted to
-[Bitcoin Core's Transifex page](https://explore.transifex.com/bitcoin/bitcoin/).
+- **Deposit.** In FastBlocks, get a deposit address (`getdepositaddress`, or the **Mainchain** page):
+  `s45_<address>_<checksum>`. On eCash, send to it with Backbone (`backbone-cli createsidechaindeposit 45
+  <deposit address> <amount>`) or the enforcer's `CreateDepositTransaction`; or from the app's **Peg** page.
+  The coins appear with the next FastBlocks block.
+- **Withdraw.** `createwithdrawal <eCash address> <amount> ( <fee for eCash miners> )`, or the **Peg** page.
+  Withdrawals are paid in bundles that eCash miners vote on (more than 13,150 votes in 26,300 blocks, about
+  three months, on `ecash` and `ecashbeta`; more than 5 in 10 on `ecashtest`). A withdrawal not in the bundle
+  being voted on can be taken back: `refundwithdrawal <txid> <vout>`.
+- **Merged mining.** FastBlocks' BMM blocks are mined by eCash miners, for a fee in ECX. `setbmm true
+  <FastBlocks address>` has the node ask for a block whenever the fees waiting pay for one; `requestbmmblock
+  <address> <amount>` asks for one now; `getbmminfo` shows how it goes.
 
-Translations are periodically pulled from Transifex and merged into the git repository. See the
-[translation process](doc/translation_process.md) for details on how this works.
+The node and the RPCs name eCash's coin `ECX`.
 
-**Important**: We do not accept translation changes as GitHub pull requests because the next
-pull from Transifex would automatically overwrite them again.
+## Staking
+
+A validator runs its node with `-validatorkeyfile=<file>` and bonds ECX to its key (`createbond`, or the
+**Bonds** tab of Staking); once enough stake is bonded, blocks of stake start, a slot every 15 seconds, each
+led by a validator picked by stake. The fees of a block are shared between the BMM bidder and the validator
+pool by a curve of the mainchain's spacing: half each at ten-minute eCash blocks and faster, down to a fifth for
+the bidder at slower ones (`getposinfo`, the Staking page's fee split). Coins are *soft* in blocks of stake,
+*BMM-confirmed* once an eCash block commits to them, and *final* after three anchors (half an hour). If eCash
+stalls, blocks of stake go on (soft) for up to 8 hours, and its next blocks anchor them. A bond counts in the
+validator sets about ten hours after it is mined (the sets are fixed before their seeds). Unbonded coins come
+back after 1008 anchors (seven days; 144 on `ecashtest`); a proof of double signing slashes them until then.
+See [doc/fastblocks.md](doc/fastblocks.md) and, for the eCash values,
+[doc/ecash-sidechains.md](doc/ecash-sidechains.md).
+
+## Commands
+
+Sidechain, on the node: `getmainchaininfo`, `getpeginfo`, `syncmainchain`, `setbmm`, `getbmminfo`,
+`requestbmmblock`, `createbmmblock`, `listwithdrawals`, `getwithdrawalbundle`. In the wallet:
+`getdepositaddress`, `createwithdrawal`, `refundwithdrawal`.
+
+Staking, on the node: `getposinfo`, `getstakinginfo`, `getvalidators`, `getvalidator`, `getleaderschedule`,
+`getanchorinfo`, `listevidence`, `submitevidence`, `setstaking`, `signbondpop`, `checkpegbalance`. In the
+wallet: `createbond`, `createunbond`, `listbonds`.
+
+`fastblocks-cli help` lists them all with their arguments.
+
+## The Chains networks (development only)
+
+FastBlocks keeps its networks on Chains (CHN: `main`, `test`, `signet`) for development, and `regtest` for the
+tests. `main`, `test` and `signet` need `-chainsnetworks` (with `-chain=main|test|signet`, `-testnet` or
+`-signet`), and keep their data in `~/.fastblocks/chains`. They are the identities of FastBlocks on Chains
+(slot 5, `fbl1…`/`tfbl1…`): a node there joins FastBlocks' Chains networks.
+
+## Following the sidechain template
+
+The history of this repository continues that of FastBlocks' `ecash-enforcer` branch: the sidechain template's
+eCash branch with FastBlocks' commits on it. Updates are merged as before:
+
+```sh
+git remote add template https://github.com/block-fabric/sidechain-template.git   # locally: ~/skydoge/sidechain-template
+git remote add fastblocks https://github.com/block-fabric/fastblocks.git         # locally: ~/skydoge/fastblocks
+git fetch template && git merge template/ecash-enforcer     # shared fixes of the eCash template
+git fetch fastblocks && git merge fastblocks/main            # FastBlocks' own work on Chains
+```
+
+The eCash edition is a few commits on top (the eCash identities, `chain.json`, the default network, ECX, the
+data folder); a merge brings the template's and FastBlocks' changes beside them.
+
+## Credits
+
+FastBlocks' fee pot is inspired by sol-drivechain (no code of it used). The eCash link follows LayerTwo Labs'
+`bip300301_enforcer` interface. It is built on our sidechain template, which is based on
+[Bitcoin Core](https://github.com/bitcoin/bitcoin) v32; its README is in
+[doc/README-bitcoin-core.md](doc/README-bitcoin-core.md).
+
+## License
+
+MIT: see [COPYING](COPYING).

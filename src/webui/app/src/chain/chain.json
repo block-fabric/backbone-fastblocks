@@ -1,9 +1,9 @@
 {
-  "comment": "The chain of this app, in one place: read by CMake (src/webui/CMakeLists.txt, which makes webui/chainconfig.h for the host) and by the interface (chain/config.ts). A sidechain sets its own here; see doc/webui.md.",
+  "comment": "FastBlocks on eCash: the networks ecash, ecashbeta (the default) and ecashtest are its own; main, test and signet (Chains, development only: -chainsnetworks) and regtest are kept for the tests. The chain of this app, in one place: read by CMake (src/webui/CMakeLists.txt, which makes webui/chainconfig.h for the host) and by the interface (chain/config.ts). A sidechain sets its own here; see doc/webui.md.",
   "name": "FastBlocks",
   "bin": "fastblocks",
   "role": "sidechain",
-  "coin": { "ticker": "CHN", "name": "Chains" },
+  "coin": { "ticker": "ECX", "name": "eCash" },
   "uriScheme": "fastblocks",
   "brand": {
     "color": "#ff8a3d",
@@ -14,24 +14,30 @@
     "main": { "p2p": 9155, "rpc": 9154, "hrp": "fbl", "pubkey": 28, "script": 88 },
     "test": { "p2p": 19155, "rpc": 19154, "hrp": "tfbl", "pubkey": 111, "script": 196 },
     "signet": { "p2p": 39155, "rpc": 39154, "hrp": "tfbl", "pubkey": 111, "script": 196 },
-    "regtest": { "p2p": 29155, "rpc": 29154, "hrp": "rsc", "pubkey": 111, "script": 196 }
+    "regtest": { "p2p": 29155, "rpc": 29154, "hrp": "rsc", "pubkey": 111, "script": 196 },
+    "ecash": { "p2p": 8155, "rpc": 8154, "hrp": "fblx", "pubkey": 28, "script": 88 },
+    "ecashbeta": { "p2p": 38155, "rpc": 38154, "hrp": "bfblx", "pubkey": 28, "script": 88 },
+    "ecashtest": { "p2p": 48155, "rpc": 48154, "hrp": "tfblx", "pubkey": 111, "script": 196 }
   },
   "mainchain": {
-    "name": "Chains",
-    "ticker": "CHN",
-    "uriScheme": "chains",
+    "name": "eCash",
+    "ticker": "ECX",
+    "uriScheme": "ecash",
     "networks": {
       "main": { "rpc": 9554, "hrp": "chn", "pubkey": 28, "script": 88 },
       "test": { "rpc": 19554, "hrp": "tchn", "pubkey": 111, "script": 196 },
       "signet": { "rpc": 39554, "hrp": "tchn", "pubkey": 111, "script": 196 },
-      "regtest": { "rpc": 29554, "hrp": "rchn", "pubkey": 111, "script": 196 }
+      "regtest": { "rpc": 29554, "hrp": "rchn", "pubkey": 111, "script": 196 },
+      "ecash": { "rpc": 8532, "hrp": "bc", "pubkey": 0, "script": 5 },
+      "ecashbeta": { "rpc": 8532, "hrp": "bc", "pubkey": 0, "script": 5 },
+      "ecashtest": { "rpc": 48532, "hrp": "tb", "pubkey": 111, "script": 196 }
     }
   },
   "links": {
     "website": "https://blockfab.org/drivechains/",
-    "source": "https://github.com/block-fabric/fastblocks-app",
-    "issues": "https://github.com/block-fabric/fastblocks-app/issues",
-    "guide": "https://github.com/block-fabric/fastblocks-app/blob/main/doc/fastblocks.md"
+    "source": "https://github.com/block-fabric/backbone-fastblocks",
+    "issues": "https://github.com/block-fabric/backbone-fastblocks/issues",
+    "guide": "https://github.com/block-fabric/backbone-fastblocks/blob/main/README.md"
   },
   "blockWeight": 1500000,
   "blockTarget": 15,

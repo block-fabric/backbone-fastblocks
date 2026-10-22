@@ -129,7 +129,8 @@ betanet more than 1,008 in 2,016: a two-week commitment of a hashrate majority.
 
 FastBlocks on eCash: slot **45** on `ecash`, `ecashbeta` and `ecashtest`; RPC/P2P ports 8154/8155, 38154/38155,
 48154/48155; message starts `66626c21`, `66626c22`, `66626c23`; address prefixes `fblx`, `bfblx`, `tfblx`; data in
-`~/.backbone-fastblocks`. Its rules are those of its main network (`ecashtest`: of its test network), its blocks of
+`~/.fastblocks` (`betanet/`, `testnet4/`; the Chains networks, development only behind `-chainsnetworks`, in
+`~/.fastblocks/chains`), `ecashbeta` the default network, the coin shown as ECX. Its rules are those of its main network (`ecashtest`: of its test network), its blocks of
 stake every 15-second slot; what counts its anchors (one per mainchain block: ten minutes on eCash, one on Chains)
 is scaled as Layers' (`Consensus::PosParams`, `CEcashSidechainParams`):
 
