@@ -144,6 +144,8 @@ public:
         std::optional<int> fee_split_height{};
         //! FastBlocks: Consensus::PosParams::fee_curve2_height (-testactivationheight=feecurve2@<height>; regtest only).
         std::optional<int> fee_curve2_height{};
+        //! FastBlocks: Consensus::PosParams::jail_fix_height (-testactivationheight=jailfix@<height>; regtest only).
+        std::optional<int> jail_fix_height{};
     };
 
     /**

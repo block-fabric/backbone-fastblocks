@@ -647,6 +647,8 @@ public:
             consensus.pos.fee_split_height = opts.dep_opts.fee_split_height.value_or(std::numeric_limits<int>::max());
             // The second fee curve the same (-testactivationheight=feecurve2@<height>): the first until then.
             consensus.pos.fee_curve2_height = opts.dep_opts.fee_curve2_height.value_or(std::numeric_limits<int>::max());
+            // The liveness fix from the first block, unless a test asks (-testactivationheight=jailfix@<height>).
+            consensus.pos.jail_fix_height = opts.dep_opts.jail_fix_height.value_or(0);
             consensus.sidechain.bundle_retry_delay = 5;
                 // A tenth of the regtest mainchain's withdrawal_min_score (30).
             consensus.sidechain.pending_min_score = 3;
@@ -806,6 +808,8 @@ public:
         // Rules that need only what the bip300301_enforcer reports of each block, which a node can follow through
         // an enforcer alone (-mainchaingrpc): new networks, nothing on them to fork (SidechainParams::main_events_only).
         consensus.sidechain.main_events_only = true;
+        // The liveness fix (PosParams::jail_fix_height): FastBlocks on eCash has not launched: from the first block.
+        consensus.pos.jail_fix_height = 0;
         // A bundle is handed to an enforcer once its commitment is a day deep (144 blocks; two hours on the test
         // network): nothing next to the three months a bundle takes to be paid.
         consensus.sidechain.bundle_handoff_depth = chain == ChainType::ECASH_TESTNET ? 12 : 144;
