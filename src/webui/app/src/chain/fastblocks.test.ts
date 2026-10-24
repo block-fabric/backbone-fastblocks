@@ -711,8 +711,8 @@ describe('the host side of the pages (local.cpp)', () => {
   const allowed = [...local.slice(local.indexOf('RpcMethods()'), local.indexOf('KeyedRpcMethods()')).matchAll(/\{"(\w+)", Bridge::Thread/g)].map((m) => m[1]);
 
   it('the pages read with the RPCs of the node, and nothing on the list spends, bonds or signs', () => {
-    expect(allowed.sort()).toEqual(['getanchorinfo', 'getleaderschedule', 'getposinfo', 'getstakinginfo', 'getvalidator', 'getvalidators', 'listbonds', 'listevidence', 'submitevidence']);
-    for (const m of ['createbond', 'createunbond', 'setstaking', 'signbondpop']) expect(allowed).not.toContain(m);
+    expect(allowed.sort()).toEqual(['getanchorbidpolicy', 'getanchorinfo', 'getanchorticket', 'getleaderschedule', 'getposinfo', 'getstakinginfo', 'getvalidator', 'getvalidators', 'listbonds', 'listevidence', 'submitevidence']);
+    for (const m of ['createbond', 'createunbond', 'setstaking', 'signbondpop', 'setanchorbidpolicy']) expect(allowed).not.toContain(m);
   });
 
   it('bonds, unbonds, staking off and proofs of possession ask the desktop first', () => {

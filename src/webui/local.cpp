@@ -46,6 +46,11 @@ std::map<std::string, Bridge::Thread> RpcMethods()
         {"getvalidator", Bridge::Thread::WORKER},
         {"getleaderschedule", Bridge::Thread::WORKER},
         {"getanchorinfo", Bridge::Thread::WORKER},
+        // What a mainchain commitment of this chain is (a ticket: the block it anchors), for Merged mining's table.
+        {"getanchorticket", Bridge::Thread::WORKER},
+        // The validator's anchor bid policy: read here; changed through setanchorbidpolicy, which spends the mainchain
+        // wallet and is confirmed on the desktop (ConfirmedRpcMethods).
+        {"getanchorbidpolicy", Bridge::Thread::WORKER},
         {"listevidence", Bridge::Thread::WORKER},
         // A proof that a leader signed two blocks for a slot, given by the user: the node checks it, keeps it and
         // relays it (it moves no coins; a wrong one is refused).
@@ -227,12 +232,109 @@ Window::ConfirmDialog PopConfirmation(const std::string& owner, const std::strin
     dialog.accept = "Sign";
     return dialog;
 }
+namespace {
+/** setanchorbidpolicy: what the mainchain wallet will spend on bids, from now on (the fields changed, then the limits). */
+std::optional<Window::ConfirmDialog> AnchorBidPolicyDialog(const confirm::Call& call)
+{
+    const UniValue fields{call.Arg(0)};
+    const UniValue reset{call.Arg(1)};
+    if (!fields.isNull() && !fields.isObject()) throw HostError(BRIDGE_INVALID_REQUEST, "policy: an object of fields");
+    const bool back{reset.isBool() && reset.get_bool()};
+    // The policy the call makes, as the node would take it (checked there again).
+    const UniValue now{call.Read("getanchorbidpolicy", UniValue{UniValue::VARR}, /*wallet=*/false)};
+    if (!now.find_value("validator").isTrue()) throw HostError(BRIDGE_INVALID_REQUEST, "This node is not a validator: only validators bid for anchors.");
+    pos::AnchorBidPolicy policy;
+    std::string error;
+    if (!pos::ApplyPolicyFields(policy, now.find_value(back ? "defaults" : "policy"), error) ||
+        (fields.isObject() && !pos::ApplyPolicyFields(policy, fields, error)) || !(error = pos::CheckPolicy(policy)).empty()) {
+        throw HostError(BRIDGE_INVALID_REQUEST, error.empty() ? std::string{"Not a policy"} : error);
+    }
+    Window::ConfirmDialog dialog;
+    dialog.title = "Change the anchor bid policy";
+    dialog.kind = "rpc:setanchorbidpolicy";
+    dialog.accept = "Change";
+    dialog.rows = {confirm::Text("Network", Params().GetChainTypeString())};
+    if (back) dialog.rows.push_back(confirm::Text("Reset", "back to the options' policy"));
+    const UniValue said{pos::PolicyToUniValue(policy)};
+    const std::set<std::string> amounts{"floor", "max", "fixed", "periodcap"};
+    if (fields.isObject()) {
+        for (const std::string& key : fields.getKeys()) {
+            const UniValue& value{said.find_value(key)};
+            if (amounts.contains(key)) {
+                dialog.rows.push_back(confirm::Amount(key, *ParseMoney(value.getValStr())));
+            } else {
+                dialog.rows.push_back(confirm::Text(key, guard::OneLine(value.isStr() ? value.get_str() : value.write(), 200)));
+            }
+        }
+    }
+    dialog.rows.push_back(confirm::Heading("Limits"));
+    dialog.rows.push_back(confirm::Text("Strategy", pos::StrategyName(policy.strategy)));
+    dialog.rows.push_back(confirm::Amount("Most per mainchain block", policy.max));
+    if (policy.period_cap > 0) dialog.rows.push_back(confirm::Amount(strprintf("Most in %d hours", policy.period_hours), policy.period_cap));
+    dialog.message = policy.Bids() ?
+        strprintf("This node's validator bids from the wallet of the %s node for a BMM commitment to its ticket in every %s block, "
+                  "as this policy says, from now on and after a restart (kept in the node's settings): %s.\n\nChange it only if you asked for it.",
+                  std::string{chain::MAINCHAIN_NAME}, std::string{chain::MAINCHAIN_NAME}, pos::AnchorBidPolicySummary(policy)) :
+        std::string{"This node's validator will bid for no anchors: the chain then relies on other bidders, and its blocks of stake halt "
+                    "after max_unanchored_slots without one.\n\nChange it only if you asked for it."};
+    return dialog;
+}
+} // namespace
 } // namespace
 
 std::map<std::string, confirm::Method> ConfirmedRpcMethods()
 {
+<<<<<<< HEAD
     // None: bonds are made through fastblocks.bond and fastblocks.unbond, which the host confirms (below).
     return {};
+=======
+    // FastBlocks: the anchor bid policy, which spends the mainchain wallet (bonds are made through fastblocks.bond and
+    // fastblocks.unbond, which the host confirms, below).
+    // BitAssets: what the pages do that pays or signs: never the page's to call by itself. The host shows each call on the desktop, its
+    // destinations whole first, then its amounts, then the rest of its parameters, with the passphrase of a locked wallet
+    // typed there, and runs it with the keys unlocked for it alone (confirm.h, audit 7 #1).
+    return {
+        {"setanchorbidpolicy", {confirm::Method::Kind::NODE, Bridge::Thread::LONG, AnchorBidPolicyDialog, /*fee_unknown=*/false, 0}},
+        // Reserved and registered in one question: the registration, exactly as shown, is sent by the app without asking
+        // again once the reservation is deep enough (confirm::Reveal).
+        {"reserveasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithNames(confirm::Generic("Reserve an asset", "Reserve", "The wallet pays for a reservation of an asset name."), 0, SIZE_MAX, false), /*fee_unknown=*/true, 1, false, RegisterAfterReserve(), {LaunchAfterReserve()}}},
+        {"registerasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithNames(WithLogo(confirm::Generic("Register an asset", "Register", "The wallet registers an asset it reserved, with the supply shown."), 5, false), 0, 6, false), /*fee_unknown=*/true}},
+        {"setassetlogo", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithLogo(confirm::Generic("Set the logo of an asset", "Set the logo", "The wallet puts this logo on the chain for an asset it controls, in place of the one before: everyone sees it where the asset is shown."), 1, true), /*fee_unknown=*/false, 2}},
+        {"setassetdisplayname", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithNames(confirm::Generic("Set the display name of an asset", "Set the display name", "The wallet puts this display name on the chain for an asset it controls, in place of the one before: everyone sees it after the asset's ticker. Display names are not unique."), SIZE_MAX, 1, true), /*fee_unknown=*/false, 2}},
+        {"releaseassetreservation", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Release a reservation", "Release", "The wallet gives up a reservation of an asset name."), /*fee_unknown=*/true}},
+        {"sendasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Send an asset", "Send", "The wallet sends units of an asset to the address shown.", {"address"}, {"amount"}), {.assets = {1}}), /*fee_unknown=*/true}},
+        {"mintasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Mint an asset", "Mint", "The wallet mints more units of an asset it controls.", {"address"}, {"amount"}), {.assets = {0}}), /*fee_unknown=*/true}},
+        {"burnasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Burn an asset", "Burn", "The wallet destroys units of an asset: they cannot come back.", {}, {"amount"}), {.assets = {0}}), /*fee_unknown=*/true}},
+        {"updateasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Update an asset", "Update", "The wallet signs a change of an asset it controls."), /*fee_unknown=*/true}},
+        {"transferassetcontrol", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Transfer the control of an asset", "Transfer", "The wallet gives the control of an asset to the address shown: it cannot be taken back.", {"address"}, {}), /*fee_unknown=*/true}},
+        {"fixassetsupply", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Fix the supply of an asset", "Fix the supply", "The wallet fixes the supply of an asset for good: no more can ever be minted."), /*fee_unknown=*/true}},
+        {"releaseasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Release an asset", "Release", "The wallet gives up an asset it controls."), /*fee_unknown=*/true}},
+        {"swapasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Swap", "Swap", "The wallet trades an asset in a pool, for at least what is shown (min_out): refused, not signed for less, should the pool have moved.", {}, {"amount_in", "min_out"}), {.assets = {0, 2}}), /*fee_unknown=*/true}},
+        {"addliquidity", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Add liquidity", "Add", "The wallet puts both assets into a pool, for shares of it.", {}, {"amount_a", "amount_b"}), {.assets = {0, 2}}), /*fee_unknown=*/true}},
+        {"removeliquidity", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Remove liquidity", "Remove", "The wallet takes its shares out of a pool, for both assets."), {.assets = {0, 1}}), /*fee_unknown=*/true}},
+        // Layers' DEX: routes and the pool kinds. Every asset and pool resolved and shown (WithAssets).
+        {"swaproute", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Trade along a route", "Trade", "The wallet trades through the pools shown, in turn, for at least what is shown (min_out): its order clears at the end of its block with the block's other orders, at one price per pool; if it would give less, what went in comes back.", {}, {"amount_in", "min_out"}), {.asset_arrays = {0}, .pool_arrays = {4}}), /*fee_unknown=*/true}},
+        {"swappools", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Trade through pools", "Trade", "The wallet trades through the pools shown, in turn, for at least what is shown (min_out): its order clears at the end of its block, at one price per pool; if it would give less, what went in comes back.", {}, {"amount_in", "min_out"}), {.assets = {0}, .pool_arrays = {2}}), /*fee_unknown=*/true}},
+        {"createpool", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Create a pool", "Create the pool", "The wallet makes a pool of the kind shown and puts both amounts into it, for shares of it: they set its price.", {}, {"amount_a", "amount_b"}), {.assets = {0, 2}}), /*fee_unknown=*/true}},
+        {"addpoolliquidity", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Add liquidity", "Add", "The wallet puts the amounts shown into the pool, for shares of it; out of the pool's proportions, it pays the pool's fee on the part a swap would trade."), {.asset_keys = {1}, .pools = {0}}), /*fee_unknown=*/true}},
+        {"removepoolliquidity", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Remove liquidity", "Remove", "The wallet takes its shares out of the pool shown, for its assets (or the one shown alone, its fee paid on the part traded)."), {.assets = {2}, .pools = {0}}), /*fee_unknown=*/true}},
+        // Launches: the asset resolved and shown (WithAssets); a launch names its ticker, which its reservation reveals.
+        {"launchtoken", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, DescribeLaunch, /*fee_unknown=*/true}},
+        {"buyfromlaunch", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Buy from a launch", "Buy", (std::string{"The wallet pays "} + std::string{chain::TICKER} + std::string{" into the asset's curve, for at least what is shown (min_out): its order clears at the end of its block; past the curve's end it gets the rest of its "} + std::string{chain::TICKER} + std::string{" back."}), {}, {"amount", "min_out"}), {.assets = {0}}), /*fee_unknown=*/true}},
+        {"selltolaunch", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Sell to a launch", "Sell", (std::string{"The wallet sells the asset back to its curve for at least the "} + std::string{chain::TICKER} + std::string{" shown (min_out), paid by the coinbase."}), {}, {"amount", "min_out"}), {.assets = {0}}), /*fee_unknown=*/true}},
+        {"curveasset", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Put an asset on a bonding curve", "Put on a curve", "The wallet puts the amount shown of an asset it controls on a bonding curve, priced in " + CURRENCY_UNIT + ": 3/4 of it sold on the curve, 1/4 into the asset's pool with " + CURRENCY_UNIT + " at graduation, locked for good. It does not come back. The control coin goes with it: the supply is fixed for good. The curve buys back no more than it sold.", {}, {"amount"}), {.assets = {0}}), /*fee_unknown=*/true}},
+        {"claimlaunch", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Pay a launch's creator", "Pay", "The wallet sends what pays the launch's creator what it is owed (its fees, its allocation once graduated): nothing goes anywhere else."), {.assets = {0}}), /*fee_unknown=*/true}},
+        // Concentrated liquidity: the pool shown resolved (its assets and kind); a position by its id.
+        {"openposition", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Open a position", "Open", "The wallet puts liquidity into the pool shown between the two prices shown, for at most the amounts shown (the rest back): a position, a token of its own, which earns the pool's fees while the price is in its range.", {}, {}), {.asset_keys = {3}, .pools = {0}}), /*fee_unknown=*/true}},
+        {"changeposition", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Change a position", "Change", "The wallet changes its position shown: adds liquidity, takes some out, collects its fees, or closes it (all out, all collected)."), {.positions = {0}}), /*fee_unknown=*/true}},
+        // Order books: the assets resolved; an order by its id.
+        {"placeorder", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Place a limit order", "Place", "The wallet puts the amount shown up for sale in the book of the two assets shown, at the price shown at least, for the blocks shown; it trades in the blocks' batches, wholly or in part; its token collects and cancels it.", {}, {"amount", "price"}), {.assets = {0, 2}}), /*fee_unknown=*/true}},
+        {"settleorder", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Settle a limit order", "Settle", "The wallet collects what its order got; cancelled, what is left of what it sells comes back too and the order is gone."), /*fee_unknown=*/true}},
+        {"createauction", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, WithAssets(confirm::Generic("Create an auction", "Create", "The wallet puts units of an asset up for auction.", {}, {"amount"}), {.assets = {0, 2}}), /*fee_unknown=*/true}},
+        {"bidauction", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Bid in an auction", "Bid", "The wallet pays a bid in an auction.", {}, {"amount"}), /*fee_unknown=*/true}},
+        {"collectauction", {confirm::Method::Kind::SPEND, Bridge::Thread::LONG, confirm::Generic("Collect an auction", "Collect", "The wallet collects what an auction owes it."), /*fee_unknown=*/true}},
+    };
+>>>>>>> 40062ab904 (App: the anchor bid panel under Merged mining (setanchorbidpolicy confirmed on the desktop, getanchorbidpolicy a read); the commitments of the mainchain resolved as anchor tickets, a failed lookup told apart)
 }
 
 void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm, confirm::KeysFn keys)
@@ -308,24 +410,21 @@ void RegisterHost(Bridge& bridge, NodeFn node, guard::ConfirmFn confirm, confirm
     });
 
     // fastblocks.anchoring {}: what this node bids, as a validator, for a BMM commitment to its ticket in every
-    // mainchain block (-validatoranchorbid), and where the pot it wins goes. Information only: no RPC says it.
-    bridge.RegisterHost("fastblocks.anchoring", [node](const UniValue&) -> UniValue {
-        interfaces::Node& n{node()};
+    // mainchain block (its bid policy: getanchorbidpolicy, setanchorbidpolicy), and where the pot it wins goes. The
+    // floor and the strategy in force, as the anchorer uses them (not the merged miner's offer: setbmm).
+    bridge.RegisterHost("fastblocks.anchoring", [](const UniValue&) -> UniValue {
         UniValue out{UniValue::VOBJ};
         const pos::FastBlocksHooks* hooks{pos::InstalledHooks()};
         const auto anchoring{hooks ? hooks->ValidatorAnchoring() : std::nullopt};
-        out.pushKV("on", anchoring.has_value());
+        out.pushKV("on", anchoring.has_value() && anchoring->policy.Bids());
         if (anchoring) {
-            out.pushKV("bid", FormatMoney(anchoring->floor));
-            out.pushKV("mode", anchoring->fees ? "fees" : "standard");
-            if (anchoring->cap) out.pushKV("max", FormatMoney(*anchoring->cap));
+            out.pushKV("bid", FormatMoney(anchoring->policy.floor));
+            out.pushKV("strategy", pos::StrategyName(anchoring->policy.strategy));
+            out.pushKV("max", FormatMoney(anchoring->policy.max));
             CTxDestination dest;
             out.pushKV("payee", ExtractDestination(anchoring->payee, dest) ? EncodeDestination(dest) : HexStr(anchoring->payee));
         }
-        node::NodeContext* context{n.context()};
-        const ArgsManager* args{context ? context->args : nullptr};
-        out.pushKV("validator", hooks && hooks->GetProducer() != nullptr);
-        if (args && args->IsArgSet("-validatoranchorbid")) out.pushKV("option", guard::OneLine(args->GetArg("-validatoranchorbid", ""), 32));
+        out.pushKV("validator", anchoring.has_value());
         out.pushKV("defaultbid", FormatMoney(pos::DEFAULT_VALIDATOR_ANCHOR_BID));
         return out;
     });

@@ -123,9 +123,17 @@ BOOST_AUTO_TEST_CASE(the_pages_read_and_never_bond_on_their_own)
     }
     // Bonds, unbonds, staking and proofs of possession go through the host, which asks the desktop.
     for (const char* m : {"createbond", "createunbond", "setstaking", "signbondpop"}) BOOST_CHECK_MESSAGE(!methods.contains(m), m);
-    BOOST_CHECK_EQUAL(methods.size(), 9U);
+    // And getanchorbidpolicy (the validator's anchor bid policy, read; setanchorbidpolicy is confirmed by the host) and
+    // getanchorticket (the block a mainchain commitment anchors).
+    BOOST_CHECK_EQUAL(methods.size(), 9U + 2U);
+    BOOST_CHECK(methods.contains("getanchorbidpolicy"));
+    BOOST_CHECK(methods.contains("getanchorticket"));
+    BOOST_CHECK(!methods.contains("setanchorbidpolicy"));
     BOOST_CHECK(webui::local::KeyedRpcMethods().empty());
-    BOOST_CHECK(webui::local::ConfirmedRpcMethods().empty());
+    const auto confirmed{webui::local::ConfirmedRpcMethods()};
+    BOOST_CHECK_EQUAL(confirmed.size(), 1U);
+    BOOST_CHECK(confirmed.contains("setanchorbidpolicy"));
+    BOOST_CHECK(confirmed.at("setanchorbidpolicy").kind == webui::confirm::Method::Kind::NODE);
 }
 
 BOOST_AUTO_TEST_CASE(staking_off_waits_for_the_desktop)
