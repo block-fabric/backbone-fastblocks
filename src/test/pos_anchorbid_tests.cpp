@@ -3,9 +3,16 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <pos/anchorbid.h>
+#include <addresstype.h>
+#include <script/solver.h>
+#include <pos/hooks.h>
+#include <sidechain/mainchain.h>
+#include <sidechain/state.h>
+#include <consensus/params.h>
 
 #include <sidechain/follower.h>
 #include <univalue.h>
+#include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -27,8 +34,16 @@ AnchorBidPolicy With(BidStrategy strategy)
 {
     AnchorBidPolicy policy;
     policy.strategy = strategy;
+    // The curve's escalation (the tests below it); the default's flat boost is flat_boost's own test.
+    policy.flat_boost = false;
+    policy.request_vsize = 190; // Legacy curve coverage.
+    policy.floor = 500;
+    policy.fixed = 500;
     return policy;
 }
+
+/** The policy of before the flat boost (a floor of 500, the curve), which the tests of the curve were written for. */
+AnchorBidPolicy Old() { return With(BidStrategy::FEES_PREVENT_STALL); }
 
 bool Close(double a, double b) { return std::abs(a - b) < 1e-9; }
 } // namespace
@@ -39,7 +54,9 @@ BOOST_AUTO_TEST_CASE(defaults)
 {
     const AnchorBidPolicy policy;
     BOOST_CHECK(policy.strategy == BidStrategy::FEES_PREVENT_STALL);
-    BOOST_CHECK_EQUAL(policy.floor, 500);
+    BOOST_CHECK_EQUAL(policy.floor, 0);
+    BOOST_CHECK(policy.flat_boost);
+    BOOST_CHECK(Close(policy.boost, 4));
     BOOST_CHECK_EQUAL(policy.max, 100'000);
     BOOST_CHECK_EQUAL(policy.fee_share_bps, 9900);
     BOOST_CHECK(Close(policy.escalation_start, 0.5));
@@ -48,6 +65,112 @@ BOOST_AUTO_TEST_CASE(defaults)
         BOOST_CHECK(ParseStrategy(StrategyName(s)) == s);
     }
     BOOST_CHECK(!ParseStrategy("standard"));
+}
+
+BOOST_AUTO_TEST_CASE(flat_boost)
+{
+    AnchorBidPolicy policy;
+    policy.fee_share_bps = 10000;
+    const auto bid{[&](double p, CAmount pot, int missed = 0) {
+        BidInputs in{At(p, 1410, pot)};
+        in.missed = missed;
+        return DecideBid(policy, in);
+    }};
+    // ceil(1.41 sat/vB) x 189 vB = 378 sat. Pending work requires a bid even without fees.
+    BOOST_CHECK_EQUAL(bid(0, 0).amount, 378);
+    BOOST_CHECK_EQUAL(bid(0, 300).amount, 378);
+    BOOST_CHECK_EQUAL(bid(0, 900).amount, 900);
+    BOOST_CHECK_EQUAL(bid(0.6, 0).amount, 1512);
+    BOOST_CHECK_EQUAL(bid(0.95, 0).amount, 1512);
+    BOOST_CHECK_EQUAL(bid(0.6, 900).amount, 1512);
+    BOOST_CHECK_EQUAL(bid(0.6, 5000).amount, 5000);
+    BOOST_CHECK_EQUAL(bid(0.6, 5000).kind, "fees");
+    BOOST_CHECK_EQUAL(bid(0.6, 0).kind, "boost");
+    BOOST_CHECK_EQUAL(bid(0.4, 0, 9).amount, 378);
+    BOOST_CHECK_EQUAL(bid(0.6, 0, 9).amount, 1512);
+    policy.max = 1000;
+    BOOST_CHECK_EQUAL(bid(0.6, 0).amount, 1000);
+    BOOST_CHECK_EQUAL(bid(0, 5000).amount, 1000);
+    policy.max = 100000;
+    policy.floor = 20000;
+    BOOST_CHECK_EQUAL(bid(0.95, 0).amount, 80000);
+    // The policy's fields: flatboost and boost, set and printed.
+    AnchorBidPolicy set;
+    std::string error;
+    UniValue fields(UniValue::VOBJ);
+    fields.pushKV("flatboost", false);
+    fields.pushKV("boost", 3);
+    BOOST_CHECK(ApplyPolicyFields(set, fields, error));
+    BOOST_CHECK(!set.flat_boost);
+    BOOST_CHECK(Close(set.boost, 3));
+    BOOST_CHECK_EQUAL(PolicyToUniValue(set).find_value("boost").get_real(), 3);
+}
+
+BOOST_AUTO_TEST_CASE(idle_and_relay_minimum)
+{
+    AnchorBidPolicy policy;
+    BidInputs in{At(0.1, 1410)};
+    in.pending_actions = false;
+    const auto quiet{DecideBid(policy, in)};
+    BOOST_CHECK(!quiet.bid);
+    BOOST_CHECK_EQUAL(quiet.kind, "idle");
+    BOOST_CHECK_EQUAL(quiet.reason, "skipped: nothing to anchor");
+    in.pending_actions = true; // deposits, withdrawals, refunds, staking payouts or epoch maintenance
+    BOOST_CHECK(DecideBid(policy, in).bid);
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 378);
+    in.pending_actions = false;
+    in.pot = 100;
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 378);
+    in.pot = 5000;
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 4950);
+    in.pot = 0;
+    in.slot = 5500; // threshold: boost even without pending actions
+    BOOST_CHECK(DecideBid(policy, in).bid);
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 1512);
+    in.relay_rate_per_kvb = 5000;
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 3780);
+    in.fee_rate_per_kvb.reset();
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 3780);
+    in.relay_rate_per_kvb = 1001; // relay amount rounds upward, not to the nearest satoshi
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 760);
+    in.fee_rate_per_kvb = 2000; // exact whole sat/vB is not rounded again
+    in.relay_rate_per_kvb = 1000;
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 1512);
+    policy.use_fee_estimate = false;
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 756);
+    policy.strategy = BidStrategy::FIXED;
+    policy.fixed = 123;
+    in.slot = 5100;
+    BOOST_CHECK_EQUAL(DecideBid(policy, in).amount, 123);
+    policy.strategy = BidStrategy::OFF;
+    BOOST_CHECK(!DecideBid(policy, in).bid);
+}
+
+BOOST_FIXTURE_TEST_CASE(pending_peg_actions, BasicTestingSetup)
+{
+    sidechain::EmptyStore empty;
+    sidechain::StoreOverlay store{empty};
+    sidechain::State side{store};
+    sidechain::Mainchain record;
+    sidechain::MainBlock block;
+    block.hash = uint256{1};
+    BOOST_REQUIRE(record.Append(block));
+    BOOST_CHECK(!HasPendingAnchorActions(side, record));
+    block.prev_hash = block.hash;
+    block.hash = uint256{2};
+    block.deposits.push_back(sidechain::MainDeposit{});
+    BOOST_REQUIRE(record.Append(block));
+    BOOST_CHECK(HasPendingAnchorActions(side, record));
+    // A reorg removes that uncredited deposit: no stale activity flag.
+    record.Truncate(0);
+    BOOST_CHECK(!HasPendingAnchorActions(side, record));
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{3}), 0});
+    tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, uint160{}, GetScriptForDestination(PKHash{uint160{}})));
+    std::vector<CTxOut> payouts, refunds;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(side.ApplyTx(CTransaction{tx}, 1, Consensus::SidechainParams{}, payouts, refunds, error), error);
+    BOOST_CHECK(HasPendingAnchorActions(side, record));
 }
 
 BOOST_AUTO_TEST_CASE(pressure_and_curve)
@@ -113,21 +236,21 @@ BOOST_AUTO_TEST_CASE(below_the_threshold_the_mempool_does_not_count)
 BOOST_AUTO_TEST_CASE(the_incident)
 {
     // eCash at ~1 sat/vB, a run at p = 0.92: the floor (500) is over 190 vB x 1 sat/vB x 4, the bid 760.
-    const AnchorBidPolicy policy;
+    const AnchorBidPolicy policy{Old()};
     BOOST_CHECK_EQUAL(DecideBid(policy, At(0.3, 1000)).amount, 500);
     BOOST_CHECK_EQUAL(DecideBid(policy, At(0.92, 1000)).amount, 760);
     // Without an estimate: the floor times the curve.
-    BOOST_CHECK_EQUAL(DecideBid(policy, At(0.92)).amount, 2000);
+    BOOST_CHECK_EQUAL(DecideBid(policy, At(0.92)).amount, 2256);
     // A floor of 0 escalates from 500 sat.
-    AnchorBidPolicy zero;
+    AnchorBidPolicy zero{Old()};
     zero.floor = 0;
     const auto quiet{DecideBid(zero, At(0.1))};
     BOOST_CHECK(quiet.bid);
     BOOST_CHECK_EQUAL(quiet.amount, 0);
-    BOOST_CHECK_EQUAL(DecideBid(zero, At(0.92)).amount, 2000);
+    BOOST_CHECK_EQUAL(DecideBid(zero, At(0.92)).amount, 2256);
     // Not with the estimate off.
     zero.use_fee_estimate = false;
-    BOOST_CHECK_EQUAL(DecideBid(zero, At(0.92, 50'000)).amount, 2000);
+    BOOST_CHECK_EQUAL(DecideBid(zero, At(0.92, 50'000)).amount, 2256);
 }
 
 BOOST_AUTO_TEST_CASE(fee_share)
@@ -143,7 +266,7 @@ BOOST_AUTO_TEST_CASE(fee_share)
     BOOST_CHECK_EQUAL(share.kind, "fees");
     // Fees alone never escalates; fees + prevent stalling does, only when needed.
     BOOST_CHECK_EQUAL(DecideBid(fees, At(0.95, 1'000'000)).amount, 500);
-    const AnchorBidPolicy both;
+    const AnchorBidPolicy both{Old()};
     BOOST_CHECK_EQUAL(DecideBid(both, At(0.2, 1'000'000, 50'000)).amount, 49'500);
     BOOST_CHECK_EQUAL(DecideBid(both, At(0.95, 100'000, 50'000)).amount, 76'000);
     AnchorBidPolicy whole{fees};
@@ -171,6 +294,23 @@ BOOST_AUTO_TEST_CASE(rebid_and_caps)
     BOOST_CHECK_EQUAL(DecideBid(policy, in).kind, "periodcap");
     in.spent_in_period = policy.period_cap;
     BOOST_CHECK(!DecideBid(policy, in).bid);
+}
+
+BOOST_AUTO_TEST_CASE(replacement_limits)
+{
+    AnchorBidPolicy policy;
+    policy.max = 1600;
+    // A fee increase and a stall boost can replace the request within the operator's limits.
+    BOOST_REQUIRE(ReplacementBid(policy, 1512, 378, 0));
+    BOOST_CHECK_EQUAL(*ReplacementBid(policy, 1512, 378, 0), 1512);
+    BOOST_CHECK_EQUAL(*ReplacementBid(policy, 500, 378, 0), 878);
+    // The replacement increment must never bypass either spending limit.
+    BOOST_CHECK(!ReplacementBid(policy, 1500, 1200, 0));
+    policy.period_cap = 1000;
+    BOOST_CHECK(!ReplacementBid(policy, 500, 378, 200));
+    BOOST_CHECK(!ReplacementBid(policy, 500, 378, 1000));
+    policy.period_cap = 0;
+    BOOST_CHECK(ReplacementBid(policy, 500, 378, 1000));
 }
 
 BOOST_AUTO_TEST_CASE(fields_and_checks)

@@ -97,6 +97,13 @@ beforeEach(() => {
 afterEach(() => setTransport(null));
 
 describe('the anchor bid panel', () => {
+  it('explains the dynamic base and shows a skipped idle bid', async () => {
+    bid = { ...BID, effective: 0, normal: 0, kind: 'idle', reason: 'skipped: nothing to anchor', pressure: 0.1 };
+    render(AnchorBidPanel);
+    await waitFor(() => expect(document.getElementById('anchor-bid-reason')?.textContent).toBe('skipped: nothing to anchor'));
+    expect(PRESETS.find((p) => p.id === 'feespreventstall')?.text).toMatch(/rounded up to whole sat\/vB/);
+  });
+
   it('shows the bid now and why, the run and its pressure, the wallet, the warnings and the last bids', async () => {
     render(AnchorBidPanel);
     await waitFor(() => expect(document.getElementById('anchor-bid-reason')?.textContent).toMatch(/escalation at p=0.92/));
@@ -122,7 +129,7 @@ describe('the anchor bid panel', () => {
     expect(screen.getByText('Fees + prevent stalling')).toBeTruthy();
     expect(
       screen.getByText(
-        'Bids exactly the fee share it owes when there are fees, and sends a stall boost only when needed. Its minimum may be set to 0 (bid nothing when there are no fees and no stall pressure); 500 sat is the default minimum.',
+        PRESETS.find((p) => p.id === 'feespreventstall')!.text,
       ),
     ).toBeTruthy();
   });
