@@ -167,9 +167,9 @@ BOOST_FIXTURE_TEST_CASE(pending_peg_actions, BasicTestingSetup)
     CMutableTransaction tx;
     tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{3}), 0});
     tx.vout.emplace_back(COIN, sidechain::WithdrawalScript(1000, uint160{}, GetScriptForDestination(PKHash{uint160{}})));
-    std::vector<CTxOut> payouts, refunds;
+    std::vector<CTxOut> payouts;
     std::string error;
-    BOOST_REQUIRE_MESSAGE(side.ApplyTx(CTransaction{tx}, 1, Consensus::SidechainParams{}, payouts, refunds, error), error);
+    BOOST_REQUIRE_MESSAGE(side.ApplyTx(CTransaction{tx}, 1, Consensus::SidechainParams{}, payouts, error), error);
     BOOST_CHECK(HasPendingAnchorActions(side, record));
 }
 

@@ -891,8 +891,8 @@ public:
         consensus.pos.set_lead_seconds = 9 * 3600;       // as long: the set fixed before the seed (an epoch on Chains)
         // The long-gap rule (user requirement 2026-10-24: blocks of stake go on for at least 24 hours without BMM, the
         // clock running from the last BMM commitment that landed in an eCash block, whether eCash is silent or our
-        // bids are priced out), from gap_epoch: every network of Flush on eCash from its first epoch, but slot 99
-        // (above), from the epoch it halted in. The values above stay for the epochs before it. With margin:
+        // bids are priced out), from gap_epoch: every eCash network of this chain from its first epoch (not launched:
+        // no epoch of before). With margin:
         // - the unanchored limit, 24 hours (user decision: at most 24 hours without BMM, then the halt), counts from the
         //   first block of stake no anchor covers, which comes about one eCash block interval before the commitment
         //   lands (its BMM block was made before that block was found): 24 hours from just before the landing, ten

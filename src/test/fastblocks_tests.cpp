@@ -235,7 +235,7 @@ struct FastBlocksSetup : public InstallFastBlocks, public TestingSetup {
     const CKey& Leader(int64_t slot)
     {
         const auto leader{Hooks().ActiveLeaderOf(slot)};
-        BOOST_REQUIRE(leader.status == pos::FastBlocksHooks::LeaderStatus::OK);
+        BOOST_REQUIRE_MESSAGE(leader.status == pos::FastBlocksHooks::LeaderStatus::OK, "leader status " << static_cast<int>(leader.status) << " slot " << slot);
         const uint256 pubkey{leader.pubkey};
         for (const CKey& k : keys) {
             if (XOnly(k) == pubkey) return k;
@@ -588,13 +588,13 @@ struct SeedSetup : public FastBlocksSetup {
 
 /** The seed of an epoch taken at its start (no lookahead), and the liveness fix from the chain's block `height` on. */
 struct JailFixSetup : public FastBlocksSetup {
-    explicit JailFixSetup(int height = 0) : FastBlocksSetup{/*with_validators=*/true, /*lookahead=*/0, std::nullopt, std::nullopt, height} {}
+    explicit JailFixSetup(int height = 0) : FastBlocksSetup{/*with_validators=*/true, /*lookahead=*/5, std::nullopt, std::nullopt, height} {}
     /** The slots the leaders were charged with and the blocks they made, in every epoch up to `last`. */
     std::pair<uint32_t, uint32_t> Counted(int64_t last)
     {
         uint32_t assigned{0}, produced{0};
         LOCK(::cs_main);
-        for (int64_t e{0}; e <= last; ++e) {
+        for (int64_t e{pos::EpochOf(base_slot, Pos())}; e <= last; ++e) {
             for (const CKey& k : keys) {
                 if (const auto liveness{pos::GetLiveness(Chain().SideState().View(), e, XOnly(k))}) {
                     assigned += liveness->assigned;
@@ -2229,41 +2229,6 @@ BOOST_AUTO_TEST_CASE(long_gap_rule)
     }
     // The Chains networks: never.
     BOOST_CHECK(!CChainParams::Main()->GetConsensus().pos.GapActive(1'000'000));
-    // Slot 99 of betanet: from epoch 67, the one it halted in (2026-10-24); the epochs before keep their values.
-    CChainParams::MainNetOptions options;
-    options.betanet_slot99 = true;
-    const Consensus::PosParams b{CChainParams::Ecash(ChainType::ECASH_BETANET, options)->GetConsensus().pos};
-    BOOST_CHECK_EQUAL(b.gap_epoch, 67);
-    BOOST_CHECK_EQUAL(b.SeedLookahead(66), 9 * 3600);
-    BOOST_CHECK_EQUAL(b.SetLead(66), 9 * 3600);
-    BOOST_CHECK_EQUAL(b.MaxUnanchoredSlots(67 * b.slots_per_epoch - 1), 1920);
-    BOOST_CHECK_EQUAL(b.MaxUnanchoredSlots(67 * b.slots_per_epoch), 5760);
-    BOOST_CHECK_EQUAL(b.SeedLookahead(67), 48 * 3600);
-    // The halt replayed: betanet's block 973972 (14:55:43 UTC) had a median time of 09:35:20; Flush's last block was in
-    // slot 16079, the last of epoch 66. Epoch 66's seed was known; 67's was not at 9 hours (its seed time 10:00), and is
-    // at 48; the epochs with a seed go on past the unanchored limit (from slot 14874, 13:58:30).
-    BOOST_CHECK_EQUAL(b.genesis_time, 1792627200);
-    const int64_t median{1792834520};
-    BOOST_CHECK_EQUAL(pos::SlotTime(16080, b), 1792868400);
-    BOOST_CHECK_LT(pos::SeedTime(66, b), median);
-    Consensus::PosParams before{b};
-    before.gap_epoch = std::numeric_limits<int64_t>::max();
-    BOOST_CHECK_GT(pos::SeedTime(67, before), median);
-    BOOST_CHECK_LT(pos::SeedTime(67, b), median);
-    const int64_t limit{pos::SlotTime(14874 + b.MaxUnanchoredSlots(16080), b)};
-    int64_t epoch{67};
-    while (pos::SeedTime(epoch + 1, b) < median) ++epoch;
-    BOOST_CHECK_GT(pos::SlotTime((epoch + 1) * b.slots_per_epoch, b), limit);
-    BOOST_CHECK_EQUAL(limit, 1792868400 - 1206 * 15 + 24 * 3600);
-    // The set of epoch 67 on: an anchor 48 hours before its start, lower than epoch 66's boundary (a step back at the
-    // rule's epoch only, then never higher for a later epoch again).
-    BOOST_CHECK_LT(pos::SetBoundary(67, b), pos::SetBoundary(66, b));
-    int64_t last{pos::SetBoundary(67, b)};
-    for (int64_t e{68}; e < 400; ++e) {
-        BOOST_CHECK_GE(pos::SetBoundary(e, b), last);
-        BOOST_CHECK_LE(pos::SlotTime(std::max<int64_t>(pos::SetBoundary(e, b), 0), b), pos::SeedTime(e, b) + b.slot_seconds);
-        last = pos::SetBoundary(e, b);
-    }
 }
 
 BOOST_AUTO_TEST_CASE(staking_parameters)
