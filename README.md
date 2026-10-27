@@ -10,7 +10,7 @@ that eCash miners vote on. It follows its mainchain either through [Backbone](ht
 (`backboned`, our client of the eCash networks) or through a plain eCash node with LayerTwo Labs'
 `bip300301_enforcer`, over the enforcer's interface alone (`-mainchaingrpc`).
 
-| | `ecash` (eCash main network) | `ecashbeta` (betanet, **the default**) | `ecashtest` (test network) |
+| | `ecash` (eCash main network, **the default**) | `ecashbeta` (betanet) | `ecashtest` (test network) |
 |---|---|---|---|
 | Slot on the mainchain | 45 | 45 | 45 |
 | Coin | ECX, deposited from eCash and withdrawn back to it | the same | the same |
@@ -66,12 +66,13 @@ mainchain need a built Backbone tree (`MAINCHAIN_BIN_DIR`, the folder of `backbo
 
 FastBlocks needs an eCash mainchain on the same network, in one of two ways.
 
-**With Backbone** (`backboned -chain=ecashbeta`, RPC on): FastBlocks finds it by itself, over JSON-RPC at
+**With Backbone** (`backboned`, `-chain=ecashbeta` for betanet, RPC on): FastBlocks finds it by itself, over JSON-RPC at
 127.0.0.1 on Backbone's port (8532 for `ecash` and `ecashbeta`, 48532 for `ecashtest`) with the cookie in
 Backbone's data folder (`~/.backbone`, `~/.backbone/betanet`, `~/.backbone/testnet4`):
 
 ```sh
-fastblocks-app                       # betanet, the default (-chain=ecashbeta)
+fastblocks-app                       # eCash's main network, the default (-chain=ecash)
+fastblocks-app -chain=ecashbeta      # betanet
 fastblocksd -chain=ecashtest         # the test network, without a window
 ```
 
@@ -79,8 +80,9 @@ fastblocksd -chain=ecashtest         # the test network, without a window
 the mainchain through the enforcer's gRPC interface alone, with no JSON-RPC access to the eCash node:
 
 ```sh
-fastblocksd -chain=ecashbeta -mainchaingrpc=127.0.0.1:8123        # the enforcer's port on betanet
-fastblocksd -chain=ecash -mainchaingrpc=127.0.0.1:50051 -mainchaingrpcauth=<token>   # or Backbone's -grpc
+fastblocksd -mainchaingrpc=127.0.0.1:50051                         # the enforcer's gRPC (its --serve-grpc-addr)
+fastblocksd -chain=ecashbeta -mainchaingrpc=127.0.0.1:8123          # betanet, an enforcer on 8123
+fastblocksd -mainchaingrpc=127.0.0.1:50051 -mainchaingrpcauth=<token>   # or Backbone's -grpc
 ```
 
 Withdrawal bundles are handed to the enforcer's block producer once the mainchain block that committed to
@@ -106,8 +108,8 @@ The networks have no DNS seeds: give the node a peer with `addnode`. A sample `~
 ```ini
 server=1
 fallbackfee=0.0002
-# The network (ecashbeta when not set):
-# chain=ecashtest
+# The network (ecash, eCash's main network, when not set):
+# chain=ecashbeta
 
 [ecashbeta]
 addnode=<peer>:38155

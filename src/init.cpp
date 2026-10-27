@@ -499,11 +499,11 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
 
     init::AddLoggingArgs(argsman);
 
-    const auto defaultBaseParams = CreateBaseChainParams(DEFAULT_CHAIN_TYPE); // FastBlocks: ecashbeta
+    const auto defaultBaseParams = CreateBaseChainParams(DEFAULT_CHAIN_TYPE); // FastBlocks: ecash
     const auto testnetBaseParams = CreateBaseChainParams(ChainType::TESTNET);
     const auto signetBaseParams = CreateBaseChainParams(ChainType::SIGNET);
     const auto regtestBaseParams = CreateBaseChainParams(ChainType::REGTEST);
-    const auto defaultChainParams = CreateChainParams(argsman, DEFAULT_CHAIN_TYPE); // FastBlocks: ecashbeta
+    const auto defaultChainParams = CreateChainParams(argsman, DEFAULT_CHAIN_TYPE); // FastBlocks: ecash
     const auto testnetChainParams = CreateChainParams(argsman, ChainType::TESTNET);
     const auto signetChainParams = CreateChainParams(argsman, ChainType::SIGNET);
     const auto regtestChainParams = CreateChainParams(argsman, ChainType::REGTEST);
